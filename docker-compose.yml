@@ -1,0 +1,26 @@
+services:
+  pulse-network-monitor:
+    build: .
+    container_name: pulse-network-monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "5354:5354/udp"
+      - "5140:5140/udp"
+    volumes:
+      - ./data:/app/data
+      - ./public:/app/public
+      - ./pulse_monitor:/app/pulse_monitor
+      - ./server.py:/app/server.py
+      - ./monitor.py:/app/monitor.py
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      - PULSE_LAN_SUBNETS=192.168.0.0/22
+      - PULSE_ROUTER_IP=192.168.0.1
+      - TZ=Asia/Manila
+    # On a Linux Docker host, you can uncomment the line below (and remove `ports:`)
+    # to run directly on the physical host interface for native Layer-2 ARP + NIC rx/tx counters:
+    # network_mode: host
+

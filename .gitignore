@@ -1,0 +1,21 @@
+# Python / Virtualenv / Cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node / IDE / Environment
+node_modules/
+.vscode/
+.env
+.env.*
+
+# Runtime / Local SQLite & Device Config Data (keep company LAN data private)
+data/*
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.tmp
+*.bak

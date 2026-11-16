@@ -1,0 +1,776 @@
+/* Pulse Network Monitor — Interactive Company Network Map & Fault Isolation Styles */
+
+.topo-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 1180px) {
+  .topo-kpi-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .topo-kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.topo-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--box-inner-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  margin-bottom: 10px;
+}
+
+.topo-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.topo-tool-btn.active {
+  background: #049fd9;
+  color: #ffffff;
+  border-color: #049fd9;
+  box-shadow: 0 0 0 2px rgba(0, 188, 235, 0.22);
+}
+
+.topo-cable-select {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.topo-instant-cable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.topo-instant-cable-toggle input {
+  accent-color: #049fd9;
+  cursor: pointer;
+}
+
+.topo-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--status-info-bg);
+  border: 1px solid var(--status-info-border);
+  color: var(--status-info-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.topo-mode-banner.warning {
+  background: var(--status-warn-bg);
+  border-color: var(--status-warn-border);
+  color: var(--status-warn-text);
+}
+
+.topo-mode-banner.critical {
+  background: var(--status-down-bg);
+  border-color: var(--status-down-border);
+  color: var(--status-down-text);
+}
+
+.topo-workspace-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 310px;
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+@media (max-width: 1100px) {
+  .topo-workspace-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.topo-canvas-viewport {
+  position: relative;
+  min-height: 500px;
+  height: 540px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background-color: var(--box-inner-bg);
+  background-image:
+    radial-gradient(circle, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
+    linear-gradient(to right, rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px, 96px 96px, 96px 96px;
+}
+
+[data-theme="light"] .topo-canvas-viewport {
+  background-image:
+    radial-gradient(circle, rgba(15, 23, 42, 0.16) 1px, transparent 1px),
+    linear-gradient(to right, rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+}
+
+.topo-canvas-viewport.drag-over {
+  border-color: var(--accent-cyan);
+  box-shadow: inset 0 0 0 2px rgba(0, 188, 235, 0.35), 0 0 0 3px rgba(0, 188, 235, 0.15);
+}
+
+.topo-stage {
+  position: relative;
+  width: 1120px;
+  height: 680px;
+  transform-origin: 0 0;
+}
+
+.topo-svg-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: auto;
+}
+
+.topo-nodes-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Topology SVG Cable Styles */
+.topo-link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 16;
+  cursor: pointer;
+}
+
+.topo-link-line {
+  fill: none;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.topo-link-line.copper {
+  stroke: var(--accent-green);
+}
+
+.topo-link-line.fiber {
+  stroke: var(--accent-cyan);
+  stroke-width: 3.4;
+}
+
+.topo-link-line.wireless {
+  stroke: var(--accent-blue);
+  stroke-dasharray: 6 5;
+}
+
+.topo-link-line.wan {
+  stroke: var(--accent-purple);
+  stroke-width: 3;
+}
+
+.topo-link-line.state-down,
+.topo-link-line.state-disconnected {
+  stroke: var(--accent-red);
+  stroke-dasharray: 7 4;
+}
+
+.topo-link-line.state-no_internet,
+.topo-link-line.state-degraded {
+  stroke: var(--accent-amber);
+  stroke-dasharray: 5 4;
+}
+
+.topo-link-line.state-unknown {
+  stroke: var(--text-dim);
+}
+
+.topo-link-line.dimmed {
+  opacity: 0.25;
+}
+
+.topo-rubberband-line {
+  fill: none;
+  stroke: var(--accent-cyan);
+  stroke-width: 2.8;
+  stroke-dasharray: 7 5;
+  stroke-linecap: round;
+  pointer-events: none;
+  opacity: 0.92;
+}
+
+.topo-port-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  fill: var(--text-dim);
+  pointer-events: none;
+}
+
+.topo-led-up { fill: #14b8a6; stroke: var(--bg-card); stroke-width: 1.2; }
+.topo-led-warn { fill: #f59e0b; stroke: var(--bg-card); stroke-width: 1.2; }
+.topo-led-down { fill: #f43f5e; stroke: var(--bg-card); stroke-width: 1.2; }
+.topo-led-muted { fill: #64748b; stroke: var(--bg-card); stroke-width: 1.2; }
+
+/* Draggable Network Device Node */
+.topo-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 148px;
+  padding: 9px 9px 8px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1.5px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+  text-align: center;
+  cursor: grab;
+  user-select: none;
+  pointer-events: auto;
+  transition: box-shadow 0.14s ease, border-color 0.14s ease, opacity 0.14s ease;
+  z-index: 4;
+}
+
+.topo-node:hover {
+  border-color: var(--accent-cyan);
+  z-index: 8;
+}
+
+.topo-node.selected {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 3px rgba(0, 188, 235, 0.3), var(--shadow-card);
+  z-index: 9;
+}
+
+.topo-node.cable-source {
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.35);
+}
+
+.topo-node.dimmed {
+  opacity: 0.32;
+}
+
+.topo-node.state-down,
+.topo-node.state-disconnected {
+  border-color: var(--accent-red);
+  background: var(--row-down-bg);
+  animation: topoAlertPulseRed 1.8s infinite;
+  z-index: 7;
+}
+
+.topo-node.state-no_internet,
+.topo-node.state-degraded {
+  border-color: var(--accent-amber);
+  background: var(--row-warn-bg);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22);
+  z-index: 6;
+}
+
+.topo-node.state-online {
+  border-color: var(--status-up-border);
+}
+
+@keyframes topoAlertPulseRed {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(244, 63, 94, 0.15); }
+}
+
+.topo-node-icon {
+  width: 44px;
+  height: 36px;
+  margin: 0 auto 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.topo-node-cable-btn {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--box-inner-bg);
+  color: var(--accent-cyan);
+  font-size: 0.7rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.72;
+  transition: opacity 0.14s ease, transform 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+}
+
+.topo-node:hover .topo-node-cable-btn,
+.topo-node.selected .topo-node-cable-btn,
+.topo-node.cable-source .topo-node-cable-btn {
+  opacity: 1;
+}
+
+.topo-node-cable-btn:hover {
+  background: #049fd9;
+  border-color: #049fd9;
+  color: #ffffff;
+  transform: scale(1.1);
+}
+
+.topo-node.cable-source .topo-node-cable-btn {
+  background: var(--accent-amber);
+  border-color: var(--accent-amber);
+  color: #ffffff;
+}
+
+.topo-node-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.topo-node-badge.online {
+  background: var(--status-up-bg);
+  color: var(--status-up-text);
+  border: 1px solid var(--status-up-border);
+}
+
+.topo-node-badge.down,
+.topo-node-badge.disconnected {
+  background: var(--status-down-bg);
+  color: var(--status-down-text);
+  border: 1px solid var(--status-down-border);
+}
+
+.topo-node-badge.no_internet,
+.topo-node-badge.degraded {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-text);
+  border: 1px dashed var(--status-warn-border);
+}
+
+.topo-node-badge.unknown {
+  background: var(--chip-bg);
+  color: var(--text-dim);
+  border: 1px solid var(--border-subtle);
+}
+
+.topo-node-name {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-main);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topo-node-ip {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.67rem;
+  color: var(--accent-cyan);
+  margin-top: 1px;
+}
+
+.topo-node-lat {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.64rem;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+/* Animated Ping Envelope */
+.topo-pdu-packet {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 26px;
+  height: 18px;
+  border-radius: 4px;
+  background: #049fd9;
+  border: 1.5px solid #ffffff;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 800;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  z-index: 25;
+  transition: left 0.42s linear, top 0.42s linear, background-color 0.2s ease;
+}
+
+.topo-pdu-packet.fail {
+  background: var(--accent-red);
+}
+
+.topo-pdu-packet.ok {
+  background: var(--accent-green);
+}
+
+.topo-empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.topo-empty-card {
+  pointer-events: auto;
+  max-width: 520px;
+  background: var(--bg-card);
+  border: 1px dashed var(--border-highlight);
+  border-radius: var(--radius-lg);
+  padding: 24px 26px;
+  text-align: center;
+  box-shadow: var(--shadow-card);
+}
+
+/* Right Device Inspector Drawer */
+.topo-inspector {
+  background: var(--box-inner-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 540px;
+  overflow-y: auto;
+}
+
+.topo-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.topo-inspector-kv {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 5px 8px;
+  font-size: 0.77rem;
+}
+
+.topo-inspector-kv span {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+/* Lower Packet-Tracer Hardware Palette Tray */
+.topo-dock,
+.topo-pt-tray {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--box-inner-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  margin-bottom: 18px;
+}
+
+.topo-dock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.topo-dock-items,
+.topo-pt-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.topo-dock-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 9px 8px 8px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-family: inherit;
+  cursor: grab;
+  transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
+}
+
+.topo-dock-card:active {
+  cursor: grabbing;
+}
+
+.topo-dock-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 4px 12px rgba(0, 188, 235, 0.16);
+}
+
+.topo-dock-card.topo-dock-cable {
+  border-style: dashed;
+  border-color: var(--accent-amber);
+  cursor: pointer;
+}
+
+.topo-dock-card.topo-dock-cable.active {
+  border-style: solid;
+  border-color: #049fd9;
+  background: rgba(4, 159, 217, 0.14);
+  box-shadow: 0 0 0 2px rgba(0, 188, 235, 0.25);
+}
+
+.topo-dock-card-svg {
+  width: 44px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.topo-cable-bolt {
+  font-size: 1.45rem;
+  color: var(--accent-amber);
+}
+
+.topo-dock-card-title {
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: var(--text-main);
+  line-height: 1.15;
+  pointer-events: none;
+}
+
+.topo-dock-card-sub {
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  line-height: 1.15;
+  pointer-events: none;
+}
+
+/* Packet-Tracer-Style Add / Edit Node Modal Pickers */
+.topo-node-modal-box {
+  max-width: 720px;
+}
+
+.topo-place-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: rgba(0, 188, 235, 0.15);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(0, 188, 235, 0.35);
+}
+
+.topo-type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.topo-type-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 6px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border-subtle);
+  background: var(--box-inner-bg);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.73rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.topo-type-card:hover {
+  border-color: var(--accent-cyan);
+}
+
+.topo-type-card.selected {
+  border-color: #049fd9;
+  background: rgba(4, 159, 217, 0.14);
+  box-shadow: 0 0 0 2px rgba(0, 188, 235, 0.24);
+}
+
+.topo-connect-picker-box {
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--box-inner-bg);
+  border: 1px solid var(--border-subtle);
+}
+
+.topo-cable-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.topo-cable-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1.5px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.topo-cable-pill:hover {
+  border-color: var(--accent-cyan);
+}
+
+.topo-cable-pill.selected {
+  border-color: #049fd9;
+  background: rgba(4, 159, 217, 0.16);
+  color: var(--accent-cyan);
+}
+
+.topo-connect-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  gap: 8px;
+  max-height: 184px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.topo-connect-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-main);
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.topo-connect-card:hover:not(:disabled) {
+  border-color: var(--accent-cyan);
+}
+
+.topo-connect-card.selected {
+  border-color: var(--accent-green);
+  background: rgba(20, 184, 166, 0.14);
+  box-shadow: 0 0 0 2px rgba(20, 184, 166, 0.22);
+}
+
+.topo-connect-card.already-linked {
+  opacity: 0.72;
+  border-style: dashed;
+  cursor: default;
+}
+
+.topo-connect-card-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.topo-connect-card-name {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topo-connect-card-sub {
+  font-size: 0.67rem;
+  color: var(--accent-cyan);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.topo-connect-card-tag {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 0.64rem;
+  font-weight: 800;
+  color: var(--text-dim);
+}
+
+.topo-connect-card.selected .topo-connect-card-tag {
+  color: var(--accent-green);
+}
+
+/* Lower Devices & Logs Panels Right Below Topology */
+.topo-lower-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.topo-lower-panel {
+  background: var(--box-inner-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+}
+

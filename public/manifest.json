@@ -1,0 +1,10 @@
+{
+  "name": "Pulse Network Monitor",
+  "short_name": "PulseNet",
+  "description": "Live company network monitoring, device uptime, ISP speed, port security, and topology map.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#091220",
+  "theme_color": "#091220"
+}
+
