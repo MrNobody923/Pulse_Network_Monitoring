@@ -785,6 +785,55 @@ class InventoryTests(unittest.TestCase):
         self.assertIsNone(self.monitor._should_sinkhole_query("192.168.1.77", "google.com", None, blocks2))
         self.monitor.unblock_game_rule(res_game["ruleId"])
 
+    def test_realtime_game_prevention_and_sensor_telemetry(self) -> None:
+        self.monitor._skip_live_probe_in_test = True
+
+        # 1. Subdomain matching catches live mobile regions without TikTok CDN false positives
+        self.assertIsNotNone(self.monitor._match_game_signature(domain="sea-api-02.youngjoygame.com"))
+        self.assertIsNotNone(self.monitor._match_game_signature(domain="dl.codm.garena.com"))
+        self.assertIsNone(self.monitor._match_game_signature(domain="byteoversea.com"))
+
+        # 2. DoH canary NXDOMAIN detection (prevents mobile browsers/Private Relay DNS bypass)
+        self.assertTrue(self.monitor._is_doh_canary_domain("use-application-dns.net"))
+        self.assertTrue(self.monitor._is_doh_canary_domain("mask.icloud.com"))
+        nxd_q = b"\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04mask\x06icloud\x03com\x00\x00\x01\x00\x01"
+        nxd_reply = self.monitor._build_dns_nxdomain_reply(nxd_q)
+        self.assertEqual(nxd_reply[0:4], b"\xab\xcd\x81\x83")  # RCODE=3 NXDOMAIN
+
+        # 3. Sensor heartbeat populates live readiness & synchronizes policy
+        hb = self.monitor.record_gaming_sensor_heartbeat({
+            "dnsHost": "192.168.0.224",
+            "dnsQueriesTotal": 42,
+            "dnsClients": {"192.168.1.77": "2026-11-16T12:00:00Z"},
+            "lastDnsClientIp": "192.168.1.77",
+            "lastDnsDomain": "api.mobilelegends.com",
+        })
+        self.assertTrue(hb["success"])
+
+        # 4. Auto-prevention mode immediately blocks opened games at detection time
+        pol_res = self.monitor.set_gaming_policy({"preventionMode": "auto_block_game"})
+        self.assertTrue(pol_res["policy"]["autoPreventEnabled"])
+        auto_det = self.monitor.record_game_detection({
+            "ip": "192.168.1.77",
+            "domain": "sea-api-02.youngjoygame.com",
+            "detectionMethod": "Live DNS Auto-Prevent (192.168.0.224:53)",
+        })
+        self.assertTrue(auto_det["autoPrevented"])
+        self.assertTrue(auto_det["blocked"])
+        blocks = self.monitor.get_game_blocks()
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["gameId"], "mlbb")
+        self.assertEqual(blocks[0]["ip"], "192.168.1.77")
+
+        activity = self.monitor.get_game_activity(50)
+        self.assertEqual(activity["policy"]["preventionMode"], "auto_block_game")
+        self.assertTrue(activity["sensorStatus"]["sensorOnline"])
+        self.assertTrue(activity["sensorStatus"]["dnsInterceptReady"])
+        self.assertEqual(activity["sensorStatus"]["dnsClientsCount"], 1)
+
+        self.monitor.unblock_game_rule(auto_det["ruleId"])
+        self.monitor.set_gaming_policy({"preventionMode": "alert_only"})
+
 
 if __name__ == "__main__":
     unittest.main()

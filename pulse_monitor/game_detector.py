@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import os
 import re
 import socket
 import ssl
 import struct
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+
+if os.name == "nt":
+    import winreg
 
 from .config import utc_now, validate_ip
 
@@ -23,7 +29,22 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile MOBA · 5v5",
         "icon": "⚔️",
         "isMobile": True,
-        "domains": ("ml.youngjoygame.com", "youngjoygame.com", "api.mobilelegends.com", "log.mobilelegends.com", "m.mobilelegends.com", "mobilelegends.com", "moonton.com", "moonton.net", "yuanzhanapp.com", "akmweb.youngjoygame.com", "byteoversea.com"),
+        "domains": (
+            "ml.youngjoygame.com",
+            "youngjoygame.com",
+            "api.mobilelegends.com",
+            "log.mobilelegends.com",
+            "m.mobilelegends.com",
+            "mobilelegends.com",
+            "mlbb.com",
+            "moonton.com",
+            "moonton.net",
+            "moontongame.com",
+            "moontontech.com",
+            "yuanzhanapp.com",
+            "akmweb.youngjoygame.com",
+        ),
+        "domainKeywords": ("mobilelegends", "youngjoygame", "moonton", "yuanzhanapp", "mlbb.com"),
         "ports": (5000, 5001, 5002, 5551, 30090, 30091),
         "processes": (),
     },
@@ -33,7 +54,22 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile FPS Shooter",
         "icon": "🎯",
         "isMobile": True,
-        "domains": ("codm.activision.com", "activision.com", "garena.codm.com", "demonware.net", "proximabeta.com"),
+        "domains": (
+            "codm.garena.com",
+            "garena.codm.com",
+            "codm.garenanow.com",
+            "dl.codm.garena.com",
+            "tgl.garena.com",
+            "auth.garena.com",
+            "connect.garena.com",
+            "codm.activision.com",
+            "activision.com",
+            "callofduty.com",
+            "demonware.net",
+            "proximabeta.com",
+            "intlgame.com",
+        ),
+        "domainKeywords": ("codm.", "activision", "callofduty", "demonware", "proximabeta", "intlgame"),
         "ports": (7500, 7501, 10012),
         "processes": (),
     },
@@ -43,7 +79,20 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Battle Royale",
         "icon": "🪂",
         "isMobile": True,
-        "domains": ("igamecj.com", "gcloudsdk.com", "pubgmobile.com", "www.pubgmobile.com", "tencent-cloud.net", "myqcloud.com", "gcloud.qq.com"),
+        "domains": (
+            "igamecj.com",
+            "gcloudsdk.com",
+            "pubgmobile.com",
+            "www.pubgmobile.com",
+            "pubg.com",
+            "krafton.com",
+            "lightspeed-studios.com",
+            "gameloop.com",
+            "tencent-cloud.net",
+            "myqcloud.com",
+            "gcloud.qq.com",
+        ),
+        "domainKeywords": ("pubgmobile", "igamecj", "gcloudsdk", "lightspeed-studios", "gameloop"),
         "ports": (17500, 20001),
         "processes": (),
     },
@@ -53,7 +102,15 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile MOBA · 5v5",
         "icon": "👑",
         "isMobile": True,
-        "domains": ("honorofkings.com", "smoba.qq.com", "anticheatexpert.com", "worldofkings.com", "sgp.qq.com"),
+        "domains": (
+            "honorofkings.com",
+            "smoba.qq.com",
+            "anticheatexpert.com",
+            "worldofkings.com",
+            "sgp.qq.com",
+            "levelinfinite.com",
+        ),
+        "domainKeywords": ("honorofkings", "worldofkings", "smoba.qq", "levelinfinite"),
         "ports": (10010, 10011),
         "processes": (),
     },
@@ -63,7 +120,16 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile MOBA · 5v5",
         "icon": "⚡",
         "isMobile": True,
-        "domains": ("wildrift.leagueoflegends.com", "auth.riotgames.com", "riotcdn.net", "leagueoflegends.com", "rgpub.io", "riotgames.net"),
+        "domains": (
+            "wildrift.leagueoflegends.com",
+            "teamfighttactics.leagueoflegends.com",
+            "auth.riotgames.com",
+            "riotcdn.net",
+            "leagueoflegends.com",
+            "rgpub.io",
+            "riotgames.net",
+        ),
+        "domainKeywords": ("wildrift", "riotcdn", "leagueoflegends", "rgpub.io", "riotgames.net"),
         "ports": (5223,),
         "processes": ("League of Legends.exe", "LeagueClientUx.exe"),
     },
@@ -73,7 +139,18 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile / PC Action RPG",
         "icon": "✨",
         "isMobile": True,
-        "domains": ("sg-public-api.hoyoverse.com", "sdk-os-static.hoyoverse.com", "hoyoverse.com", "mihoyo.com", "yuanshen.com", "starrails.com"),
+        "domains": (
+            "sg-public-api.hoyoverse.com",
+            "sdk-os-static.hoyoverse.com",
+            "hoyoverse.com",
+            "hoyolab.com",
+            "mihoyo.com",
+            "yuanshen.com",
+            "starrails.com",
+            "zenlesszonezero.com",
+            "honkaiimpact3.com",
+        ),
+        "domainKeywords": ("hoyoverse", "hoyolab", "mihoyo", "yuanshen", "starrails", "zenlesszonezero", "honkaiimpact3"),
         "ports": (22101, 22102),
         "processes": ("GenshinImpact.exe", "YuanShen.exe", "StarRail.exe", "ZenlessZoneZero.exe"),
     },
@@ -83,7 +160,15 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Battle Royale",
         "icon": "🔥",
         "isMobile": True,
-        "domains": ("freefiremobile.com", "ff.garena.com", "ggblueshark.com", "garenanow.com", "garena.com"),
+        "domains": (
+            "freefiremobile.com",
+            "freefireind.com",
+            "ff.garena.com",
+            "ggblueshark.com",
+            "garenanow.com",
+            "garena.com",
+        ),
+        "domainKeywords": ("freefire", "ggblueshark", "ff.garena"),
         "ports": (39698, 39800),
         "processes": ("HD-Player.exe", "Bluestacks.exe", "MuMuPlayer.exe", "dnplayer.exe"),
     },
@@ -94,6 +179,7 @@ GAME_SIGNATURES: list[dict] = [
         "icon": "🛡️",
         "isMobile": True,
         "domains": ("game.clashofclans.com", "clashofclans.com", "supercell.com", "supercell.net", "supercellid.com"),
+        "domainKeywords": ("clashofclans", "supercellid", "supercell."),
         "ports": (9339,),
         "processes": (),
     },
@@ -104,6 +190,7 @@ GAME_SIGNATURES: list[dict] = [
         "icon": "🏰",
         "isMobile": True,
         "domains": ("game.clashroyaleapp.com", "clashroyaleapp.com", "clashroyale.com"),
+        "domainKeywords": ("clashroyale",),
         "ports": (9339,),
         "processes": (),
     },
@@ -113,7 +200,8 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Arena Brawler",
         "icon": "⭐",
         "isMobile": True,
-        "domains": ("game.brawlstarsgame.com", "brawlstarsgame.com"),
+        "domains": ("game.brawlstarsgame.com", "brawlstarsgame.com", "brawlstars.com", "squadbusters.com"),
+        "domainKeywords": ("brawlstars", "squadbusters"),
         "ports": (9339,),
         "processes": (),
     },
@@ -124,16 +212,18 @@ GAME_SIGNATURES: list[dict] = [
         "icon": "⚽",
         "isMobile": True,
         "domains": ("fcmobile.ea.com", "easports.com"),
+        "domainKeywords": ("fcmobile", "easports"),
         "ports": (3659, 17502),
         "processes": (),
     },
     {
         "id": "casual",
-        "name": "8 Ball Pool / Among Us",
+        "name": "8 Ball Pool / Among Us / Monopoly GO",
         "category": "Mobile Casual / Social",
         "icon": "🎱",
         "isMobile": True,
-        "domains": ("miniclip.com", "miniclippt.com", "innersloth.com", "among.us"),
+        "domains": ("miniclip.com", "miniclippt.com", "innersloth.com", "among.us", "monopolygo.com", "scopely.com"),
+        "domainKeywords": ("miniclip", "innersloth", "monopolygo", "scopely"),
         "ports": (8433, 22023),
         "processes": ("Among Us.exe",),
     },
@@ -143,7 +233,21 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile / PC Sandbox",
         "icon": "🧱",
         "isMobile": True,
-        "domains": ("presence.roblox.com", "apis.roblox.com", "clientsettings.roblox.com", "gamejoin.roblox.com", "roblox.com", "www.roblox.com", "rbxcdn.com", "rbx.com", "robloxlabs.com"),
+        "domains": (
+            "presence.roblox.com",
+            "apis.roblox.com",
+            "clientsettings.roblox.com",
+            "gamejoin.roblox.com",
+            "auth.roblox.com",
+            "realtime.roblox.com",
+            "roblox.com",
+            "www.roblox.com",
+            "rbxcdn.com",
+            "rbx.com",
+            "robloxlabs.com",
+            "rbxinfra.net",
+        ),
+        "domainKeywords": ("roblox", "rbxcdn", "rbxinfra"),
         "ports": (49152, 53640),
         "processes": ("RobloxPlayerBeta.exe", "RobloxPlayerLauncher.exe", "Windows10Universal.exe"),
     },
@@ -154,6 +258,7 @@ GAME_SIGNATURES: list[dict] = [
         "icon": "🎯",
         "isMobile": False,
         "domains": ("playvalorant.com", "pvp.net", "riotgames.com"),
+        "domainKeywords": ("playvalorant",),
         "ports": (8393, 8394),
         "processes": ("VALORANT.exe", "VALORANT-Win64-Shipping.exe"),
     },
@@ -164,6 +269,7 @@ GAME_SIGNATURES: list[dict] = [
         "icon": "⛏️",
         "isMobile": False,
         "domains": ("sessionserver.mojang.com", "authserver.mojang.com", "minecraft.net", "minecraftservices.com"),
+        "domainKeywords": ("minecraft", "mojang.com"),
         "ports": (19132, 25565),
         "processes": ("Minecraft.Windows.exe", "javaw.exe"),
     },
@@ -173,11 +279,28 @@ GAME_SIGNATURES: list[dict] = [
         "category": "PC Competitive",
         "icon": "🎮",
         "isMobile": False,
-        "domains": ("api.steampowered.com", "steamcommunity.com", "steampowered.com", "valvesoftware.com", "steamserver.net", "steamcontent.com", "steamstatic.com"),
+        "domains": (
+            "api.steampowered.com",
+            "steamcommunity.com",
+            "steampowered.com",
+            "valvesoftware.com",
+            "steamserver.net",
+            "steamcontent.com",
+            "steamstatic.com",
+        ),
+        "domainKeywords": ("steampowered", "steamserver", "steamcontent", "valvesoftware"),
         "ports": (27015, 27036),
         "processes": ("dota2.exe", "cs2.exe", "ApexLegends.exe", "FortniteClient-Win64-Shipping.exe", "Overwatch.exe", "GTA5.exe"),
     },
 ]
+
+_DOH_CANARY_DOMAINS = (
+    "use-application-dns.net",
+    "mask.icloud.com",
+    "mask-h2.icloud.com",
+    "doh.dns.apple.com",
+    "canary.dns.nextdns.io",
+)
 
 _WIFI_CAPTIVE_DOMAINS = (
     "connectivitycheck.gstatic.com",
@@ -275,6 +398,320 @@ class GameDetectorMixin:
                     "ALTER TABLE game_block_rules ADD COLUMN cut_wifi INTEGER NOT NULL DEFAULT 1"
                 )
         self._game_listeners_started = False
+        self._gaming_sensor_telemetry: dict = {
+            "lastSeenEpoch": 0.0,
+            "lastSeen": None,
+            "pid": None,
+            "dnsHost": self.HOST_DNS_IP,
+            "dnsPort": 53,
+            "hotspotIp": "",
+            "syslogPort": 514,
+            "dnsQueriesTotal": 0,
+            "dnsBlockedTotal": 0,
+            "dnsClients": {},
+            "lastDnsClientIp": "",
+            "lastDnsDomain": "",
+            "lastDnsAt": None,
+        }
+
+    def get_gaming_policy(self) -> dict:
+        with self.lock:
+            raw = dict(self.config.get("gaming") or {})
+        mode = str(raw.get("preventionMode") or "alert_only").strip().lower()
+        if mode not in {"alert_only", "auto_block_game", "auto_wifi_cut"}:
+            mode = "alert_only"
+        try:
+            stale_sec = max(20, min(600, int(raw.get("staleSessionSeconds") or 75)))
+        except (TypeError, ValueError):
+            stale_sec = 75
+        return {
+            "preventionMode": mode,
+            "autoPreventEnabled": mode in {"auto_block_game", "auto_wifi_cut"},
+            "autoCutWifi": mode == "auto_wifi_cut",
+            "staleSessionSeconds": stale_sec,
+        }
+
+    def set_gaming_policy(self, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid gaming policy payload")
+        mode = str(payload.get("preventionMode") or "").strip().lower()
+        if mode not in {"alert_only", "auto_block_game", "auto_wifi_cut"}:
+            raise ValueError("preventionMode must be alert_only, auto_block_game, or auto_wifi_cut")
+        with self.lock:
+            gaming_cfg = self.config.setdefault("gaming", {})
+            gaming_cfg["preventionMode"] = mode
+            if "staleSessionSeconds" in payload:
+                try:
+                    gaming_cfg["staleSessionSeconds"] = max(20, min(600, int(payload["staleSessionSeconds"])))
+                except (TypeError, ValueError):
+                    pass
+            self.save_config()
+
+        policy = self.get_gaming_policy()
+        mode_labels = {
+            "alert_only": "Detect & Alert Only (Manual Block)",
+            "auto_block_game": "Real-Time Auto-Block Opened Games",
+            "auto_wifi_cut": "Zero-Tolerance Auto-Block Game + Cut User Wi-Fi",
+        }
+        self._record_event(
+            "GAMING_POLICY_UPDATED",
+            "WARNING" if policy["autoPreventEnabled"] else "INFO",
+            f"🛡️ Game Prevention Mode: {mode_labels[mode]}",
+            f"Updated real-time mobile/PC game detection policy to '{mode_labels[mode]}'.",
+            device_name="Pulse Game Detector",
+        )
+        activity = self.get_game_activity(100)
+        self.broadcast("game_detected", {"gameActivity": activity})
+        return {"success": True, "policy": policy, "gameActivity": activity}
+
+    @staticmethod
+    def _detect_host_lan_ip(fallback: str = "192.168.0.224") -> str:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(0.25)
+                s.connect(("192.168.0.1", 80))
+                ip = s.getsockname()[0]
+                if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                    return ip
+        except OSError:
+            pass
+        return fallback
+
+    @staticmethod
+    def _detect_local_dhcp_dns() -> list[str]:
+        if os.name != "nt":
+            return []
+        servers: list[str] = []
+        seen: set[str] = set()
+        key_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as root_key:
+                sub_count = winreg.QueryInfoKey(root_key)[0]
+                for idx in range(sub_count):
+                    sub_name = winreg.EnumKey(root_key, idx)
+                    with winreg.OpenKey(root_key, sub_name) as if_key:
+                        dhcp_ip = ""
+                        dns_raw = ""
+                        for val_name in ("DhcpIPAddress", "IPAddress"):
+                            try:
+                                val, _ = winreg.QueryValueEx(if_key, val_name)
+                                if isinstance(val, list):
+                                    dhcp_ip = str(val[0] or "") if val else ""
+                                else:
+                                    dhcp_ip = str(val or "")
+                                if dhcp_ip and not dhcp_ip.startswith(("0.", "127.", "169.254.")):
+                                    break
+                            except OSError:
+                                continue
+                        if not dhcp_ip or dhcp_ip.startswith(("0.", "127.", "169.254.", "172.")):
+                            continue
+                        for dns_key in ("NameServer", "DhcpNameServer"):
+                            try:
+                                val, _ = winreg.QueryValueEx(if_key, dns_key)
+                                txt = str(val or "").strip()
+                                if txt:
+                                    dns_raw = txt
+                                    break
+                            except OSError:
+                                continue
+                        for tok in re.split(r"[\s,;]+", dns_raw):
+                            ip_s = tok.strip()
+                            if ip_s and ip_s not in seen:
+                                try:
+                                    ipaddress.ip_address(ip_s)
+                                    seen.add(ip_s)
+                                    servers.append(ip_s)
+                                except ValueError:
+                                    continue
+        except OSError:
+            pass
+        return servers
+
+    def record_gaming_sensor_heartbeat(self, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            payload = {}
+        now_epoch = time.time()
+        with self.lock:
+            tel = self._gaming_sensor_telemetry
+            tel["lastSeenEpoch"] = now_epoch
+            tel["lastSeen"] = utc_now()
+            if payload.get("pid") is not None:
+                tel["pid"] = int(payload["pid"])
+            if str(payload.get("dnsHost") or "").strip():
+                tel["dnsHost"] = str(payload["dnsHost"]).strip()
+            if payload.get("dnsPort") is not None:
+                tel["dnsPort"] = int(payload["dnsPort"])
+            tel["hotspotIp"] = str(payload.get("hotspotIp") or "").strip()
+            if payload.get("dnsQueriesTotal") is not None:
+                tel["dnsQueriesTotal"] = int(payload["dnsQueriesTotal"])
+            if payload.get("dnsBlockedTotal") is not None:
+                tel["dnsBlockedTotal"] = int(payload["dnsBlockedTotal"])
+            if isinstance(payload.get("dnsClients"), dict):
+                tel["dnsClients"] = {
+                    str(k): str(v) for k, v in list(payload["dnsClients"].items())[:120]
+                }
+            if payload.get("lastDnsClientIp"):
+                tel["lastDnsClientIp"] = str(payload["lastDnsClientIp"])[:48]
+            if payload.get("lastDnsDomain"):
+                tel["lastDnsDomain"] = str(payload["lastDnsDomain"])[:120]
+            if payload.get("lastDnsAt"):
+                tel["lastDnsAt"] = str(payload["lastDnsAt"])[:64]
+        return {
+            "success": True,
+            "blocks": self.get_game_blocks(),
+            "policy": self.get_gaming_policy(),
+        }
+
+    def _get_gaming_sensor_status(self) -> dict:
+        with self.lock:
+            tel = dict(self._gaming_sensor_telemetry)
+            dns_clients = dict(tel.get("dnsClients") or {})
+            router_cfg = dict(self.config.get("router") or {})
+
+        in_test = getattr(self, "_skip_live_probe_in_test", False)
+        host_ip = tel.get("dnsHost") or (
+            self.HOST_DNS_IP if in_test else self._detect_host_lan_ip(self.HOST_DNS_IP)
+        )
+        local_dns = [] if in_test else self._detect_local_dhcp_dns()
+        sensor_online = (time.time() - float(tel.get("lastSeenEpoch") or 0.0)) <= 12.0
+        non_self_clients = [ip for ip in dns_clients if ip != host_ip]
+        dns_intercept_ready = bool(
+            non_self_clients
+            or (host_ip in local_dns)
+            or bool(tel.get("hotspotIp"))
+        )
+        bypass_dns = [d for d in local_dns if d != host_ip]
+        router_state = getattr(self, "router_state", {}) or {}
+        return {
+            "sensorOnline": sensor_online,
+            "lastSeen": tel.get("lastSeen"),
+            "dnsHost": host_ip,
+            "dnsPort": int(tel.get("dnsPort") or 53),
+            "hotspotIp": tel.get("hotspotIp") or "",
+            "syslogPort": int(tel.get("syslogPort") or 514),
+            "dnsQueriesTotal": int(tel.get("dnsQueriesTotal") or 0),
+            "dnsBlockedTotal": int(tel.get("dnsBlockedTotal") or 0),
+            "dnsClientsCount": len(non_self_clients),
+            "dnsActiveClients": non_self_clients[:25],
+            "lastDnsClientIp": tel.get("lastDnsClientIp") or "",
+            "lastDnsDomain": tel.get("lastDnsDomain") or "",
+            "lastDnsAt": tel.get("lastDnsAt"),
+            "localDhcpDnsServers": local_dns,
+            "bypassingExternalDns": bypass_dns,
+            "dnsInterceptReady": dns_intercept_ready,
+            "routerIp": str(router_cfg.get("ip") or "192.168.0.1"),
+            "routerAuthenticated": bool(router_state.get("authenticated") or router_cfg.get("stok")),
+        }
+
+    def configure_router_game_dns(self) -> dict:
+        """Attempt one-click TP-Link LuCI DHCP Primary DNS setup so all Wi-Fi clients route via Pulse DNS."""
+        host_ip = self._detect_host_lan_ip(self.HOST_DNS_IP)
+        configs = (
+            self._resolve_router_configs()
+            if hasattr(self, "_resolve_router_configs")
+            else [dict(self.config.get("router", {}))]
+        )
+        primary_ip = str(self.config.get("router", {}).get("ip") or "192.168.0.1")
+        cfg = next((c for c in configs if str(c.get("ip") or "") == primary_ip), configs[0] if configs else {})
+        stok = str(cfg.get("stok") or "").strip()
+        if not stok:
+            return {
+                "success": False,
+                "configured": False,
+                "requiresRouterLogin": True,
+                "hostIp": host_ip,
+                "routerIp": primary_ip,
+                "message": (
+                    f"Router admin session not connected yet. Open Router Settings to log into {primary_ip}, "
+                    f"or log into http://{primary_ip} directly and set DHCP Primary DNS = {host_ip} "
+                    f"(Secondary DNS = {primary_ip}). Also you can turn on Windows Mobile Hotspot or set DNS {host_ip} on a test phone for instant tracking."
+                ),
+            }
+
+        r_port = int(cfg.get("port") or 80)
+        scheme = "https" if (bool(cfg.get("useHttps", False)) or r_port in (443, 8443)) else "http"
+        enc_stok = urllib.parse.quote(stok, safe="")
+        ctx = ssl._create_unverified_context() if scheme == "https" else None
+
+        read_url = f"{scheme}://{primary_ip}:{r_port}/cgi-bin/luci/;stok={enc_stok}/admin/dhcps?form=setting"
+        req_read = urllib.request.Request(
+            read_url,
+            data=b"operation=read",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Pulse/2.1"},
+        )
+        cur_data: dict = {}
+        try:
+            with urllib.request.urlopen(req_read, timeout=2.0, context=ctx) as resp:
+                parsed = json.loads(resp.read(65536).decode("utf-8", "ignore"))
+                if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict):
+                    cur_data = dict(parsed["data"])
+        except Exception as exc:
+            return {
+                "success": False,
+                "configured": False,
+                "hostIp": host_ip,
+                "routerIp": primary_ip,
+                "message": f"Could not read DHCP settings from {primary_ip}: {exc}",
+            }
+
+        write_fields = {
+            **cur_data,
+            "operation": "write",
+            "pri_dns": host_ip,
+            "snd_dns": primary_ip,
+        }
+        body = urllib.parse.urlencode(write_fields).encode("utf-8")
+        req_write = urllib.request.Request(
+            read_url,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Pulse/2.1"},
+        )
+        try:
+            with urllib.request.urlopen(req_write, timeout=3.0, context=ctx) as resp:
+                wres = json.loads(resp.read(65536).decode("utf-8", "ignore"))
+        except Exception as exc:
+            return {
+                "success": False,
+                "configured": False,
+                "hostIp": host_ip,
+                "routerIp": primary_ip,
+                "message": f"Could not update DHCP DNS on {primary_ip}: {exc}",
+            }
+
+        ok = isinstance(wres, dict) and bool(wres.get("success"))
+        if ok:
+            self._record_event(
+                "ROUTER_DHCP_DNS_UPDATED",
+                "INFO",
+                "📡 Router DHCP DNS Pointed to Pulse Sensor",
+                f"Configured TP-Link ({primary_ip}) Primary DNS = {host_ip}, Secondary DNS = {primary_ip} for whole-LAN real-time game monitoring.",
+                ip=primary_ip,
+                device_name=f"Gateway ({primary_ip})",
+            )
+            return {
+                "success": True,
+                "configured": True,
+                "hostIp": host_ip,
+                "routerIp": primary_ip,
+                "message": (
+                    f"TP-Link ({primary_ip}) DHCP Primary DNS updated to {host_ip}. "
+                    "Phones reconnecting to Wi-Fi (or renewing DHCP lease) will now stream game activity and blocks in real time."
+                ),
+            }
+        return {
+            "success": False,
+            "configured": False,
+            "hostIp": host_ip,
+            "routerIp": primary_ip,
+            "message": f"Router {primary_ip} rejected automated DHCP write — set Primary DNS = {host_ip} in http://{primary_ip} -> Network -> DHCP Server.",
+        }
+
+    @staticmethod
+    def _is_doh_canary_domain(domain: object) -> bool:
+        dom = str(domain or "").strip().lower().rstrip(".")
+        if not dom:
+            return False
+        return any(dom == sig or dom.endswith(f".{sig}") for sig in _DOH_CANARY_DOMAINS)
 
     @staticmethod
     def _match_game_signature(
@@ -290,6 +727,9 @@ class GameDetectorMixin:
         if dom:
             for g in GAME_SIGNATURES:
                 if any(dom == sig or dom.endswith(f".{sig}") for sig in g["domains"]):
+                    return g
+            for g in GAME_SIGNATURES:
+                if any(kw in dom for kw in g.get("domainKeywords", ())):
                     return g
         proc = str(process or "").strip().lower()
         if proc:
@@ -520,18 +960,20 @@ class GameDetectorMixin:
         )[:120]
         method = str(payload.get("detectionMethod") or "Live DNS").strip()[:60]
         now = utc_now()
+        policy = self.get_gaming_policy()
 
         if self._match_active_block_rule(client_ip, game["id"]) is not None:
             with self._connect() as db:
                 db.execute(
                     """UPDATE game_activity_logs
-                       SET is_active=0, is_blocked=1, timestamp=?
+                       SET is_active=0, is_blocked=1, timestamp=?, matched_indicator=?, detection_method=?
                        WHERE ip=? AND game_id=?""",
-                    (now, client_ip, game["id"]),
+                    (now, indicator, method, client_ip, game["id"]),
                 )
             return {
                 "success": True,
                 "blocked": True,
+                "autoPrevented": bool(payload.get("autoPrevented")),
                 "detection": None,
                 "gameActivity": self.get_game_activity(60),
             }
@@ -548,7 +990,7 @@ class GameDetectorMixin:
                 try:
                     prev_dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
                     now_dt = datetime.now(timezone.utc)
-                    if (now_dt - prev_dt).total_seconds() < 180:
+                    if (now_dt - prev_dt).total_seconds() < policy["staleSessionSeconds"]:
                         existing_row = dict(row)
                 except ValueError:
                     pass
@@ -615,8 +1057,38 @@ class GameDetectorMixin:
             "matchedIndicator": indicator,
             "detectionMethod": method,
             "isActive": True,
+            "isBlocked": False,
         }
 
+        if policy["autoPreventEnabled"] and not payload.get("skipAutoPrevent"):
+            prevent_scope = "device_wifi_cut" if policy["autoCutWifi"] else "device_game"
+            blk_res = self.block_game_session({
+                "sessionId": session_id,
+                "ip": client_ip,
+                "gameId": game["id"],
+                "scope": prevent_scope,
+                "cutWifi": policy["autoCutWifi"],
+                "autoPrevented": True,
+            })
+            prevented_entry = {
+                **entry,
+                "isActive": False,
+                "isBlocked": True,
+                "autoPrevented": True,
+            }
+            return {
+                "success": True,
+                "blocked": True,
+                "autoPrevented": True,
+                "ruleId": blk_res.get("ruleId"),
+                "detection": prevented_entry,
+                "gameActivity": blk_res.get("gameActivity") or self.get_game_activity(60),
+            }
+
+        changed_signal = existing_row is None or (
+            existing_row.get("matched_indicator") != indicator
+            or existing_row.get("detection_method") != method
+        )
         if existing_row is None:
             title = f"{game['icon']} {game['name']} opened on {ctx['deviceName']}"
             msg = (
@@ -656,12 +1128,17 @@ class GameDetectorMixin:
             self.broadcast("new_alert", alert)
 
         activity = self.get_game_activity(60)
-        if existing_row is None:
+        if changed_signal:
             self.broadcast("game_detected", {"detection": entry, "gameActivity": activity})
         return {"success": True, "detection": entry, "gameActivity": activity}
 
-    def expire_stale_game_sessions(self, max_idle_seconds: int = 180) -> int:
+    def expire_stale_game_sessions(self, max_idle_seconds: int | None = None) -> int:
         """Automatically end active game sessions when no traffic/process heartbeat was seen recently."""
+        idle_limit = (
+            int(max_idle_seconds)
+            if max_idle_seconds is not None
+            else self.get_gaming_policy()["staleSessionSeconds"]
+        )
         now_dt = datetime.now(timezone.utc)
         expired_ids: list[str] = []
         expired_keys: set[str] = set()
@@ -672,7 +1149,7 @@ class GameDetectorMixin:
             for r in rows:
                 try:
                     prev_dt = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00"))
-                    if (now_dt - prev_dt).total_seconds() >= max_idle_seconds:
+                    if (now_dt - prev_dt).total_seconds() >= idle_limit:
                         expired_ids.append(r["id"])
                         expired_keys.add(f"game-{r['ip']}-{r['game_id']}")
                 except ValueError:
@@ -866,6 +1343,8 @@ class GameDetectorMixin:
 
     def get_game_activity(self, limit: int = 100) -> dict:
         self.expire_stale_game_sessions()
+        policy = self.get_gaming_policy()
+        sensor_status = self._get_gaming_sensor_status()
         limit = max(1, min(int(limit), 300))
         with self._connect() as db:
             rows = db.execute(
@@ -925,6 +1404,8 @@ class GameDetectorMixin:
             "blocks": blocks,
             "onlineDevices": online_devices,
             "autoScanActive": True,
+            "policy": policy,
+            "sensorStatus": sensor_status,
             "summary": {
                 "activeCount": len(active_logs),
                 "blockedCount": len(blocks),
@@ -932,7 +1413,7 @@ class GameDetectorMixin:
                 "onlineDevicesCount": len(online_devices),
                 "topGame": top_game,
                 "topZone": top_zone,
-                "hostDnsServerIp": self.HOST_DNS_IP,
+                "hostDnsServerIp": sensor_status["dnsHost"],
                 "hostDnsPort": 53,
                 "hostSyslogPort": 514,
                 "dnsListenerPort": self.DNS_LISTENER_PORT,
@@ -1209,20 +1690,40 @@ class GameDetectorMixin:
             if router_applied
             else " Enforced via per-device DNS 0.0.0.0 sinkhole & active socket reset."
         )
+        auto_prevented = bool(payload.get("autoPrevented"))
+        action_prefix = "🛡️ Auto-Prevented" if auto_prevented else "🛑 Blocked"
         self._record_event(
-            "GAME_BLOCKED",
+            "GAME_AUTO_PREVENTED" if auto_prevented else "GAME_BLOCKED",
             "WARNING",
-            f"🛑 Blocked: {game_name}",
+            f"{action_prefix}: {game_name}",
             f"Shut off {game_name} on {device_name} ({ip}).{router_note}",
             mac=mac,
             ip="" if ip == "*" else ip,
             device_name=device_name,
         )
         activity = self.get_game_activity(100)
-        self.broadcast("game_detected", {"gameActivity": activity})
+        bcast_payload: dict = {"gameActivity": activity}
+        if auto_prevented:
+            bcast_payload["detection"] = {
+                "id": session_id or rule_id,
+                "timestamp": now,
+                "ip": ip,
+                "mac": mac,
+                "deviceName": device_name,
+                "gameId": game_id,
+                "gameName": game_name,
+                "gameIcon": "🛡️",
+                "connectedTo": f"Router ({router_ip})" if router_ip else "Company Wi-Fi",
+                "matchedIndicator": str(payload.get("matchedIndicator") or game_name),
+                "detectionMethod": str(payload.get("detectionMethod") or "Real-Time Auto-Prevention"),
+                "autoPrevented": True,
+                "isBlocked": True,
+            }
+        self.broadcast("game_detected", bcast_payload)
         return {
             "success": True,
             "ruleId": rule_id,
+            "autoPrevented": auto_prevented,
             "routerEnforced": router_applied,
             "gameActivity": activity,
         }
@@ -1270,10 +1771,9 @@ class GameDetectorMixin:
         return {"success": True, "gameActivity": activity}
 
     @staticmethod
-    def _build_dns_sinkhole_reply(raw_query: bytes) -> bytes:
-        """Build a valid DNS NOERROR response returning 0.0.0.0 (A) / :: (AAAA) with TTL=1s."""
+    def _parse_dns_question(raw_query: bytes) -> tuple[bytes, int, int, bytes] | None:
         if len(raw_query) < 12:
-            return b""
+            return None
         txid = raw_query[0:2]
         idx = 12
         while idx < len(raw_query):
@@ -1286,10 +1786,28 @@ class GameDetectorMixin:
                 break
             idx += 1 + length
         if idx + 4 > len(raw_query):
-            return b""
+            return None
         qtype = int.from_bytes(raw_query[idx : idx + 2], "big")
         qclass = int.from_bytes(raw_query[idx + 2 : idx + 4], "big")
         question = raw_query[12 : idx + 4]
+        return txid, qtype, qclass, question
+
+    @staticmethod
+    def _build_dns_nxdomain_reply(raw_query: bytes) -> bytes:
+        """Build a valid NXDOMAIN (RCODE=3) reply for DoH/Private Relay canary domains."""
+        parsed = GameDetectorMixin._parse_dns_question(raw_query)
+        if not parsed:
+            return b""
+        txid, _qtype, _qclass, question = parsed
+        return txid + b"\x81\x83\x00\x01\x00\x00\x00\x00\x00\x00" + question
+
+    @staticmethod
+    def _build_dns_sinkhole_reply(raw_query: bytes) -> bytes:
+        """Build a valid DNS NOERROR response returning 0.0.0.0 (A) / :: (AAAA) with TTL=1s."""
+        parsed = GameDetectorMixin._parse_dns_question(raw_query)
+        if not parsed:
+            return b""
+        txid, qtype, qclass, question = parsed
 
         if qtype == 1 and qclass == 1:
             # Answer ptr 0xc00c, Type A (1), Class IN (1), TTL 1s, RDLEN 4, 0.0.0.0
@@ -1326,13 +1844,13 @@ class GameDetectorMixin:
 
         def _check_host_ports(target_ip: str) -> tuple[str, int | None]:
             for port in SCAN_GAME_PORTS:
-                is_open, _, _ = self._probe_tcp_socket(target_ip, port, timeout=0.16)
+                is_open, _, _ = self._probe_tcp_socket(target_ip, port, timeout=0.06)
                 if is_open:
                     return target_ip, port
             return target_ip, None
 
         if client_ips:
-            with ThreadPoolExecutor(max_workers=min(32, len(client_ips))) as pool:
+            with ThreadPoolExecutor(max_workers=min(48, len(client_ips))) as pool:
                 for ip_key, open_port in pool.map(_check_host_ports, client_ips):
                     if open_port is not None:
                         res = self.record_game_detection({
@@ -1445,18 +1963,36 @@ class GameDetectorMixin:
 
         def _handle_dns_packet(raw: bytes, client_addr: tuple[str, int]) -> None:
             qname = self._extract_dns_qname(raw)
+            if qname and self._is_doh_canary_domain(qname):
+                nxd = self._build_dns_nxdomain_reply(raw)
+                if nxd:
+                    try:
+                        sock.sendto(nxd, client_addr)
+                    except OSError:
+                        pass
+                return
             sig = self._match_game_signature(domain=qname) if qname else None
+            policy = self.get_gaming_policy()
             sinkhole_rule = (
                 self._should_sinkhole_query(client_addr[0], qname, sig, self.get_game_blocks())
                 if qname
                 else None
             )
-            if sinkhole_rule is not None:
+            if sinkhole_rule is not None or (sig and policy["autoPreventEnabled"]):
                 sink = self._build_dns_sinkhole_reply(raw)
                 if sink:
                     try:
                         sock.sendto(sink, client_addr)
                     except OSError:
+                        pass
+                if sinkhole_rule is None and sig and self._is_real_lan_client_ip(client_addr[0]):
+                    try:
+                        self.record_game_detection({
+                            "ip": client_addr[0],
+                            "domain": qname,
+                            "detectionMethod": f"DNS Query (UDP {self.DNS_LISTENER_PORT})",
+                        })
+                    except Exception:
                         pass
                 return
             if sig and self._is_real_lan_client_ip(client_addr[0]):
@@ -1491,6 +2027,91 @@ class GameDetectorMixin:
         finally:
             sock.close()
 
+    def _parse_syslog_game_text(self, text: str, sender_ip: str = "") -> tuple[str, str, int | None] | None:
+        matched_domain = ""
+        for dm in re.findall(r"\b[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+){1,5}\b", text):
+            if self._match_game_signature(domain=dm):
+                matched_domain = dm.lower()
+                break
+        matched_port = None
+        if not matched_domain:
+            pm = re.search(r"(?:DPT|dst_port|port)[=: ]+(\d{2,5})", text, re.I)
+            if pm and self._match_game_signature(port=pm.group(1)):
+                matched_port = int(pm.group(1))
+        if not matched_domain and matched_port is None:
+            return None
+
+        client_ip = ""
+        for cand_ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text):
+            if cand_ip != sender_ip and self._is_real_lan_client_ip(cand_ip):
+                client_ip = cand_ip
+                break
+        if not client_ip and sender_ip and self._is_real_lan_client_ip(sender_ip):
+            client_ip = sender_ip
+        if not client_ip:
+            return None
+        return client_ip, matched_domain, matched_port
+
+    def poll_router_logs_for_games(self) -> int:
+        """Poll authenticated TP-Link LuCI system logs for game domain/port traces."""
+        if getattr(self, "_skip_live_probe_in_test", False):
+            return 0
+        configs = (
+            self._resolve_router_configs()
+            if hasattr(self, "_resolve_router_configs")
+            else [dict(self.config.get("router", {}))]
+        )
+        authed = [c for c in configs if str(c.get("stok") or "").strip()]
+        if not authed:
+            return 0
+        seen = getattr(self, "_seen_router_log_lines", None)
+        if seen is None:
+            seen = set()
+            self._seen_router_log_lines = seen
+        found = 0
+        ctx = ssl._create_unverified_context()
+        for cfg in authed:
+            host = str(cfg.get("ip") or "").strip()
+            port = int(cfg.get("port") or 80)
+            scheme = "https" if (bool(cfg.get("useHttps", False)) or port in (443, 8443)) else "http"
+            enc_stok = urllib.parse.quote(str(cfg.get("stok") or ""), safe="")
+            req = urllib.request.Request(
+                f"{scheme}://{host}:{port}/cgi-bin/luci/;stok={enc_stok}/admin/syslog?form=log",
+                data=b"operation=read",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Pulse/2.1"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=1.5, context=ctx if scheme == "https" else None) as resp:
+                    payload = json.loads(resp.read(128 * 1024).decode("utf-8", "ignore"))
+            except Exception:
+                continue
+            rows = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                continue
+            for item in rows[-80:]:
+                line = json.dumps(item, sort_keys=True) if isinstance(item, dict) else str(item)
+                if line in seen:
+                    continue
+                seen.add(line)
+                if len(seen) > 1500:
+                    seen.clear()
+                parsed = self._parse_syslog_game_text(line, sender_ip=host)
+                if not parsed:
+                    continue
+                client_ip, matched_domain, matched_port = parsed
+                try:
+                    self.record_game_detection({
+                        "ip": client_ip,
+                        "reporterIp": host,
+                        "domain": matched_domain,
+                        "port": matched_port,
+                        "detectionMethod": f"Router Log Poll ({host})",
+                    })
+                    found += 1
+                except Exception:
+                    pass
+        return found
+
     def _syslog_game_listener_loop(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -1511,28 +2132,10 @@ class GameDetectorMixin:
                     break
                 text = data.decode("utf-8", "ignore")
                 sender_ip = addr[0]
-                matched_domain = ""
-                for dm in re.findall(r"\b[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+){1,5}\b", text):
-                    if self._match_game_signature(domain=dm):
-                        matched_domain = dm.lower()
-                        break
-                matched_port = None
-                if not matched_domain:
-                    pm = re.search(r"(?:DPT|dst_port|port)[=: ]+(\d{2,5})", text, re.I)
-                    if pm and self._match_game_signature(port=pm.group(1)):
-                        matched_port = int(pm.group(1))
-                if not matched_domain and matched_port is None:
+                parsed = self._parse_syslog_game_text(text, sender_ip=sender_ip)
+                if not parsed:
                     continue
-
-                client_ip = ""
-                for cand_ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text):
-                    if cand_ip != sender_ip and self._is_real_lan_client_ip(cand_ip):
-                        client_ip = cand_ip
-                        break
-                if not client_ip and self._is_real_lan_client_ip(sender_ip):
-                    client_ip = sender_ip
-                if not client_ip:
-                    continue
+                client_ip, matched_domain, matched_port = parsed
                 try:
                     self.record_game_detection({
                         "ip": client_ip,

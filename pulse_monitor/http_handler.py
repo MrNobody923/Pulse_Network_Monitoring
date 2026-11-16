@@ -279,7 +279,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/gaming/activity":
                 self._send_json(mon.get_game_activity())
             elif path == "/api/gaming/blocks":
-                self._send_json({"blocks": mon.get_game_blocks()})
+                self._send_json({
+                    "blocks": mon.get_game_blocks(),
+                    "policy": mon.get_gaming_policy(),
+                })
             else:
                 self._send_error_json("Not found", 404)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
@@ -590,6 +593,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     mon.unblock_game_rule(body.get("ruleId") or body.get("id") or "")
                 )
+            elif path == "/api/gaming/policy":
+                self._send_json(mon.set_gaming_policy(body))
+            elif path == "/api/gaming/sensor-heartbeat":
+                self._send_json(mon.record_gaming_sensor_heartbeat(body))
+            elif path == "/api/gaming/setup-router-dns":
+                self._send_json(mon.configure_router_game_dns())
             else:
                 pos_match = re.fullmatch(
                     r"/api/topology/node/([^/]+)/position", path

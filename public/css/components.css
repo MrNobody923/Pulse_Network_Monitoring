@@ -939,6 +939,25 @@
 .game-auto-status-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--box-inner-bg);
+  border: 1px solid var(--border-subtle);
+  margin-bottom: 10px;
+}
+
+.game-auto-status-bar.warn {
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+}
+
+.game-policy-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
   padding: 10px 14px;
@@ -946,6 +965,13 @@
   background: var(--box-inner-bg);
   border: 1px solid var(--border-subtle);
   margin-bottom: 14px;
+}
+
+.game-policy-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.84rem;
 }
 
 .game-terminal-body {

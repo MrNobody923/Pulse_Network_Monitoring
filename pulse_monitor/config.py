@@ -41,6 +41,10 @@ DEFAULT_CONFIG = {
         "packetLossWarningPct": 5,
         "packetLossCriticalPct": 25,
     },
+    "gaming": {
+        "preventionMode": "alert_only",
+        "staleSessionSeconds": 75,
+    },
     "devicePollIntervalSec": 30,
     "soundAlertsEnabled": False,
     "devices": [

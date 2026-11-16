@@ -254,10 +254,25 @@ class Monitor(
         threading.Thread(
             target=self._wan_throughput_loop, daemon=True, name="wan-throughput"
         ).start()
+        threading.Thread(
+            target=self._game_realtime_loop, daemon=True, name="game-realtime"
+        ).start()
         self.start_game_listeners()
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _game_realtime_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                expired = self.expire_stale_game_sessions()
+                if expired:
+                    self.broadcast("game_detected", {"gameActivity": self.get_game_activity(60)})
+                if hasattr(self, "poll_router_logs_for_games"):
+                    self.poll_router_logs_for_games()
+            except Exception as exc:
+                print(f"[monitor] Realtime game loop warning: {exc}", flush=True)
+            self._stop.wait(4.0)
 
     def _isp_ping_loop(self) -> None:
         while not self._stop.is_set():

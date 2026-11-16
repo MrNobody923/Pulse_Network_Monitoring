@@ -196,12 +196,13 @@ function renderGamingSection() {
   setTxt('gameTabAllCount', totalCount);
   setTxt('gameTabActiveCount', activeCount);
   setTxt('gameTabBlockedCount', blockedLogCount);
-  setTxt('gameAutoPulseBadge', `🟢 AUTO-DETECTING LIVE · ${onlineCount} DEVICES WATCHED`);
+  renderGameSensorBanner(data, onlineCount);
+  renderGamingPolicyControls(data.policy || {});
   setTxt(
     'gameTerminalPromptText',
     activeCount > 0
       ? `🎮 ${activeCount} game(s) open now — use Block buttons to shut off the game & user Wi-Fi.`
-      : `Watching ${onlineCount} company devices — entries appear only when a game opens.`
+      : `Watching ${onlineCount} company devices in real time — entries appear the instant a game opens.`
   );
 
   const sideBadge = document.getElementById('sideBadgeGaming');
@@ -265,9 +266,10 @@ function renderGamingSection() {
   if (!container) return;
   ensureGameTerminalScrollListener(container);
 
+  const prevMode = (data.policy && data.policy.preventionMode) || 'alert_only';
   const ruleSig = blocks.map(b => `${b.id}:${b.ip}:${b.gameId}`).join(',');
   const signature =
-    `${gameActivityFilter}|${gameActivitySearch}|${onlineCount}|${ruleSig}|` +
+    `${gameActivityFilter}|${gameActivitySearch}|${onlineCount}|${prevMode}|${ruleSig}|` +
     ordered.map(x => `${x.id}:${x.timestamp}:${x.isActive}:${x.isBlocked}`).join(',');
   if (signature === lastGameTerminalSignature) {
     return;
@@ -284,12 +286,18 @@ function renderGamingSection() {
   lastGameTerminalSignature = signature;
 
   if (!ordered.length) {
+    const modeDesc =
+      prevMode === 'auto_wifi_cut'
+        ? 'ZERO-TOLERANCE PREVENTION ON: any opened game is blocked & user Wi-Fi is cut immediately at packet arrival.'
+        : prevMode === 'auto_block_game'
+        ? 'AUTO-PREVENTION ON: any opened game is blocked in real time; blocked entries appear above & in Blocked Users.'
+        : 'No game is currently open. Terminal will display live game sessions and Block buttons automatically as soon as a user opens a game.';
     container.innerHTML = `
       <div class="ps-log-line game-term-line ps-lvl-live">
         <span class="ps-ts">[${esc(formatGameTerminalTime(new Date().toISOString()))}]</span>
-        <span class="ps-sev">[WATCHING]</span>
-        <span class="ps-tag">[IDLE · NO GAMES OPEN]</span>
-        <span class="ps-body-col"><span class="ps-msg">No game is currently open. Terminal will display live game sessions and Block buttons automatically as soon as a user opens a game.</span></span>
+        <span class="ps-sev">[${prevMode === 'alert_only' ? 'WATCHING' : 'GUARDING'}]</span>
+        <span class="ps-tag">[IDLE · REAL-TIME]</span>
+        <span class="ps-body-col"><span class="ps-msg">${esc(modeDesc)}</span></span>
       </div>
     `;
     return;
@@ -400,9 +408,84 @@ function jumpToGamingWorkspace(toastId) {
   }
 }
 
+function renderGameSensorBanner(data, onlineCount) {
+  const bar = document.getElementById('gameAutoStatusBar');
+  const badge = document.getElementById('gameAutoPulseBadge');
+  const line = document.getElementById('gameSensorTelemetryLine');
+  const setupBtn = document.getElementById('btnSetupRouterDns');
+  const s = data.sensorStatus || {};
+  const hostIp = s.dnsHost || (data.summary && data.summary.hostDnsServerIp) || '192.168.0.224';
+  const routerIp = s.routerIp || '192.168.0.1';
+  const qTotal = Number(s.dnsQueriesTotal || 0);
+  const bTotal = Number(s.dnsBlockedTotal || 0);
+  const cCount = Number(s.dnsClientsCount || 0);
+  const bypass = Array.isArray(s.bypassingExternalDns) ? s.bypassingExternalDns : [];
+
+  if (!s.sensorOnline) {
+    if (bar) bar.classList.add('warn');
+    if (badge) {
+      badge.className = 'status-pill warning';
+      badge.textContent = `🟠 SENSOR STANDBY · ${onlineCount} DEVICES WATCHED`;
+    }
+    if (line) {
+      line.innerHTML = `Host DNS sensor (<code>host_game_sensor.py</code>) has not checked in yet — run <code>start-monitor.bat</code> for sub-second UDP/TCP 53 interception on <code>${esc(hostIp)}</code>.`;
+    }
+    if (setupBtn) setupBtn.style.display = 'inline-flex';
+    return;
+  }
+
+  if (s.dnsInterceptReady || cCount > 0) {
+    if (bar) bar.classList.remove('warn');
+    if (badge) {
+      badge.className = 'status-pill online';
+      badge.textContent = `🟢 REAL-TIME LIVE · ${cCount} WIFI/DNS CLIENTS (${qTotal} QUERIES)`;
+    }
+    if (line) {
+      const lastDom = s.lastDnsDomain
+        ? ` · Last query: <code>${esc(s.lastDnsClientIp || '')}</code> → <code>${esc(s.lastDnsDomain)}</code>`
+        : '';
+      line.innerHTML = `Listening on <code>${esc(hostIp)}:53</code>${s.hotspotIp ? ` + Hotspot <code>${esc(s.hotspotIp)}:53</code>` : ''}, Syslog <code>514</code> &amp; LAN sweep — <strong>${bTotal}</strong> prevented.${lastDom}`;
+    }
+    if (setupBtn) setupBtn.style.display = 'none';
+  } else {
+    if (bar) bar.classList.add('warn');
+    if (badge) {
+      badge.className = 'status-pill warning';
+      badge.textContent = `🟠 SENSOR ON · WAITING FOR ROUTER DHCP DNS`;
+    }
+    if (line) {
+      const dnsNote = bypass.length
+        ? `Router (<code>${esc(routerIp)}</code>) currently assigns DNS <code>${esc(bypass.join(', '))}</code> instead of <code>${esc(hostIp)}</code> — phones bypass the monitor until router DHCP DNS (or test phone DNS / Windows Mobile Hotspot) points to <code>${esc(hostIp)}</code>.`
+        : `Set Router DHCP Primary DNS (or a phone Wi-Fi DNS) to <code>${esc(hostIp)}</code> for instant packet-0 mobile detection &amp; prevention.`;
+      line.innerHTML = dnsNote;
+    }
+    if (setupBtn) setupBtn.style.display = 'inline-flex';
+  }
+}
+
+function renderGamingPolicyControls(policy) {
+  const mode = (policy && policy.preventionMode) || 'alert_only';
+  document.querySelectorAll('#gamePolicyModePills [data-policy-mode]').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-policy-mode') === mode);
+  });
+  const hint = document.getElementById('gamePolicyHint');
+  if (!hint) return;
+  if (mode === 'auto_wifi_cut') {
+    hint.innerHTML =
+      '<strong style="color:var(--accent-red);">ZERO-TOLERANCE ACTIVE:</strong> Opening any mobile/PC game immediately sinkholes DNS, drops sockets &amp; cuts Wi-Fi for that device.';
+  } else if (mode === 'auto_block_game') {
+    hint.innerHTML =
+      '<strong style="color:var(--accent-amber);">REAL-TIME PREVENTION ACTIVE:</strong> Game servers are automatically blocked on packet arrival while normal work internet keeps working.';
+  } else {
+    hint.textContent =
+      'Real-time alerts appear when a game opens; click Block buttons to shut off the game or user Wi-Fi.';
+  }
+}
+
 function showGameDetectedToast(detection) {
   if (!detection || !detection.gameName) return;
   if (detection.id) seenActiveSessionIds.add(detection.id);
+  const isAuto = Boolean(detection.autoPrevented);
   const container = document.getElementById('gameToastContainer');
   const toastId = `game-toast-${detection.id || Date.now()}`;
   if (container) {
@@ -413,17 +496,21 @@ function showGameDetectedToast(detection) {
     card.className = 'game-toast-card';
     card.innerHTML = `
       <div class="game-toast-head">
-        <span class="game-toast-badge">${esc(detection.gameIcon || '🎮')} GAME DETECTED</span>
+        <span class="game-toast-badge">${isAuto ? '🛡️ AUTO-PREVENTED IN REAL TIME' : `${esc(detection.gameIcon || '🎮')} GAME DETECTED`}</span>
         <button type="button" class="game-toast-close" onclick="dismissGameToast('${esc(toastId)}')" aria-label="Close">✕</button>
       </div>
-      <div class="game-toast-title">${esc(detection.gameName)} opened</div>
+      <div class="game-toast-title">${esc(detection.gameName)} ${isAuto ? 'blocked' : 'opened'}</div>
       <div class="game-toast-meta">
         <div><strong>Device:</strong> ${esc(detection.deviceName)} <span class="mono">(${esc(detection.ip)})</span></div>
         <div><strong>Connected To:</strong> 📡 ${esc(detection.connectedTo)}</div>
         <div class="dev-row-sub">Trigger: ${esc(detection.matchedIndicator || '')} · ${esc(detection.detectionMethod || '')}</div>
       </div>
       <div class="game-toast-actions">
-        <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red); font-weight:700;" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">🛑 Shut Off Game &amp; Wi-Fi</button>
+        ${
+          isAuto
+            ? ''
+            : `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red); font-weight:700;" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">🛑 Shut Off Game &amp; Wi-Fi</button>`
+        }
         <button type="button" class="btn btn-primary btn-xs" onclick="jumpToGamingWorkspace('${esc(toastId)}')">View Game Log</button>
         <button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameToast('${esc(toastId)}')">Dismiss</button>
       </div>
@@ -552,8 +639,56 @@ async function unblockGameRule(ruleId) {
   }
 }
 
+async function setGamingPolicyMode(preventionMode) {
+  try {
+    const res = await apiJson('/api/gaming/policy', {
+      method: 'POST',
+      body: JSON.stringify({ preventionMode })
+    });
+    if (res.gameActivity) appState.gameActivity = res.gameActivity;
+    renderGamingSection();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function configureRouterGameDns() {
+  const btn = document.getElementById('btnSetupRouterDns');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Configuring...';
+  }
+  try {
+    const res = await apiJson('/api/gaming/setup-router-dns', {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    if (res && res.requiresRouterLogin && typeof openModal === 'function') {
+      alert(res.message);
+      openModal('routerConfigModal');
+    } else if (res && res.message) {
+      alert(res.message);
+    }
+    await refreshGameActivityAuto();
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⚡ Setup Whole-Wi-Fi Interception';
+    }
+  }
+}
+
+let gamePollCounter = 0;
+
 async function refreshGameActivityAuto() {
   if (gameAutoPollInFlight || document.hidden) return;
+  gamePollCounter += 1;
+  const gSection = document.getElementById('gamingSection');
+  const isViewingGaming = Boolean(gSection && gSection.style.display !== 'none');
+  if (!isViewingGaming && gamePollCounter % 2 !== 0) return;
+
   gameAutoPollInFlight = true;
   try {
     const activity = await apiJson('/api/gaming/activity');
@@ -576,4 +711,4 @@ async function refreshGameActivityAuto() {
   }
 }
 
-setInterval(refreshGameActivityAuto, 5000);
+setInterval(refreshGameActivityAuto, 2000);
