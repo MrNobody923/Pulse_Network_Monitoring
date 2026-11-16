@@ -497,9 +497,12 @@
         </div>
 
         <div class="kuma-stat-box">
-          <div class="kuma-stat-title">Live Speed</div>
-          <div class="kuma-stat-period">(Megabytes/sec)</div>
-          <div class="kuma-stat-value" id="kumaStatLiveSpeed" style="color: var(--accent-cyan); font-size: 1.02rem;">0.00 MB/s ↓</div>
+          <div class="kuma-stat-title" id="kumaStatSpeedTitle">Internet Speed</div>
+          <div class="kuma-stat-period" id="kumaStatSpeedPeriod">(Line · Live MB/s)</div>
+          <div class="kuma-stat-value" id="kumaStatLiveSpeed" style="color: var(--accent-cyan); font-size: 1.05rem; line-height: 1.25;">
+            <div id="kumaSpeedMain">-- MB/s</div>
+            <div id="kumaSpeedSub" style="font-size: 0.72rem; color: var(--text-dim); font-weight: 600; margin-top: 2px;">Measuring...</div>
+          </div>
         </div>
 
         <div class="kuma-stat-box">
@@ -2309,17 +2312,17 @@
   </div>
 
   <!-- Modular Application Scripts -->
-  <script src="js/audio.js?v=20261116d"></script>
-  <script src="js/state.js?v=20261116d"></script>
-  <script src="js/overview-lan.js?v=20261116d"></script>
-  <script src="js/alerts-router.js?v=20261116d"></script>
-  <script src="js/isp-speedtest.js?v=20261116d"></script>
-  <script src="js/charts-timeline.js?v=20261116d"></script>
-  <script src="js/nmap-scanner.js?v=20261116d"></script>
-  <script src="js/topology.js?v=20261116d"></script>
-  <script src="js/game-detector.js?v=20261116d"></script>
-  <script src="js/modals-tools.js?v=20261116d"></script>
-  <script src="js/app.js?v=20261116d"></script>
+  <script src="js/audio.js?v=20261116g"></script>
+  <script src="js/state.js?v=20261116g"></script>
+  <script src="js/overview-lan.js?v=20261116g"></script>
+  <script src="js/alerts-router.js?v=20261116g"></script>
+  <script src="js/isp-speedtest.js?v=20261116g"></script>
+  <script src="js/charts-timeline.js?v=20261116g"></script>
+  <script src="js/nmap-scanner.js?v=20261116g"></script>
+  <script src="js/topology.js?v=20261116g"></script>
+  <script src="js/game-detector.js?v=20261116g"></script>
+  <script src="js/modals-tools.js?v=20261116g"></script>
+  <script src="js/app.js?v=20261116g"></script>
 </body>
 </html>
 

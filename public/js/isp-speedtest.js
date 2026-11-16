@@ -198,6 +198,11 @@ function handleSpeedTestProgress(data) {
       )} Mbps / Upload ${finalUl.toFixed(1)} Mbps`;
     }
     setActiveSpeedCard(null);
+    if (typeof updateKumaLiveSpeed === 'function') {
+      updateKumaLiveSpeed(
+        (window.appState && window.appState.isp && window.appState.isp.liveThroughput) || null
+      );
+    }
   }
 
   if (pingEl && data.pingMs != null) pingEl.textContent = `${data.pingMs} ms`;

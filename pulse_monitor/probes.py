@@ -1401,6 +1401,21 @@ class ProbesMixin:
         if ts_series:
             graph["timeseries"]["timestamps"] = ts_series
 
+        try:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT value FROM monitor_metadata WHERE key='last_speed_test'"
+                ).fetchone()
+                if row and row["value"]:
+                    saved_st = json.loads(row["value"])
+                    if isinstance(saved_st, dict) and saved_st.get("downloadMbps"):
+                        self.isp_state["lastSpeedTest"] = saved_st
+                        history = self.isp_state.setdefault("speedHistory", [])
+                        if not history:
+                            history.append(saved_st)
+        except Exception:
+            pass
+
     def get_isp_state(self) -> dict:
         with self.lock:
             return json.loads(json.dumps(self.isp_state))

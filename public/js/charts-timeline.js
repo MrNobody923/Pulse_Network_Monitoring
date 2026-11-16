@@ -106,11 +106,55 @@ function fmtMegabytesPerSec(mbps) {
 
 function updateKumaLiveSpeed(live) {
   const el = document.getElementById('kumaStatLiveSpeed');
-  if (!el || !live) return;
-  const rx = fmtMegabytesPerSec(live.rxMbps);
-  const tx = fmtMegabytesPerSec(live.txMbps);
-  el.textContent = `↓ ${rx} · ↑ ${tx}`;
-  el.title = `Download: ${rx} (${Number(live.rxMbps || 0).toFixed(1)} Mbps) | Upload: ${tx} (${Number(live.txMbps || 0).toFixed(1)} Mbps)`;
+  if (!el) return;
+  const periodEl = document.getElementById('kumaStatSpeedPeriod');
+  const titleEl = document.getElementById('kumaStatSpeedTitle');
+  if (titleEl) titleEl.textContent = 'Internet Speed';
+
+  const isp = (window.appState && window.appState.isp) || {};
+  const st =
+    (live && live.lastDownloadMbps != null
+      ? { downloadMbps: live.lastDownloadMbps, uploadMbps: live.lastUploadMbps }
+      : null) ||
+    isp.lastSpeedTest ||
+    (typeof lastCompletedSpeedTest !== 'undefined' ? lastCompletedSpeedTest : null);
+
+  const rxMbps = Math.max(0, Number(live && live.rxMbps) || 0);
+  const txMbps = Math.max(0, Number(live && live.txMbps) || 0);
+  const rxMB = (rxMbps / 8).toFixed(2);
+  const txMB = (txMbps / 8).toFixed(2);
+
+  // Active transfer threshold: real active download/upload activity (> 2 Mbps)
+  const isActiveTransfer = rxMbps >= 2.0 || txMbps >= 2.0;
+
+  if (st && st.downloadMbps != null && Number(st.downloadMbps) > 0) {
+    const dlMbps = Number(st.downloadMbps);
+    const ulMbps = Number(st.uploadMbps) || 0;
+    const dlMB = (dlMbps / 8).toFixed(1);
+    const ulMB = (ulMbps / 8).toFixed(1);
+
+    if (isActiveTransfer) {
+      if (periodEl) periodEl.textContent = '(Active Live Transfer)';
+      el.innerHTML = `
+        <div style="font-size: 1.05rem; font-weight: 800; white-space: nowrap; color: var(--accent-cyan);">↓ ${rxMB} MB/s</div>
+        <div style="font-size: 0.72rem; color: var(--accent-amber); font-weight: 600; margin-top: 2px;">↑ ${txMB} MB/s · Active Transfer</div>
+      `;
+    } else {
+      if (periodEl) periodEl.textContent = '(Measured Line Speed)';
+      el.innerHTML = `
+        <div style="font-size: 1.02rem; font-weight: 800; white-space: nowrap; color: var(--accent-cyan);">↓ ${dlMB} MB/s · ↑ ${ulMB} MB/s</div>
+        <div style="font-size: 0.72rem; color: var(--text-dim); font-weight: 600; margin-top: 2px;">${Math.round(dlMbps)} Mbps Down · ${Math.round(ulMbps)} Mbps Up</div>
+      `;
+    }
+    el.title = `Measured Line Speed: ${dlMB} MB/s (${dlMbps.toFixed(1)} Mbps) Down · ${ulMB} MB/s (${ulMbps.toFixed(1)} Mbps) Up\nCurrent Real-Time NIC Transfer: ${rxMB} MB/s (${rxMbps.toFixed(1)} Mbps) Down · ${txMB} MB/s (${txMbps.toFixed(1)} Mbps) Up`;
+  } else {
+    if (periodEl) periodEl.textContent = '(Live NIC Throughput)';
+    el.innerHTML = `
+      <div style="font-size: 1.02rem; font-weight: 800; white-space: nowrap; color: var(--accent-cyan);">↓ ${rxMB} MB/s · ↑ ${txMB} MB/s</div>
+      <div style="font-size: 0.72rem; color: var(--text-dim); font-weight: 600; margin-top: 2px;">Measuring Internet Line...</div>
+    `;
+    el.title = `Current NIC Transfer: ${rxMB} MB/s Down · ${txMB} MB/s Up`;
+  }
 }
 
 async function pingInternetNow() {
@@ -306,14 +350,7 @@ function renderPingGraphSection() {
   setTxt('kumaStatUptime24h', `${uptime24h}%`);
   setTxt('kumaStatUptime30d', `${uptime30d}%`);
   setTxt('kumaStatPacketLoss', `${lossPct}% Loss`);
-  if (isp.liveThroughput) {
-    updateKumaLiveSpeed(isp.liveThroughput);
-  } else if (isp.lastSpeedTest && isp.lastSpeedTest.downloadMbps != null) {
-    setTxt(
-      'kumaStatLiveSpeed',
-      `↓ ${fmtMegabytesPerSec(isp.lastSpeedTest.downloadMbps)} · ↑ ${fmtMegabytesPerSec(isp.lastSpeedTest.uploadMbps)}`
-    );
-  }
+  updateKumaLiveSpeed(isp.liveThroughput);
 
   const lossEl = document.getElementById('kumaStatPacketLoss');
   if (lossEl) {

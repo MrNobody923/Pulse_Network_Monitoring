@@ -485,6 +485,15 @@ class IspSpeedMixin:
                     dns_ms=self.isp_state.get("dnsResolutionMs"),
                     last_speed=result,
                 )
+            try:
+                if hasattr(self, "_connect"):
+                    with self._connect() as db:
+                        db.execute(
+                            "INSERT OR REPLACE INTO monitor_metadata (key, value) VALUES ('last_speed_test', ?)",
+                            (json.dumps(result),),
+                        )
+            except Exception:
+                pass
             self.broadcast(
                 "speedtest_progress",
                 {
@@ -538,7 +547,8 @@ class IspSpeedMixin:
         previous_at = time.monotonic()
         last_identity = 0.0
         loop_started = time.monotonic()
-        first_auto_test_at = time.time() + 90
+        has_speedtest = bool(self.isp_state.get("lastSpeedTest"))
+        first_auto_test_at = time.time() + (300 if has_speedtest else 8)
         history: list[dict] = []
         peak_rx = peak_tx = 0.0
         while not self._stop.is_set():
@@ -585,6 +595,7 @@ class IspSpeedMixin:
             point = {"t": utc_now(), "rx": rx_mbps, "tx": tx_mbps}
             history.append(point)
             del history[:-LIVE_HISTORY_POINTS]
+            st = self.isp_state.get("lastSpeedTest") or {}
             live = {
                 "timestamp": point["t"],
                 "rxMbps": rx_mbps,
@@ -593,6 +604,8 @@ class IspSpeedMixin:
                 "peakTxMbps": peak_tx,
                 "source": sampler.source,
                 "linkSpeedMbps": sampler.link_speed_mbps,
+                "lastDownloadMbps": st.get("downloadMbps"),
+                "lastUploadMbps": st.get("uploadMbps"),
                 "history": list(history),
             }
             self._isp_set(liveThroughput=live)
