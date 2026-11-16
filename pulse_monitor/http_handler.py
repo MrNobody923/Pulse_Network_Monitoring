@@ -10,6 +10,7 @@ import queue
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -974,6 +975,18 @@ def run_server(port: int = PORT) -> None:
     mon = _active_monitor()
     server = DashboardServer(("0.0.0.0", port), RequestHandler)
     mon.start()
+
+    def _open_browser() -> None:
+        time.sleep(1.0)
+        try:
+            import webbrowser
+            if os.environ.get("PULSE_NO_BROWSER") != "1" and not os.path.exists("/.dockerenv"):
+                webbrowser.open(f"http://localhost:{port}")
+        except Exception:
+            pass
+
+    threading.Thread(target=_open_browser, daemon=True, name="browser-opener").start()
+
     print("=======================================================", flush=True)
     print("  PULSE NETWORK MONITORING SYSTEM (Python)", flush=True)
     print(f"  Local Web Dashboard: http://localhost:{port}", flush=True)

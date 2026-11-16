@@ -7,37 +7,34 @@ echo   Router Target: http://192.168.0.1
 echo ========================================================
 echo.
 cd /d "%~dp0"
-if exist ".venv\Scripts\python.exe" (
-  start "Pulse Host Game Sensor" /min ".venv\Scripts\python.exe" host_game_sensor.py
-) else (
+
+set "PYTHON_EXE="
+if exist ".venv\Scripts\python.exe" set "PYTHON_EXE=.venv\Scripts\python.exe"
+if "%PYTHON_EXE%"=="" (
   where py >nul 2>nul
-  if %errorlevel%==0 (
-    start "Pulse Host Game Sensor" /min py -3 host_game_sensor.py
-  ) else (
-    start "Pulse Host Game Sensor" /min python host_game_sensor.py
-  )
+  if %errorlevel%==0 set "PYTHON_EXE=py -3"
+)
+if "%PYTHON_EXE%"=="" (
+  where python >nul 2>nul
+  if %errorlevel%==0 set "PYTHON_EXE=python"
 )
 
-where docker >nul 2>nul
-if %errorlevel%==0 (
-  docker info >nul 2>nul
-  if %errorlevel%==0 (
-    echo Starting Docker Compose service + Host Game Sensor...
-    docker compose up -d
-    echo Dashboard running at http://localhost:3000
-    pause
-    exit /b 0
-  )
+if "%PYTHON_EXE%"=="" (
+  echo [ERROR] Python was not found in PATH!
+  echo Please install Python 3.9+ from https://www.python.org/downloads/
+  pause
+  exit /b 1
 )
 
-if exist ".venv\Scripts\python.exe" (
-  ".venv\Scripts\python.exe" server.py
-) else (
-  where py >nul 2>nul
-  if %errorlevel%==0 (
-    py -3 server.py
-  ) else (
-    python server.py
-  )
-)
+echo [1/3] Starting Host Game & DNS Sensor in background...
+start "Pulse Host Game Sensor" /min %PYTHON_EXE% host_game_sensor.py
+
+echo [2/3] Opening web dashboard in your default browser...
+start "" "http://localhost:3000"
+
+echo [3/3] Running Pulse Monitor server on http://localhost:3000...
+echo.
+echo Press Ctrl+C in this window to stop the server.
+echo.
+%PYTHON_EXE% server.py
 pause
