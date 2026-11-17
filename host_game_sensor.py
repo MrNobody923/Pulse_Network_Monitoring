@@ -22,13 +22,14 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from pulse_monitor.config import utc_now
+from pulse_monitor.config import DATA_DIR, utc_now
 from pulse_monitor.game_detector import (
     GameDetectorMixin,
     SCAN_GAME_PORTS,
     _NETSTAT_GAME_PORTS,
     _PASSIVE_DNS_CACHE_EXCLUDE,
 )
+from pulse_monitor.wireshark_capture import WiresharkCaptureEngine
 
 
 def _detect_local_lan_ip(
@@ -103,6 +104,8 @@ class HostGameSensor:
         self._last_dns_at: str | None = None
         self._throttle_seq: dict[str, int] = {}
         self._bound_dns_ips: set[str] = set()
+        self._forwarded_dns_domains: dict[str, float] = {}
+        self._wireshark_engine: WiresharkCaptureEngine | None = None
         self._stop = threading.Event()
 
     def _is_blocked(self, client_ip: str, game_id: str) -> dict | None:
@@ -116,16 +119,58 @@ class HostGameSensor:
                 return rule
         return None
 
+    def _ensure_wireshark_engine(self) -> WiresharkCaptureEngine:
+        if self._wireshark_engine is None:
+            infra_set = {x for x in (self.upstream_dns, "192.168.0.1") if x}
+            self._wireshark_engine = WiresharkCaptureEngine(
+                on_detection=self._handle_wireshark_detection,
+                pcap_path=DATA_DIR / "wireshark_live.pcap",
+                is_forwarded_dns_fn=self._is_forwarded_dns_query,
+                infra_ips=infra_set,
+            )
+        return self._wireshark_engine
+
+    def _is_forwarded_dns_query(self, ip: str, domain: str) -> bool:
+        if ip not in {self.dns_host, self.hotspot_ip}:
+            return False
+        dom = str(domain or "").strip().lower()
+        if not dom:
+            return False
+        with self._lock:
+            ts = self._forwarded_dns_domains.get(dom)
+        return bool(ts is not None and (time.monotonic() - ts) < 4.0)
+
+    def _handle_wireshark_detection(self, payload: dict) -> None:
+        client_ip = str(payload.get("ip") or "").strip()
+        game_id = str(payload.get("gameId") or "").strip()
+        if not client_ip or not game_id:
+            return
+        if self._should_report(client_ip, game_id, cooldown=3.5):
+            print(
+                f"[host-sensor] {payload.get('detectionMethod', 'Wireshark')} {client_ip} -> "
+                f"{payload.get('matchedIndicator') or game_id}",
+                flush=True,
+            )
+            threading.Thread(target=self._post_detection, args=(payload,), daemon=True).start()
+
     def _apply_policy_and_blocks(self, payload: dict) -> None:
         blocks = payload.get("blocks")
         policy = payload.get("policy")
+        ws_cfg = payload.get("wireshark")
         with self._lock:
             if isinstance(blocks, list):
                 self._active_blocks = blocks
             if isinstance(policy, dict) and policy.get("preventionMode"):
                 self._prevention_mode = str(policy["preventionMode"]).strip().lower()
+        if isinstance(ws_cfg, dict) and self._wireshark_engine is not None:
+            self._wireshark_engine.configure(
+                enabled=ws_cfg.get("enabled"),
+                selected_interfaces=ws_cfg.get("selectedInterfaces"),
+                custom_tshark_path=ws_cfg.get("customTsharkPath"),
+            )
 
     def _send_sensor_heartbeat(self) -> None:
+        ws_status = self._wireshark_engine.status_snapshot() if self._wireshark_engine is not None else None
         with self._lock:
             hb_payload = {
                 "pid": os.getpid(),
@@ -138,6 +183,7 @@ class HostGameSensor:
                 "lastDnsClientIp": self._last_dns_client_ip,
                 "lastDnsDomain": self._last_dns_domain,
                 "lastDnsAt": self._last_dns_at,
+                "wireshark": ws_status,
             }
         body = json.dumps(hb_payload).encode("utf-8")
         req = urllib.request.Request(
@@ -630,6 +676,9 @@ class HostGameSensor:
                     ).start()
 
         # Loop-safe upstream forwarding: public domains go directly to 1.1.1.1 / 8.8.8.8 so router DHCP DNS never loops back
+        if qname and client_ip not in {self.dns_host, self.hotspot_ip, "127.0.0.1"}:
+            with self._lock:
+                self._forwarded_dns_domains[qname.lower()] = time.monotonic()
         is_local_name = (not qname) or ("." not in qname) or qname.endswith((".local", ".lan", ".home", ".internal", ".arpa"))
         upstreams = (
             (self.upstream_dns, "1.1.1.1", "8.8.8.8")
@@ -882,12 +931,18 @@ class HostGameSensor:
             t.start()
         for bind_ip in dns_ips:
             self._ensure_dns_listeners(bind_ip)
-        print("[host-sensor] Real-time DNS (UDP/TCP 53), Syslog (514), Broadcast, Process & LAN scanner active", flush=True)
+        ws_engine = self._ensure_wireshark_engine()
+        ws_engine.start()
+        print(
+            "[host-sensor] Real-time DNS (UDP/TCP 53), Syslog (514), Broadcast, Wireshark DPI, Process & LAN scanner active",
+            flush=True,
+        )
         try:
             while not self._stop.is_set():
                 time.sleep(1.0)
         except KeyboardInterrupt:
             self._stop.set()
+            ws_engine.stop()
 
 
 def main() -> int:

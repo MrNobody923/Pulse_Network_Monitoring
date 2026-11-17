@@ -198,6 +198,7 @@ function renderGamingSection() {
   setTxt('gameTabActiveCount', activeCount);
   setTxt('gameTabBlockedCount', blockedLogCount);
   renderGameSensorBanner(data, onlineCount);
+  renderWiresharkStatusBar(data.wiresharkStatus || {});
   renderGamingPolicyControls(data.policy || {});
   setTxt(
     'gameTerminalPromptText',
@@ -755,6 +756,184 @@ async function configureRouterGameDns() {
       btn.disabled = false;
       btn.textContent = '⚡ Setup Whole-Wi-Fi Interception';
     }
+  }
+}
+
+function renderWiresharkStatusBar(ws) {
+  const bar = document.getElementById('gameWiresharkBar');
+  const badge = document.getElementById('gameWiresharkBadge');
+  const sum = document.getElementById('gameWiresharkSummary');
+  const strip = document.getElementById('gameWiresharkHitsStrip');
+  const toggleBtn = document.getElementById('btnToggleWireshark');
+  if (!bar && !badge && !sum) return;
+
+  const s = ws && typeof ws === 'object' ? ws : {};
+  const enabled = s.enabled !== false;
+  const active = Boolean(s.active && enabled);
+  const tsharkOn = Boolean(s.tsharkInstalled);
+  const npcapOn = Boolean(s.npcapAvailable);
+  const pkts = Number(s.packetsCaptured || 0);
+  const matched = Number(s.packetsMatched || 0);
+  const tlsCnt = Number(s.tlsSniMatches || 0);
+  const dnsCnt = Number(s.dnsMatches || 0);
+  const flowCnt = Number(s.portMatches || 0);
+  const pcapKB = ((Number(s.pcapBytes || 0)) / 1024).toFixed(1);
+  const ifaceCount = Array.isArray(s.selectedInterfaces) ? s.selectedInterfaces.length : 0;
+
+  if (badge) {
+    if (!enabled) {
+      badge.className = 'status-pill';
+      badge.textContent = '⏸ WIRESHARK CAPTURE PAUSED';
+    } else if (active) {
+      badge.className = 'status-pill online';
+      badge.textContent = `🦈 WIRESHARK · ${tsharkOn ? 'TSHARK LIVE' : 'NPCAP LIVE'} (${pkts.toLocaleString()} PKTS)`;
+    } else if (npcapOn || tsharkOn) {
+      badge.className = 'status-pill warning';
+      badge.textContent = '🟠 WIRESHARK · STANDBY';
+    } else {
+      badge.className = 'status-pill';
+      badge.textContent = '📂 WIRESHARK · OFFLINE PCAP MODE';
+    }
+  }
+  if (bar) {
+    bar.classList.toggle('warn', Boolean(enabled && !active && (npcapOn || tsharkOn)));
+  }
+  if (toggleBtn) {
+    toggleBtn.textContent = enabled ? '⏸ Pause Capture' : '▶ Resume Capture';
+  }
+  if (sum) {
+    const engineLabel = tsharkOn
+      ? 'TShark CLI Dissector'
+      : npcapOn
+      ? 'Built-in Npcap (wpcap.dll)'
+      : 'Offline .pcap/.pcapng Parser';
+    const tzspText = s.tzspActive ? ` · TZSP Mirror :${s.tzspPort || 37008}` : '';
+    const nicText = ifaceCount > 0 ? ` · ${ifaceCount} NIC(s)` : '';
+    sum.innerHTML =
+      `Engine: <strong>${esc(engineLabel)}</strong>${esc(nicText)}${esc(tzspText)} · ` +
+      `Matched: <strong>${matched}</strong> (TLS SNI ${tlsCnt} · DNS ${dnsCnt} · Flows ${flowCnt}) · ` +
+      `.pcap: <code>${esc(pcapKB)} KB</code>` +
+      (!tsharkOn ? ' · <span style="opacity:0.85;">Tip: install Wireshark/TShark for full protocol trees</span>' : '');
+  }
+  if (strip) {
+    const hits = Array.isArray(s.recentHits) ? s.recentHits.slice(0, 3) : [];
+    const lastA = s.lastAnalyze;
+    const parts = [];
+    if (hits.length) {
+      parts.push(
+        `<strong>Live Packet Hits:</strong> ` +
+          hits
+            .map(
+              h =>
+                `<span class="mono">[${esc(h.protocol || 'DPI')}]</span> ${esc(h.ip)} → <code>${esc(
+                  h.matchedIndicator || h.gameName
+                )}</code>`
+            )
+            .join(' · ')
+      );
+    }
+    if (lastA && lastA.filename) {
+      parts.push(
+        `<strong>Last File:</strong> <code>${esc(lastA.filename)}</code> (${Number(
+          lastA.packetsParsed || 0
+        )} pkts, <strong>${Number(lastA.uniqueMatches || 0)}</strong> game matches)`
+      );
+    }
+    if (parts.length) {
+      strip.style.display = 'block';
+      strip.innerHTML = parts.join('<br>');
+    } else {
+      strip.style.display = 'none';
+      strip.innerHTML = '';
+    }
+  }
+}
+
+async function toggleWiresharkCapture() {
+  const ws = (getGameActivityData() && getGameActivityData().wiresharkStatus) || {};
+  const nextEnabled = ws.enabled === false;
+  try {
+    const res = await apiJson('/api/gaming/wireshark/config', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: nextEnabled })
+    });
+    if (res && res.wiresharkStatus && appState.gameActivity) {
+      appState.gameActivity.wiresharkStatus = res.wiresharkStatus;
+    }
+    await refreshGameActivityAuto();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function copyWiresharkDisplayFilter() {
+  const ws = (getGameActivityData() && getGameActivityData().wiresharkStatus) || {};
+  const filter = String(ws.displayFilter || 'dns or tls.handshake.type == 1');
+  const btn = document.getElementById('btnCopyWiresharkFilter');
+  try {
+    await navigator.clipboard.writeText(filter);
+    if (btn) {
+      const prev = btn.textContent;
+      btn.textContent = '✓ Filter Copied!';
+      setTimeout(() => {
+        btn.textContent = prev;
+      }, 2000);
+    }
+  } catch (_) {
+    window.prompt('Copy Wireshark Display Filter:', filter);
+  }
+}
+
+function triggerWiresharkPcapImport() {
+  const inp = document.getElementById('wiresharkPcapFileInput');
+  if (inp) inp.click();
+}
+
+async function handleWiresharkPcapUpload(input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  const banner = document.getElementById('gameScanResultBanner');
+  try {
+    if (file.size > 11 * 1024 * 1024) {
+      alert('Please upload a .pcap or .pcapng capture smaller than 11 MB.');
+      return;
+    }
+    if (banner) {
+      banner.style.display = 'block';
+      banner.innerHTML = `<div class="game-auto-status-bar"><span class="status-pill warning">🦈 ANALYZING WIRESHARK CAPTURE...</span><span style="font-size:0.78rem; color:var(--text-muted);">Dissecting DNS, TLS SNI, HTTP &amp; UDP/TCP game packets from <code>${esc(file.name)}</code>...</span></div>`;
+    }
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    const dataBase64 = btoa(bin);
+    const res = await apiJson('/api/gaming/wireshark/analyze', {
+      method: 'POST',
+      body: JSON.stringify({ filename: file.name, dataBase64, ingest: true })
+    });
+    if (res.gameActivity) appState.gameActivity = res.gameActivity;
+    if (banner) {
+      banner.style.display = 'block';
+      banner.innerHTML = `
+        <div class="game-auto-status-bar">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
+            <span class="status-pill ${res.uniqueMatches > 0 ? 'warning' : 'online'}">🦈 ${esc(file.name)}</span>
+            <span style="font-size:0.78rem; color:var(--text-muted);">Parsed <strong>${Number(res.packetsParsed || 0)}</strong> packets — found <strong>${Number(res.uniqueMatches || 0)}</strong> game match(es) (${Number(res.detectionsLogged || 0)} logged into Playing Now).</span>
+          </div>
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">✕ Close</button>
+        </div>
+      `;
+    }
+    renderGamingSection();
+    await loadInitialState();
+  } catch (err) {
+    if (banner) banner.style.display = 'none';
+    alert(err.message);
+  } finally {
+    input.value = '';
   }
 }
 

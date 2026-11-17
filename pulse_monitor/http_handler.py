@@ -55,13 +55,13 @@ class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"[http] {self.address_string()} - {fmt % args}", flush=True)
 
-    def _json_body(self) -> dict:
+    def _json_body(self, max_bytes: int = MAX_BODY_BYTES) -> dict:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
             raise ValueError("Invalid Content-Length header") from exc
-        if length < 0 or length > MAX_BODY_BYTES:
-            raise ValueError("Request body must be smaller than 1 MB")
+        if length < 0 or length > max_bytes:
+            raise ValueError(f"Request body must be smaller than {max_bytes // (1024 * 1024) or 1} MB")
         raw = self.rfile.read(length) if length else b"{}"
         try:
             body = json.loads(raw.decode("utf-8"))
@@ -283,6 +283,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "blocks": mon.get_game_blocks(),
                     "policy": mon.get_gaming_policy(),
                 })
+            elif path == "/api/gaming/wireshark/status":
+                self._send_json(mon.get_wireshark_status())
+            elif path == "/api/gaming/wireshark/capture.pcap":
+                raw_pcap = mon.get_wireshark_capture_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.tcpdump.pcap")
+                self.send_header("Content-Disposition", 'attachment; filename="pulse-game-capture.pcap"')
+                self.send_header("Content-Length", str(len(raw_pcap)))
+                self.send_header("Cache-Control", "no-store")
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(raw_pcap)
             else:
                 self._send_error_json("Not found", 404)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
@@ -336,7 +348,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._handle_dashboard_action(mon, path)
             return
         try:
-            body = self._json_body()
+            body = self._json_body(
+                max_bytes=16 * 1024 * 1024 if path == "/api/gaming/wireshark/analyze" else MAX_BODY_BYTES
+            )
             if path == "/api/devices":
                 created = mon.add_device(body)
                 self._send_json(created, 201)
@@ -611,6 +625,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(mon.record_gaming_sensor_heartbeat(body))
             elif path == "/api/gaming/setup-router-dns":
                 self._send_json(mon.configure_router_game_dns())
+            elif path == "/api/gaming/wireshark/analyze":
+                self._send_json(mon.analyze_wireshark_capture(body))
+            elif path == "/api/gaming/wireshark/config":
+                self._send_json(mon.set_wireshark_config(body))
             else:
                 pos_match = re.fullmatch(
                     r"/api/topology/node/([^/]+)/position", path

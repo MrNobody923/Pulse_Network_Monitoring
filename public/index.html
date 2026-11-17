@@ -1990,6 +1990,34 @@
         </button>
       </div>
 
+      <!-- Wireshark / TShark & Npcap Deep Packet Capture Integration -->
+      <div class="game-auto-status-bar" id="gameWiresharkBar">
+        <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:260px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span class="status-pill online" id="gameWiresharkBadge">🦈 WIRESHARK · INITIALIZING</span>
+            <span id="gameWiresharkSummary" style="font-size:0.76rem; color:var(--text-muted); line-height:1.4;">
+              Inspecting DNS Wire, TLS SNI, HTTP Host, TZSP (UDP 37008) &amp; Game Flows...
+            </span>
+          </div>
+          <div id="gameWiresharkHitsStrip" style="display:none; font-size:0.72rem; color:var(--text-dim); line-height:1.4;"></div>
+        </div>
+        <div class="row-actions-group" style="justify-content:flex-end; flex-shrink:0;">
+          <button type="button" class="btn btn-secondary btn-xs" id="btnToggleWireshark" onclick="toggleWiresharkCapture()">
+            ⏸ Pause Capture
+          </button>
+          <a class="btn btn-secondary btn-xs" id="btnDownloadWiresharkPcap" href="/api/gaming/wireshark/capture.pcap" download="pulse-game-capture.pcap">
+            ⬇ Download .pcap
+          </a>
+          <button type="button" class="btn btn-secondary btn-xs" onclick="triggerWiresharkPcapImport()">
+            📂 Analyze .pcap/.pcapng
+          </button>
+          <button type="button" class="btn btn-secondary btn-xs" id="btnCopyWiresharkFilter" onclick="copyWiresharkDisplayFilter()">
+            📋 Copy Filter
+          </button>
+          <input type="file" id="wiresharkPcapFileInput" accept=".pcap,.pcapng,.cap" style="display:none;" onchange="handleWiresharkPcapUpload(this)">
+        </div>
+      </div>
+
       <!-- Manual Control Policy Strip (Never Auto-Blocks Users) -->
       <div class="game-policy-bar" id="gamePolicyBar">
         <div class="game-policy-label">
@@ -2340,7 +2368,7 @@
   <script src="js/charts-timeline.js?v=20261117e"></script>
   <script src="js/nmap-scanner.js?v=20261117a"></script>
   <script src="js/topology.js?v=20261117a"></script>
-  <script src="js/game-detector.js?v=20261117c"></script>
+  <script src="js/game-detector.js?v=20261117e"></script>
   <script src="js/modals-tools.js?v=20261117a"></script>
   <script src="js/app.js?v=20261117d"></script>
 </body>

@@ -449,6 +449,8 @@ class GameDetectorMixin:
             "lastDnsClientIp": "",
             "lastDnsDomain": "",
             "lastDnsAt": None,
+            "wireshark": None,
+            "wiresharkLastAnalyze": None,
         }
 
     def get_gaming_policy(self) -> dict:
@@ -594,10 +596,214 @@ class GameDetectorMixin:
                 tel["lastDnsDomain"] = str(payload["lastDnsDomain"])[:120]
             if payload.get("lastDnsAt"):
                 tel["lastDnsAt"] = str(payload["lastDnsAt"])[:64]
+            if isinstance(payload.get("wireshark"), dict):
+                tel["wireshark"] = dict(payload["wireshark"])
         return {
             "success": True,
             "blocks": self.get_game_blocks(),
             "policy": self.get_gaming_policy(),
+            "wireshark": self.get_wireshark_config(),
+        }
+
+    def get_wireshark_config(self) -> dict:
+        with self.lock:
+            gaming = dict(self.config.get("gaming") or {})
+        raw = dict(gaming.get("wireshark") or {})
+        selected = raw.get("selectedInterfaces")
+        return {
+            "enabled": True if raw.get("enabled") is None else bool(raw.get("enabled")),
+            "selectedInterfaces": [str(x) for x in selected] if isinstance(selected, list) else None,
+            "customTsharkPath": str(raw.get("customTsharkPath") or "").strip(),
+        }
+
+    def set_wireshark_config(self, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object")
+        with self.lock:
+            gaming = self.config.setdefault("gaming", {})
+            ws = dict(gaming.get("wireshark") or {})
+            if "enabled" in payload:
+                ws["enabled"] = bool(payload["enabled"])
+            if "selectedInterfaces" in payload:
+                sel = payload["selectedInterfaces"]
+                ws["selectedInterfaces"] = [str(x).strip() for x in sel if str(x).strip()] if isinstance(sel, list) else None
+            if "customTsharkPath" in payload:
+                ws["customTsharkPath"] = str(payload.get("customTsharkPath") or "").strip()
+            gaming["wireshark"] = ws
+            self.save_config()
+        return {"success": True, "wiresharkStatus": self.get_wireshark_status()}
+
+    def get_wireshark_status(self) -> dict:
+        from .wireshark_capture import (
+            PcapRingRecorder,
+            build_wireshark_display_filter,
+            find_wireshark_binaries,
+            list_npcap_interfaces,
+        )
+
+        cfg = self.get_wireshark_config()
+        with self.lock:
+            tel = dict(self._gaming_sensor_telemetry)
+        sensor_online = (time.time() - float(tel.get("lastSeenEpoch") or 0.0)) <= 12.0
+        live_ws = dict(tel.get("wireshark") or {}) if isinstance(tel.get("wireshark"), dict) else {}
+        last_analyze = tel.get("wiresharkLastAnalyze")
+
+        if live_ws:
+            bins = {
+                "tsharkInstalled": bool(live_ws.get("tsharkInstalled")),
+                "tsharkPath": live_ws.get("tsharkPath") or "",
+                "dumpcapInstalled": bool(live_ws.get("dumpcapInstalled")),
+                "wiresharkGuiInstalled": bool(live_ws.get("wiresharkGuiInstalled")),
+                "npcapAvailable": bool(live_ws.get("npcapAvailable")),
+            }
+            ifaces = list(live_ws.get("interfaces") or [])
+        else:
+            in_test = getattr(self, "_skip_live_probe_in_test", False)
+            bins = find_wireshark_binaries(cfg.get("customTsharkPath", ""))
+            ifaces = [] if in_test else list_npcap_interfaces(
+                bins.get("wpcapPath", ""), bins.get("tsharkPath", "")
+            )
+
+        pcap_path = self._data_dir() / "wireshark_live.pcap"
+        try:
+            pcap_bytes = int(pcap_path.stat().st_size) if pcap_path.exists() else len(PcapRingRecorder.GLOBAL_HEADER)
+        except OSError:
+            pcap_bytes = len(PcapRingRecorder.GLOBAL_HEADER)
+
+        selected = (
+            cfg.get("selectedInterfaces")
+            if cfg.get("selectedInterfaces") is not None
+            else list(live_ws.get("selectedInterfaces") or [x["name"] for x in ifaces if x.get("preferred")][:4])
+        )
+        engine_name = (
+            live_ws.get("engine")
+            or ("tshark" if bins.get("tsharkInstalled") else ("npcap-wpcap" if bins.get("npcapAvailable") else "offline-pcap"))
+        )
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "active": bool(sensor_online and live_ws.get("active")),
+            "sensorOnline": sensor_online,
+            "engine": engine_name,
+            "tsharkInstalled": bool(bins.get("tsharkInstalled")),
+            "tsharkPath": str(bins.get("tsharkPath") or ""),
+            "dumpcapInstalled": bool(bins.get("dumpcapInstalled")),
+            "wiresharkGuiInstalled": bool(bins.get("wiresharkGuiInstalled")),
+            "npcapAvailable": bool(bins.get("npcapAvailable")),
+            "tzspActive": bool(sensor_online and live_ws.get("tzspActive")),
+            "tzspPort": int(live_ws.get("tzspPort") or 37008),
+            "interfaces": ifaces,
+            "selectedInterfaces": selected,
+            "packetsCaptured": int(live_ws.get("packetsCaptured") or 0),
+            "packetsMatched": int(live_ws.get("packetsMatched") or 0),
+            "dnsMatches": int(live_ws.get("dnsMatches") or 0),
+            "tlsSniMatches": int(live_ws.get("tlsSniMatches") or 0),
+            "httpMatches": int(live_ws.get("httpMatches") or 0),
+            "portMatches": int(live_ws.get("portMatches") or 0),
+            "pcapBytes": int(live_ws.get("pcapBytes") or pcap_bytes),
+            "pcapUrl": "/api/gaming/wireshark/capture.pcap",
+            "lastHitAt": live_ws.get("lastHitAt"),
+            "recentHits": list(live_ws.get("recentHits") or []),
+            "displayFilter": live_ws.get("displayFilter") or build_wireshark_display_filter(GAME_SIGNATURES),
+            "lastAnalyze": last_analyze,
+        }
+
+    def get_wireshark_capture_bytes(self) -> bytes:
+        from .wireshark_capture import PcapRingRecorder
+
+        pcap_path = self._data_dir() / "wireshark_live.pcap"
+        if pcap_path.is_file():
+            try:
+                data = pcap_path.read_bytes()
+                if len(data) >= 24:
+                    return data
+            except OSError:
+                pass
+        return PcapRingRecorder.GLOBAL_HEADER
+
+    def analyze_wireshark_capture(self, payload: dict) -> dict:
+        import base64
+        from .wireshark_capture import dissect_raw_packet, parse_pcap_or_pcapng
+
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object")
+        b64_raw = str(payload.get("dataBase64") or "").strip()
+        filename = str(payload.get("filename") or "capture.pcapng").strip()[:160]
+        ingest = True if payload.get("ingest") is None else bool(payload.get("ingest"))
+        if not b64_raw:
+            raise ValueError("Capture file payload (dataBase64) is required")
+        if "," in b64_raw and b64_raw[:64].lower().startswith("data:"):
+            b64_raw = b64_raw.split(",", 1)[1]
+        try:
+            raw_bytes = base64.b64decode(b64_raw, validate=False)
+        except Exception as exc:
+            raise ValueError("Invalid base64 capture payload") from exc
+
+        frames = parse_pcap_or_pcapng(raw_bytes)
+        seen_hits: set[tuple[str, str, str]] = set()
+        hits: list[dict] = []
+        detections: list[dict] = []
+        seen_detect_keys: set[tuple[str, str]] = set()
+        matched_packets = 0
+
+        for ts_epoch, dlt, frame in frames:
+            res = dissect_raw_packet(
+                frame,
+                dlt=dlt,
+                ts_epoch=ts_epoch,
+                matcher=self._match_game_signature,
+                game_ports=_NETSTAT_GAME_PORTS,
+            )
+            if not res:
+                continue
+            matched_packets += 1
+            hit_key = (res["ip"], res["gameId"], res.get("matchedIndicator", ""))
+            if hit_key not in seen_hits:
+                seen_hits.add(hit_key)
+                hits.append({
+                    "timestamp": datetime.fromtimestamp(ts_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "ip": res["ip"],
+                    "remoteIp": res.get("remoteIp", ""),
+                    "gameId": res["gameId"],
+                    "gameName": res["gameName"],
+                    "protocol": res.get("protocol", ""),
+                    "matchedIndicator": res.get("matchedIndicator", ""),
+                    "detectionMethod": f"Wireshark File ({filename})",
+                    "port": res.get("port"),
+                    "domain": res.get("domain", ""),
+                })
+            if ingest and (res["ip"], res["gameId"]) not in seen_detect_keys:
+                seen_detect_keys.add((res["ip"], res["gameId"]))
+                det_res = self.record_game_detection({
+                    "ip": res["ip"],
+                    "gameId": res["gameId"],
+                    "domain": res.get("domain", ""),
+                    "port": res.get("port"),
+                    "matchedIndicator": res.get("matchedIndicator", ""),
+                    "detectionMethod": f"Wireshark Capture ({filename})",
+                    "skipAutoPrevent": True,
+                })
+                if det_res.get("detection"):
+                    detections.append(det_res["detection"])
+
+        summary = {
+            "filename": filename,
+            "analyzedAt": utc_now(),
+            "packetsParsed": len(frames),
+            "matchedPackets": matched_packets,
+            "uniqueMatches": len(hits),
+            "detectionsLogged": len(detections),
+            "hits": hits[:80],
+        }
+        with self.lock:
+            self._gaming_sensor_telemetry["wiresharkLastAnalyze"] = summary
+        activity = self.get_game_activity(100)
+        if detections:
+            self.broadcast("game_detected", {"gameActivity": activity})
+        return {
+            "success": True,
+            **summary,
+            "detections": detections,
+            "gameActivity": activity,
         }
 
     def _get_gaming_sensor_status(self) -> dict:
@@ -1465,6 +1671,7 @@ class GameDetectorMixin:
             "autoScanActive": True,
             "policy": policy,
             "sensorStatus": sensor_status,
+            "wiresharkStatus": self.get_wireshark_status(),
             "summary": {
                 "activeCount": len(active_logs),
                 "blockedCount": len(blocks),
