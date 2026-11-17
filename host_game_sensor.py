@@ -122,11 +122,13 @@ class HostGameSensor:
     def _ensure_wireshark_engine(self) -> WiresharkCaptureEngine:
         if self._wireshark_engine is None:
             infra_set = {x for x in (self.upstream_dns, "192.168.0.1") if x}
+            self_set = {x for x in (self.dns_host, self.hotspot_ip) if x}
             self._wireshark_engine = WiresharkCaptureEngine(
                 on_detection=self._handle_wireshark_detection,
                 pcap_path=DATA_DIR / "wireshark_live.pcap",
                 is_forwarded_dns_fn=self._is_forwarded_dns_query,
                 infra_ips=infra_set,
+                self_ips=self_set,
             )
         return self._wireshark_engine
 

@@ -725,13 +725,17 @@ class ProbesMixin:
         wan_up = self._is_wan_internet_up()
         has_internet = bool(alive and wan_up)
 
+        thresholds = self.config.get("thresholds", {})
+        high_loss = int(thresholds.get("packetLossWarningPct", 5))
+        high_latency = float(thresholds.get("highLatencyMs", 80))
+
         if not alive:
             status = "offline"
             connectivity_state = "DEVICE_DOWN"
         elif not wan_up:
             status = "warning"
             connectivity_state = "ONLINE_NO_INTERNET"
-        elif loss > 5 or (average is not None and average > 120):
+        elif loss >= high_loss or (average is not None and average > high_latency):
             status = "warning"
             connectivity_state = "DEGRADED_LINK"
         else:

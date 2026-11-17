@@ -290,6 +290,7 @@ def dissect_raw_packet(
     matcher=None,
     game_ports: frozenset[int] | None = None,
     infra_ips: set[str] | None = None,
+    self_ips: set[str] | None = None,
     _depth: int = 0,
 ) -> dict | None:
     """Dissect Ethernet/Loopback/Raw IPv4/IPv6 packet and match Wireshark DPI signatures."""
@@ -298,6 +299,7 @@ def dissect_raw_packet(
     if ts_epoch is None:
         ts_epoch = time.time()
     infra = infra_ips or set()
+    self_set = self_ips or set()
     ports_set = game_ports if game_ports is not None else _get_game_ports_set()
 
     offset = 0
@@ -390,6 +392,7 @@ def dissect_raw_packet(
                     matcher=matcher,
                     game_ports=ports_set,
                     infra_ips=infra,
+                    self_ips=self_set,
                     _depth=_depth + 1,
                 )
                 if res:
@@ -534,12 +537,23 @@ def dissect_raw_packet(
                 "dstIp": dst_ip,
             }
 
-    # 5. Active Game Port Flows — match remote service/game port only (never client ephemeral source ports!)
+    # 5. Active Game Port Flows — match remote service/game port only (never client ephemeral source ports!),
+    # ignore LAN traffic involving monitor host self_ips (prevents active port-scan echoes),
     # and strictly exclude TCP RST (0x04), FIN (0x01), bare SYN (0x02), and known router/AP infra IPs!
-    if client_ip in infra:
-        return None
     is_external_flow = not (src_client and dst_client)
-    remote_port = dport if client_ip == src_ip else sport
+    if not is_external_flow and (src_ip in self_set or dst_ip in self_set):
+        return None
+    lan_game_ports = (19132, 27015, 27036)
+    flow_client_ip = client_ip
+    flow_remote_ip = remote_ip
+    if not is_external_flow:
+        if sport in lan_game_ports:
+            flow_client_ip, flow_remote_ip = src_ip, dst_ip
+        elif dport in lan_game_ports:
+            flow_client_ip, flow_remote_ip = dst_ip, src_ip
+    if flow_client_ip in infra:
+        return None
+    remote_port = dport if flow_client_ip == src_ip else sport
     if proto == 6:
         if (tcp_flags & 0x05) != 0 or (tcp_flags & 0x12) == 0x02:
             return None
@@ -547,9 +561,9 @@ def dissect_raw_packet(
             remote_port
             if (is_external_flow and remote_port in ports_set)
             else (
-                dport
-                if dport in (19132, 27015, 27036)
-                else (sport if sport in (19132, 27015, 27036) else None)
+                sport
+                if sport in lan_game_ports
+                else (dport if dport in lan_game_ports else None)
             )
         )
         if match_port is not None:
@@ -558,8 +572,8 @@ def dissect_raw_packet(
                 if sig:
                     return {
                         "tsEpoch": ts_epoch,
-                        "ip": client_ip,
-                        "remoteIp": remote_ip,
+                        "ip": flow_client_ip,
+                        "remoteIp": flow_remote_ip,
                         "gameId": sig["id"],
                         "gameName": sig["name"],
                         "port": match_port,
@@ -573,17 +587,15 @@ def dissect_raw_packet(
         match_port = (
             remote_port
             if (is_external_flow and remote_port in ports_set and remote_port not in (19132, 27036))
-            else (
-                27015 if 27015 in (sport, dport) else None
-            )
+            else (27015 if 27015 in (sport, dport) else None)
         )
         if match_port is not None:
             sig = _match_sig_helper(port=match_port, matcher=matcher)
             if sig:
                 return {
                     "tsEpoch": ts_epoch,
-                    "ip": client_ip,
-                    "remoteIp": remote_ip,
+                    "ip": flow_client_ip,
+                    "remoteIp": flow_remote_ip,
                     "gameId": sig["id"],
                     "gameName": sig["name"],
                     "port": match_port,
@@ -836,11 +848,13 @@ class WiresharkCaptureEngine:
         custom_tshark_path: str = "",
         is_forwarded_dns_fn=None,
         infra_ips: set[str] | None = None,
+        self_ips: set[str] | None = None,
     ) -> None:
         self.on_detection = on_detection
         self.tzsp_port = int(tzsp_port)
         self.is_forwarded_dns_fn = is_forwarded_dns_fn
         self.infra_ips = {str(x).strip() for x in (infra_ips or set()) if str(x).strip()}
+        self.self_ips = {str(x).strip() for x in (self_ips or set()) if str(x).strip()}
         self._custom_tshark_path = str(custom_tshark_path or "").strip()
         self.binaries = find_wireshark_binaries(self._custom_tshark_path)
         self.interfaces = list_npcap_interfaces(
@@ -1008,6 +1022,7 @@ class WiresharkCaptureEngine:
                         matcher=GameDetectorMixin._match_game_signature,
                         game_ports=_NETSTAT_GAME_PORTS,
                         infra_ips=self.infra_ips,
+                        self_ips=self.self_ips,
                     )
                     if hit:
                         self._emit_hit(hit, raw_frame=raw, dlt=dlt)
@@ -1139,14 +1154,23 @@ class WiresharkCaptureEngine:
                         })
                         continue
 
-                remote_port = dport if client_ip == src_ip else sport
                 is_external_flow = not (src_ok and dst_ok)
+                if not is_external_flow and (src_ip in self.self_ips or dst_ip in self.self_ips):
+                    continue
+                flow_client = client_ip
+                flow_remote = remote_ip
+                if not is_external_flow:
+                    if sport in (19132, 27015, 27036):
+                        flow_client, flow_remote = src_ip, dst_ip
+                    elif dport in (19132, 27015, 27036):
+                        flow_client, flow_remote = dst_ip, src_ip
+                remote_port = dport if flow_client == src_ip else sport
                 port_cand = (
                     remote_port
                     if (is_external_flow and remote_port in _NETSTAT_GAME_PORTS)
-                    else (dport if dport in (19132, 27015, 27036) else (sport if sport in (19132, 27015, 27036) else None))
+                    else (sport if sport in (19132, 27015, 27036) else (dport if dport in (19132, 27015, 27036) else None))
                 )
-                if port_cand is not None and client_ip not in self.infra_ips:
+                if port_cand is not None and flow_client not in self.infra_ips:
                     if t_sp or t_dp:
                         try:
                             f_val = int(t_flags, 16) if t_flags.startswith("0x") else int(t_flags)
@@ -1158,8 +1182,8 @@ class WiresharkCaptureEngine:
                     if sig:
                         self._emit_hit({
                             "tsEpoch": ts_epoch,
-                            "ip": client_ip,
-                            "remoteIp": remote_ip,
+                            "ip": flow_client,
+                            "remoteIp": flow_remote,
                             "gameId": sig["id"],
                             "gameName": sig["name"],
                             "port": port_cand,
@@ -1210,6 +1234,7 @@ class WiresharkCaptureEngine:
                     matcher=GameDetectorMixin._match_game_signature,
                     game_ports=_NETSTAT_GAME_PORTS,
                     infra_ips=self.infra_ips,
+                    self_ips=self.self_ips,
                 )
                 if hit:
                     hit["reporterIp"] = addr[0]

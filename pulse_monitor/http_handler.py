@@ -1043,11 +1043,12 @@ def run_server(port: int = PORT) -> None:
             print(f"  Mobile / LAN API URL: http://{lan_ip}:{port}", flush=True)
     except OSError:
         pass
+    device_poll_sec = max(5, min(20, int(mon.config.get("devicePollIntervalSec") or 15)))
     print(
-        "  LAN discovery: daily ping sweep of active private wired/Wi-Fi LANs",
+        "  LAN discovery: live ARP/infra sync every 45s + full LAN sweep every 5m",
         flush=True,
     )
-    print("  Monitored device probes: TCP/ICMP every 30 seconds", flush=True)
+    print(f"  Monitored device probes: TCP/ICMP every {device_poll_sec} seconds", flush=True)
     print("=======================================================", flush=True)
     try:
         server.serve_forever()

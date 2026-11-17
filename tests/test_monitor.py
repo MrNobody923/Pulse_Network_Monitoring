@@ -1162,6 +1162,17 @@ class InventoryTests(unittest.TestCase):
         gw_udp = build_udp_frame("192.168.0.1", "47.90.10.20", 51234, 39698, b"\x01\x02\x03")
         self.assertIsNone(dissect_raw_packet(gw_udp, dlt=1, infra_ips={"192.168.0.1"}))
 
+        # Monitor self_ips scanning another LAN host on :27015 must NOT trigger a self-detection echo
+        self_scan_tcp = build_tcp_frame("192.168.0.224", "192.168.1.63", 54321, 27015, 0x18, b"\x00\x01")
+        self.assertIsNone(dissect_raw_packet(self_scan_tcp, dlt=1, self_ips={"192.168.0.224"}))
+
+        # Non-self LAN host serving Steam :27036 to another peer attributes the host running :27036
+        lan_steam = build_tcp_frame("192.168.3.160", "192.168.1.50", 27036, 51111, 0x18, b"\xaa\xbb")
+        lan_steam_hit = dissect_raw_packet(lan_steam, dlt=1, self_ips={"192.168.0.224"})
+        self.assertIsNotNone(lan_steam_hit)
+        self.assertEqual(lan_steam_hit["ip"], "192.168.3.160")
+        self.assertEqual(lan_steam_hit["gameId"], "steam")
+
         # Genuine outbound UDP game traffic (client -> remote Free Fire server :39800) DOES match
         real_ff = build_udp_frame("192.168.2.130", "47.90.10.20", 51234, 39800, b"\x01\x02\x03")
         ff_hit = dissect_raw_packet(real_ff, dlt=1)
