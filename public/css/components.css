@@ -1058,8 +1058,8 @@
 }
 
 .game-row-info {
-  min-width: 240px;
-  flex: 1 1 auto;
+  min-width: 0;
+  flex: 1 1 220px;
 }
 
 .game-row-title {

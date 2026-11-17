@@ -1295,11 +1295,12 @@ class InventoryTests(unittest.TestCase):
 
         # Kernel BPF candidate filters stay valid and include DNS/TLS handshake/game ports + SYN filter
         bpfs = build_wireshark_bpf_filters(_NETSTAT_GAME_PORTS)
-        self.assertEqual(len(bpfs), 2)
+        self.assertGreaterEqual(len(bpfs), 2)
         self.assertIn("tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16", bpfs[0])
+        self.assertIn("ip6[(40 + ((ip6[52:1] & 0xf0) >> 2)):1] = 0x16", bpfs[0])
         self.assertIn("not (ip and tcp and (tcp[13] & 0x12 = 0x02))", bpfs[0])
         self.assertIn("port 27036", bpfs[0])
-        self.assertIn("tcp port 443", bpfs[1])
+        self.assertIn("tcp port 443", bpfs[-1])
 
         # Full Wireshark Display Filter includes games beyond index 40 (Roblox, Steam, Riot)
         from pulse_monitor.wireshark_capture import build_wireshark_display_filter

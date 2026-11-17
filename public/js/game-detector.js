@@ -173,7 +173,32 @@ function renderGamingSection() {
 
   const activeUnblockedLogs = deduped.filter(x => x.isActive && !isBlockedLog(x));
   const activeCount = activeUnblockedLogs.length;
-  const blockedLogCount = deduped.filter(isBlockedLog).length;
+  const blockedLogs = deduped.filter(isBlockedLog);
+  const blockedRuleRows = [];
+  for (const rule of blocks) {
+    const hasLog = blockedLogs.some(
+      x => (rule.ip === x.ip || rule.ip === '*') && (rule.gameId === x.gameId || rule.gameId === '*')
+    );
+    if (!hasLog) {
+      blockedRuleRows.push({
+        id: `rule-${rule.id}`,
+        timestamp: rule.createdAt || new Date().toISOString(),
+        ip: rule.ip || '*',
+        deviceName: rule.deviceName || rule.ip || 'Network Device',
+        deviceType: rule.mac ? `MAC ${rule.mac}` : '',
+        gameId: rule.gameId || '*',
+        gameName: rule.gameName || 'Blocked Access',
+        connectedTo: 'Active Restriction Rule',
+        matchedIndicator: rule.scope === 'device_wifi_cut' ? 'Wi-Fi Cut Off' : rule.scope === 'device_throttle' ? '1 KB/s Throttle + Lag' : 'Game Block',
+        detectionMethod: 'Manual Restriction Rule',
+        isActive: false,
+        isBlocked: true,
+        _ruleRef: rule
+      });
+    }
+  }
+  const blockedTabEntries = [...blockedLogs, ...blockedRuleRows];
+  const blockedLogCount = blockedTabEntries.length;
   const totalCount = summary.totalCount ?? deduped.length;
   const onlineCount =
     summary.onlineDevicesCount ??
@@ -228,7 +253,7 @@ function renderGamingSection() {
   if (gameActivityFilter === 'active') {
     filtered = activeUnblockedLogs;
   } else if (gameActivityFilter === 'blocked') {
-    filtered = filtered.filter(isBlockedLog);
+    filtered = blockedTabEntries;
   }
   if (gameActivitySearch) {
     filtered = filtered.filter(
@@ -295,7 +320,7 @@ function renderGamingSection() {
 
   container.innerHTML = ordered
     .map(item => {
-      const matchingRule = findRule(item);
+      const matchingRule = item._ruleRef || findRule(item);
       const isBlocked = Boolean(item.isBlocked || matchingRule);
       const rowCls = isBlocked ? 'is-blocked' : item.isActive ? 'is-live' : '';
       const pillCls = isBlocked ? 'critical' : item.isActive ? 'warning' : 'online';

@@ -851,6 +851,12 @@ def build_wireshark_bpf_filters(game_ports: set[int] | tuple[int, ...] | list[in
     strict = (
         "(port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
         "or (ip and (tcp port 443 or tcp port 8443) and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16) "
+        "or (ip6 proto 6 and (tcp port 443 or tcp port 8443) and ip6[(40 + ((ip6[52:1] & 0xf0) >> 2)):1] = 0x16)"
+        f"{suffix}) and not (ip and tcp and (tcp[13] & 0x12 = 0x02))"
+    )
+    fallback_syn = (
+        "(port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
+        "or (ip and (tcp port 443 or tcp port 8443) and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16) "
         "or (ip6 and (tcp port 443 or tcp port 8443))"
         f"{suffix}) and not (ip and tcp and (tcp[13] & 0x12 = 0x02))"
     )
@@ -858,7 +864,7 @@ def build_wireshark_bpf_filters(game_ports: set[int] | tuple[int, ...] | list[in
         "port 53 or udp port 37008 or tcp port 80 or tcp port 8080 or tcp port 443 or tcp port 8443"
         f"{suffix}"
     )
-    return [strict, fallback]
+    return [strict, fallback_syn, fallback]
 
 
 def _apply_wpcap_bpf_filter(dll, handle: int, game_ports: set[int] | tuple[int, ...] | list[int]) -> bool:
