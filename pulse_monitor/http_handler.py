@@ -575,7 +575,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/gaming/detect":
                 self._send_json(mon.record_game_detection(body), 201)
             elif path == "/api/gaming/scan":
-                self._send_json(mon.scan_lan_for_games())
+                self._send_json(mon.scan_lan_for_games(include_topology_refresh=True))
             elif path == "/api/gaming/clear":
                 self._send_json(mon.clear_game_activity())
             elif path == "/api/gaming/dismiss":

@@ -332,35 +332,22 @@ class HostGameSensor:
         if not ips:
             return
 
-        def _probe_ip(target_ip: str) -> tuple[str, int | None]:
-            for port in SCAN_GAME_PORTS:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(0.05)
-                        if s.connect_ex((target_ip, int(port))) == 0:
-                            return target_ip, int(port)
-                except OSError:
-                    continue
-            return target_ip, None
-
-        with ThreadPoolExecutor(max_workers=min(48, len(ips))) as pool:
-            for ip_key, open_port in pool.map(_probe_ip, ips):
-                if open_port is None:
-                    continue
-                sig = GameDetectorMixin._match_game_signature(port=open_port)
-                if not sig or self._is_blocked(ip_key, sig["id"]):
-                    continue
-                if self._should_report(ip_key, sig["id"], cooldown=6.0):
-                    print(
-                        f"[host-sensor] Auto Port {ip_key}:{open_port} -> [{sig['name']}]",
-                        flush=True,
-                    )
-                    self._post_detection({
-                        "ip": ip_key,
-                        "gameId": sig["id"],
-                        "port": open_port,
-                        "detectionMethod": "Auto LAN Game Port Sensor",
-                    })
+        hits = GameDetectorMixin._batch_scan_ports_nonblocking(ips, SCAN_GAME_PORTS, timeout_sec=0.14)
+        for ip_key, open_port in hits.items():
+            sig = GameDetectorMixin._match_game_signature(port=open_port)
+            if not sig or self._is_blocked(ip_key, sig["id"]):
+                continue
+            if self._should_report(ip_key, sig["id"], cooldown=6.0):
+                print(
+                    f"[host-sensor] Auto Port {ip_key}:{open_port} -> [{sig['name']}]",
+                    flush=True,
+                )
+                self._post_detection({
+                    "ip": ip_key,
+                    "gameId": sig["id"],
+                    "port": open_port,
+                    "detectionMethod": "Auto LAN Game Port Sensor",
+                })
 
     def _rst_client_ports(self, target_ip: str) -> None:
         linger = struct.pack("ii", 1, 0)
@@ -461,20 +448,25 @@ class HostGameSensor:
         except Exception:
             return
 
+        own_pid = str(os.getpid())
         for line in res.stdout.splitlines():
             parts = line.split()
-            if len(parts) < 4:
+            if len(parts) < 5:
                 continue
-            if parts[0].upper() != "TCP" or parts[3].upper() not in {"ESTABLISHED", "SYN_SENT"}:
+            if parts[0].upper() != "TCP" or parts[3].upper() != "ESTABLISHED":
                 continue
-            if ":" not in parts[1] or ":" not in parts[2]:
+            if parts[-1] == own_pid or ":" not in parts[1] or ":" not in parts[2]:
                 continue
             local_ip = parts[1].rsplit(":", 1)[0].strip("[]")
+            remote_ip = parts[2].rsplit(":", 1)[0].strip("[]")
             if local_ip != self.dns_host:
                 continue
             try:
                 remote_port = int(parts[2].rsplit(":", 1)[1])
+                r_addr = ipaddress.ip_address(remote_ip)
             except ValueError:
+                continue
+            if r_addr.is_private or r_addr.is_loopback or r_addr.is_link_local or r_addr.is_multicast:
                 continue
             if remote_port not in _GAME_SERVER_PORTS:
                 continue

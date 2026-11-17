@@ -380,9 +380,18 @@ function renderGameBlocksPanel(blocks) {
               <strong style="font-size:0.79rem;">${esc(b.gameName)}</strong>
               <span class="dev-row-sub">on ${esc(b.deviceName)} (${esc(b.ip)})</span>
             </div>
-            <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-green); color:var(--accent-green);" onclick="unblockGameRule('${esc(
-              b.id
-            )}')">🟢 Unblock User</button>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              ${
+                b.ip && b.ip !== '*' && b.scope !== 'device_wifi_cut'
+                  ? `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red);" onclick="shutOffGameSession('', '${esc(
+                      b.ip
+                    )}', '${esc(b.gameId || '*')}', 'device_wifi_cut', true)">🛑 Cut User Wi-Fi</button>`
+                  : ''
+              }
+              <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-green); color:var(--accent-green);" onclick="unblockGameRule('${esc(
+                b.id
+              )}')">🟢 Unblock User</button>
+            </div>
           </div>
         `
           )
@@ -540,9 +549,14 @@ function showGameDetectedToast(detection) {
 
 async function runLanGameScan() {
   const btn = document.getElementById('btnScanGames');
+  const banner = document.getElementById('gameScanResultBanner');
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '⏳ Scanning LAN...';
+    btn.textContent = '⏳ Scanning Topology...';
+  }
+  if (banner) {
+    banner.style.display = 'block';
+    banner.innerHTML = `<div class="game-auto-status-bar"><span class="status-pill warning">⏳ SCANNING NETWORK TOPOLOGY...</span><span style="font-size:0.78rem; color:var(--text-muted);">Polling routers/APs, ARP neighbors, host DNS/sockets &amp; every online device across all subnets for active games...</span></div>`;
   }
   try {
     const res = await apiJson('/api/gaming/scan', {
@@ -550,12 +564,43 @@ async function runLanGameScan() {
       body: JSON.stringify({})
     });
     if (res.gameActivity) appState.gameActivity = res.gameActivity;
-    if (Array.isArray(res.detections) && res.detections.length) {
-      showGameDetectedToast(res.detections[0]);
+    const dets = Array.isArray(res.detections) ? res.detections : [];
+    if (dets.length) {
+      showGameDetectedToast(dets[0]);
+      if (dets.some(d => d.isBlocked) && gameActivityFilter === 'active') {
+        setGameActivityFilter('blocked');
+      }
+    }
+    if (banner) {
+      const nodesCnt = Number(res.topologyNodesScanned || 0);
+      const hubsCnt = Number(res.topologyHubsScanned || 0);
+      const devCnt = Number(res.scannedDevices || 0);
+      const foundCnt = Number(res.confirmedHits ?? res.detectedCount ?? 0);
+      const activeCnt = Number(res.activeCount || 0);
+      const blockedCnt = Number(res.blockedCount || 0);
+      const act = res.gameActivity || getGameActivityData();
+      const bypass = (act.sensorStatus && act.sensorStatus.bypassingExternalDns) || [];
+      const noteHtml =
+        foundCnt > 0 || activeCnt > 0 || blockedCnt > 0
+          ? `Scanned ${hubsCnt} router/AP hub(s)${nodesCnt ? ` (${nodesCnt} map nodes)` : ''} &amp; ${devCnt} connected device(s) — fetched <strong>${foundCnt}</strong> live game hit(s) (${activeCnt} open, ${blockedCnt} blocked).`
+          : bypass.length && !(act.sensorStatus && act.sensorStatus.dnsInterceptReady)
+          ? `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} connected device(s). 0 local game ports/processes active. Wi-Fi phones currently resolve via external DNS (<code>${esc(bypass.join(', '))}</code>) — click <strong>⚡ Setup Whole-Wi-Fi Interception</strong> to capture phone game lookups.`
+          : `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} connected device(s) across the topology — no open games detected right now.`;
+      banner.style.display = 'block';
+      banner.innerHTML = `
+        <div class="game-auto-status-bar">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
+            <span class="status-pill ${foundCnt > 0 || activeCnt > 0 ? 'warning' : 'online'}">${foundCnt > 0 ? `🎮 FOUND ${foundCnt} GAME(S)` : '✓ TOPOLOGY SCAN COMPLETE'}</span>
+            <span style="font-size:0.78rem; color:var(--text-muted);">${noteHtml}</span>
+          </div>
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">✕ Close</button>
+        </div>
+      `;
     }
     renderGamingSection();
     await loadInitialState();
   } catch (err) {
+    if (banner) banner.style.display = 'none';
     alert(err.message);
   } finally {
     if (btn) {

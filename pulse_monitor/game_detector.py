@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 import ipaddress
 import json
 import os
 import re
+import selectors
 import socket
 import ssl
 import struct
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -317,7 +321,20 @@ _GAME_ID_ALIASES = {
     "supercell": "clashofclans",
 }
 
-SCAN_GAME_PORTS = (19132, 25565, 27015, 27036, 9339, 5000, 5221, 30090)
+SCAN_GAME_PORTS = (19132, 25565, 27015, 27036, 9339, 5221, 5223, 7500, 17500, 22101, 30090)
+_PASSIVE_DNS_CACHE_EXCLUDE = frozenset({
+    "steampowered.com",
+    "steamcommunity.com",
+    "valvesoftware.com",
+    "riotcdn.net",
+    "api.steampowered.com",
+})
+_NETSTAT_GAME_PORTS = frozenset({
+    5000, 5001, 5002, 5551, 30090, 30091, 7500, 7501, 10012,
+    17500, 20001, 10010, 10011, 5223, 22101, 22102, 39698, 39800,
+    9339, 3659, 17502, 8433, 22023, 8393, 8394, 19132, 25565,
+    27015, 27036,
+})
 
 _MOBILE_HINT_TOKENS = (
     "apple", "iphone", "ipad", "samsung", "huawei", "honor",
@@ -1822,51 +1839,393 @@ class GameDetectorMixin:
         # NODATA for HTTPS/SVCB/etc. so OS resolver doesn't fail over to secondary DNS
         return txid + b"\x81\x80\x00\x01\x00\x00\x00\x00\x00\x00" + question
 
-    def scan_lan_for_games(self) -> dict:
-        """Scan online non-infrastructure LAN clients for verified open TCP game ports only."""
-        mon_ips = {d["ip"] for d in self.get_devices()}
-        with self._connect() as db:
-            rows = db.execute(
-                "SELECT DISTINCT ip, vendor, suggested_name FROM discovered_devices WHERE is_online=1 ORDER BY ip LIMIT 120"
-            ).fetchall()
+    @staticmethod
+    def _batch_scan_ports_nonblocking(
+        client_ips: list[str], ports: tuple[int, ...], timeout_sec: float = 0.16
+    ) -> dict[str, int]:
+        """Connect-scan (ip x ports) rapidly using non-blocking selectors batches (<=256 fds/batch for Windows)."""
+        open_by_ip: dict[str, int] = {}
+        targets = [(ip, int(p)) for ip in client_ips for p in ports]
+        batch_size = 220
+        for offset in range(0, len(targets), batch_size):
+            batch = targets[offset : offset + batch_size]
+            sel = selectors.DefaultSelector()
+            pending: dict[socket.socket, tuple[str, int]] = {}
+            try:
+                for ip, port in batch:
+                    if ip in open_by_ip:
+                        continue
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.setblocking(False)
+                        err = sock.connect_ex((ip, port))
+                        if err == 0:
+                            open_by_ip.setdefault(ip, port)
+                            sock.close()
+                        elif err in (10035, 115, 36):  # WSAEWOULDBLOCK / EINPROGRESS
+                            sel.register(sock, selectors.EVENT_WRITE, data=(ip, port))
+                            pending[sock] = (ip, port)
+                        else:
+                            sock.close()
+                    except OSError:
+                        continue
+                deadline = time.monotonic() + timeout_sec
+                while pending and time.monotonic() < deadline:
+                    wait_t = max(0.01, deadline - time.monotonic())
+                    for key, _events in sel.select(timeout=wait_t):
+                        sock = key.fileobj
+                        ip, port = key.data
+                        sel.unregister(sock)
+                        pending.pop(sock, None)
+                        try:
+                            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                            if err == 0:
+                                open_by_ip.setdefault(ip, port)
+                        except OSError:
+                            pass
+                        finally:
+                            sock.close()
+            finally:
+                for sock in list(pending):
+                    try:
+                        sel.unregister(sock)
+                    except Exception:
+                        pass
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                sel.close()
+        return open_by_ip
 
-        client_ips: list[str] = []
-        for r in rows:
-            ip = str(r["ip"] or "").strip()
-            if not ip or ip in mon_ips or ip.startswith("172.27."):
-                continue
-            low = f"{r['suggested_name'] or ''} {r['vendor'] or ''}".lower()
-            if any(tok in low for tok in _NON_GAMING_TOKENS):
-                continue
-            client_ips.append(ip)
+    def _sync_topology_arp_and_clients(self) -> int:
+        """Harvest fresh live ARP neighbors and authenticated router DHCP/client lists across topology."""
+        if getattr(self, "_skip_live_probe_in_test", False):
+            return 0
+        synced = 0
+        # 1. Fast ARP table refresh across all connected subnets
+        if hasattr(self, "_read_arp_entries"):
+            try:
+                arp_entries = self._read_arp_entries(os, subprocess)
+                local_nets = self._known_local_networks() if hasattr(self, "_known_local_networks") else []
+                with self._connect() as db:
+                    known_macs = {
+                        r["ip"]: r["mac"]
+                        for r in db.execute("SELECT ip, mac FROM discovered_devices").fetchall()
+                    }
+                for raw_ip, raw_mac, kind in arp_entries:
+                    try:
+                        ip = validate_ip(raw_ip)
+                        mac = str(raw_mac or "").strip().lower().replace("-", ":")
+                        addr = ipaddress.ip_address(ip)
+                    except ValueError:
+                        continue
+                    if mac in {"ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"} or not addr.is_private:
+                        continue
+                    if local_nets and not any(addr in n for n in local_nets):
+                        continue
+                    if ip not in known_macs and hasattr(self, "_vendor_for_oui"):
+                        vendor, _ = self._vendor_for_oui(mac.replace(":", "")[:6])
+                        self._upsert_inventory({
+                            "ip": ip,
+                            "mac": mac,
+                            "vendor": vendor,
+                            "suggestedName": f"{vendor} ({ip})" if vendor and vendor != "Unknown" else f"LAN Device ({ip})",
+                            "arpType": kind,
+                        })
+                        synced += 1
+            except Exception:
+                pass
 
+        # 2. Query authenticated routers/APs in topology for active wireless/DHCP client lists
+        routers_polled = 0
+        if hasattr(self, "_resolve_router_configs"):
+            ctx = ssl._create_unverified_context()
+            for cfg in self._resolve_router_configs():
+                stok = str(cfg.get("stok") or "").strip()
+                if not stok:
+                    continue
+                host = str(cfg.get("ip") or "").strip()
+                port = int(cfg.get("port") or 80)
+                scheme = "https" if (bool(cfg.get("useHttps", False)) or port in (443, 8443)) else "http"
+                enc_stok = urllib.parse.quote(stok, safe="")
+                routers_polled += 1
+                for ep in ("/admin/dhcps?form=client", "/admin/client?form=client_list"):
+                    req = urllib.request.Request(
+                        f"{scheme}://{host}:{port}/cgi-bin/luci/;stok={enc_stok}{ep}",
+                        data=b"operation=read",
+                        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Pulse/2.1"},
+                    )
+                    try:
+                        with urllib.request.urlopen(req, timeout=1.3, context=ctx if scheme == "https" else None) as resp:
+                            payload = json.loads(resp.read(128 * 1024).decode("utf-8", "ignore"))
+                    except Exception:
+                        continue
+                    rows = payload.get("data") if isinstance(payload, dict) else None
+                    if not isinstance(rows, list):
+                        continue
+                    hosts_map: dict[str, str] = {}
+                    for cl in rows:
+                        if not isinstance(cl, dict):
+                            continue
+                        cip = str(cl.get("ipaddr") or cl.get("ip") or "").strip()
+                        cmac = str(cl.get("macaddr") or cl.get("mac") or "").strip().lower().replace("-", ":")
+                        cname = str(cl.get("hostname") or cl.get("name") or "").strip()
+                        try:
+                            cip = validate_ip(cip)
+                        except ValueError:
+                            continue
+                        if cname and cname.lower() not in {"*", "unknown", "—", "--"}:
+                            hosts_map[cip] = cname[:80]
+                        if cmac and len(cmac) == 17 and hasattr(self, "_vendor_for_oui"):
+                            vendor, _ = self._vendor_for_oui(cmac.replace(":", "")[:6])
+                            self._upsert_inventory({
+                                "ip": cip,
+                                "mac": cmac,
+                                "vendor": vendor,
+                                "suggestedName": cname or f"{vendor} ({cip})",
+                                "arpType": "dhcp",
+                            })
+                            synced += 1
+                    if hosts_map and hasattr(self, "_save_cached_hostnames"):
+                        self._save_cached_hostnames(hosts_map)
+        return routers_polled
+
+    def _collect_local_os_game_signals(self) -> list[dict]:
+        """Inspect host OS processes, netstat sockets, and non-passive DNS cache on Windows."""
+        if sys.platform != "win32" or getattr(self, "_skip_live_probe_in_test", False):
+            return []
+        flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        host_ip = self._detect_host_lan_ip(self.HOST_DNS_IP)
+        found: list[dict] = []
+        seen_games: set[str] = set()
+
+        # 1. Running Windows game / Android emulator processes
+        try:
+            res = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=2.5, creationflags=flags,
+            )
+            if res.returncode == 0:
+                for row in csv.reader(res.stdout.splitlines()):
+                    pname = str(row[0] or "").strip() if row else ""
+                    if not pname:
+                        continue
+                    sig = self._match_game_signature(process=pname)
+                    if sig and sig["id"] not in seen_games:
+                        seen_games.add(sig["id"])
+                        found.append({
+                            "ip": host_ip,
+                            "gameId": sig["id"],
+                            "process": pname,
+                            "matchedIndicator": f"Process {pname}",
+                            "detectionMethod": "Topology Host Process Scan",
+                        })
+        except Exception:
+            pass
+
+        # 2. Active outbound / inbound TCP sockets against dedicated game server ports
+        try:
+            res = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=2.5, creationflags=flags,
+            )
+            if res.returncode == 0:
+                own_pid = str(os.getpid())
+                for line in res.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "ESTABLISHED":
+                        continue
+                    if parts[-1] == own_pid or ":" not in parts[1] or ":" not in parts[2]:
+                        continue
+                    local_ip = parts[1].rsplit(":", 1)[0].strip("[]")
+                    remote_ip = parts[2].rsplit(":", 1)[0].strip("[]")
+                    try:
+                        rport = int(parts[2].rsplit(":", 1)[1])
+                        lport = int(parts[1].rsplit(":", 1)[1])
+                        r_addr = ipaddress.ip_address(remote_ip)
+                    except ValueError:
+                        continue
+                    is_public_remote = not (r_addr.is_private or r_addr.is_loopback or r_addr.is_link_local or r_addr.is_multicast)
+                    if rport in _NETSTAT_GAME_PORTS and is_public_remote:
+                        sig = self._match_game_signature(port=rport)
+                        target_ip = host_ip if local_ip in (host_ip, "127.0.0.1") else local_ip
+                        if sig and (sig["id"] not in seen_games):
+                            seen_games.add(sig["id"])
+                            found.append({
+                                "ip": target_ip,
+                                "gameId": sig["id"],
+                                "port": rport,
+                                "matchedIndicator": f"TCP -> {parts[2]}",
+                                "detectionMethod": "Topology Host Netstat Scan",
+                            })
+                    elif lport in _NETSTAT_GAME_PORTS and self._is_real_lan_client_ip(remote_ip):
+                        sig = self._match_game_signature(port=lport)
+                        if sig:
+                            found.append({
+                                "ip": remote_ip,
+                                "gameId": sig["id"],
+                                "port": lport,
+                                "matchedIndicator": f"Client {remote_ip} -> :{lport}",
+                                "detectionMethod": "Topology Socket Client Scan",
+                            })
+        except Exception:
+            pass
+
+        # 3. Live non-expired Windows DNS client cache entries (excludes passive Steam/Riot CDN)
+        try:
+            res = subprocess.run(
+                ["ipconfig", "/displaydns"],
+                capture_output=True, text=True, timeout=2.5, creationflags=flags,
+            )
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    if ":" not in line:
+                        continue
+                    cand = line.split(":", 1)[1].strip().lower().rstrip(".")
+                    if not cand or "." not in cand or cand in _PASSIVE_DNS_CACHE_EXCLUDE:
+                        continue
+                    sig = self._match_game_signature(domain=cand)
+                    if sig and sig["id"] not in seen_games:
+                        seen_games.add(sig["id"])
+                        found.append({
+                            "ip": host_ip,
+                            "gameId": sig["id"],
+                            "domain": cand,
+                            "detectionMethod": "Topology Host DNS Cache Scan",
+                        })
+        except Exception:
+            pass
+
+        return found
+
+    def scan_lan_for_games(self, include_topology_refresh: bool = False) -> dict:
+        """Scan the whole network topology (routers, APs, topology nodes, host OS & all LAN clients) for open games."""
+        infra_types = {"router", "gateway", "ap", "switch", "firewall", "cloud"}
+        mon_devices = self.get_devices()
+        infra_ips = {
+            str(d.get("ip") or "").strip()
+            for d in mon_devices
+            if str(d.get("type") or "").lower() in infra_types
+        }
+        gw_ip = str(self.config.get("router", {}).get("ip") or "192.168.0.1").strip()
+        if gw_ip:
+            infra_ips.add(gw_ip)
+
+        routers_polled = 0
         detections: list[dict] = []
 
-        def _check_host_ports(target_ip: str) -> tuple[str, int | None]:
-            for port in SCAN_GAME_PORTS:
-                is_open, _, _ = self._probe_tcp_socket(target_ip, port, timeout=0.06)
-                if is_open:
-                    return target_ip, port
-            return target_ip, None
+        confirmed_hits = 0
+        if include_topology_refresh:
+            routers_polled = self._sync_topology_arp_and_clients()
+            self.poll_router_logs_for_games()
+            for sig_payload in self._collect_local_os_game_signals():
+                confirmed_hits += 1
+                try:
+                    res = self.record_game_detection(sig_payload)
+                    if res.get("detection"):
+                        detections.append(res["detection"])
+                except Exception:
+                    pass
+
+        with self._connect() as db:
+            inv_rows = db.execute(
+                "SELECT DISTINCT ip, vendor, suggested_name FROM discovered_devices WHERE is_online=1 ORDER BY ip LIMIT 1024"
+            ).fetchall()
+            topo_nodes = [dict(r) for r in db.execute("SELECT * FROM topology_nodes").fetchall()]
+
+        for n in topo_nodes:
+            if str(n.get("node_type") or "").lower() in infra_types and str(n.get("ip") or "").strip():
+                infra_ips.add(str(n["ip"]).strip())
+        topology_hubs = max(
+            len(infra_ips),
+            sum(1 for n in topo_nodes if str(n.get("node_type") or "").lower() in infra_types),
+            len(self.config.get("routers") or {}) + 1,
+        )
+
+        client_ips: list[str] = []
+        seen_client_ips: set[str] = set()
+
+        def _push_target(raw_ip: str, label_hint: str = "") -> None:
+            ip = str(raw_ip or "").strip()
+            if (
+                not ip
+                or ip in seen_client_ips
+                or ip in infra_ips
+                or ip.startswith(("172.27.", "127."))
+            ):
+                return
+            low = label_hint.lower()
+            if low and any(tok in low for tok in _NON_GAMING_TOKENS):
+                return
+            seen_client_ips.add(ip)
+            client_ips.append(ip)
+
+        for n in topo_nodes:
+            if str(n.get("node_type") or "").lower() not in infra_types:
+                _push_target(n.get("ip", ""), f"{n.get('name') or ''} {n.get('vendor') or ''}")
+        for d in mon_devices:
+            if not d.get("archived") and str(d.get("type") or "").lower() not in infra_types:
+                _push_target(d.get("ip", ""), f"{d.get('name') or ''} {d.get('vendor') or ''}")
+        for r in inv_rows:
+            _push_target(r["ip"], f"{r['suggested_name'] or ''} {r['vendor'] or ''}")
+        with self.lock:
+            dns_clients = list((self._gaming_sensor_telemetry.get("dnsClients") or {}).keys())
+        for dc_ip in dns_clients:
+            _push_target(dc_ip)
+        host_ip = self.HOST_DNS_IP if getattr(self, "_skip_live_probe_in_test", False) else self._detect_host_lan_ip(self.HOST_DNS_IP)
+        _push_target(host_ip)
 
         if client_ips:
-            with ThreadPoolExecutor(max_workers=min(48, len(client_ips))) as pool:
-                for ip_key, open_port in pool.map(_check_host_ports, client_ips):
-                    if open_port is not None:
-                        res = self.record_game_detection({
-                            "ip": ip_key,
-                            "port": open_port,
-                            "detectionMethod": "Active Game Port Scan",
-                        })
-                        if res.get("detection"):
-                            detections.append(res["detection"])
+            if getattr(self, "_skip_live_probe_in_test", False):
+                def _check_host_ports(target_ip: str) -> tuple[str, int | None]:
+                    for port in SCAN_GAME_PORTS:
+                        is_open, _, _ = self._probe_tcp_socket(target_ip, port, timeout=0.06)
+                        if is_open:
+                            return target_ip, port
+                    return target_ip, None
+
+                with ThreadPoolExecutor(max_workers=min(48, len(client_ips))) as pool:
+                    hits = {ip_k: p for ip_k, p in pool.map(_check_host_ports, client_ips) if p is not None}
+            else:
+                hits = self._batch_scan_ports_nonblocking(client_ips, SCAN_GAME_PORTS, timeout_sec=0.14)
+
+            for ip_key, open_port in hits.items():
+                confirmed_hits += 1
+                res = self.record_game_detection({
+                    "ip": ip_key,
+                    "port": open_port,
+                    "detectionMethod": "Whole-Topology Port Scan" if include_topology_refresh else "Active Game Port Scan",
+                })
+                if res.get("detection"):
+                    detections.append(res["detection"])
+
+        activity = self.get_game_activity(100)
+        if include_topology_refresh:
+            self._record_event(
+                "GAME_TOPOLOGY_SCAN",
+                "INFO",
+                "🔍 Whole-Topology Game Scan Completed",
+                (
+                    f"Scanned {topology_hubs} topology router/AP hub(s) ({len(topo_nodes)} map node(s)) and "
+                    f"{len(client_ips)} connected device(s) across all subnets — {confirmed_hits} open game hit(s), {len(detections)} newly logged."
+                ),
+                device_name="Pulse Topology Game Scanner",
+            )
+            self.broadcast("game_detected", {"gameActivity": activity})
 
         return {
             "success": True,
+            "topologyNodesScanned": len(topo_nodes),
+            "topologyHubsScanned": topology_hubs,
+            "routersPolled": routers_polled,
             "scannedDevices": len(client_ips),
+            "confirmedHits": confirmed_hits,
             "detectedCount": len(detections),
+            "activeCount": int((activity.get("summary") or {}).get("activeCount") or 0),
+            "blockedCount": len(activity.get("blocks") or []),
             "detections": detections,
-            "gameActivity": self.get_game_activity(100),
+            "gameActivity": activity,
         }
 
     def dismiss_game_session(self, session_id: str) -> dict:

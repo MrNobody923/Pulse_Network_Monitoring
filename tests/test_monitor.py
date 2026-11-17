@@ -834,6 +834,46 @@ class InventoryTests(unittest.TestCase):
         self.monitor.unblock_game_rule(auto_det["ruleId"])
         self.monitor.set_gaming_policy({"preventionMode": "alert_only"})
 
+        # 5. Whole-topology scan sweeps >120 online devices + topology endpoints and fetches game hits
+        for idx in range(132):
+            self.monitor._upsert_inventory({
+                "ip": f"192.168.2.{10 + idx}",
+                "mac": f"02:11:22:33:{idx // 256:02x}:{idx % 256:02x}",
+                "vendor": "Apple",
+                "suggestedName": f"Staff-Phone-{idx}",
+                "arpType": "dynamic",
+            })
+        topo_ap = self.monitor.add_topology_node({
+            "name": "Floor 2 AP",
+            "ip": "192.168.2.1",
+            "nodeType": "ap",
+        })["node"]
+        topo_phone = self.monitor.add_topology_node({
+            "name": "Gaming-Phone-22",
+            "ip": "192.168.2.99",
+            "nodeType": "device",
+        })["node"]
+        self.monitor.add_topology_link({
+            "sourceId": topo_ap["id"],
+            "targetId": topo_phone["id"],
+            "cableType": "wireless",
+        })
+
+        def fake_game_probe(ip: str, port: int, timeout: float = 0.06):
+            if ip == "192.168.2.99" and port == 19132:
+                return True, True, 2.0
+            return False, False, None
+
+        with patch.object(self.monitor, "_probe_tcp_socket", side_effect=fake_game_probe):
+            scan_res = self.monitor.scan_lan_for_games(include_topology_refresh=True)
+
+        self.assertTrue(scan_res["success"])
+        self.assertGreaterEqual(scan_res["scannedDevices"], 132)
+        self.assertGreaterEqual(scan_res["topologyNodesScanned"], 2)
+        self.assertEqual(scan_res["detectedCount"], 1)
+        self.assertEqual(scan_res["detections"][0]["ip"], "192.168.2.99")
+        self.assertEqual(scan_res["detections"][0]["gameId"], "minecraft")
+
 
 if __name__ == "__main__":
     unittest.main()
