@@ -56,18 +56,16 @@ function updateGameNotifyButton() {
   const btn = document.getElementById('btnGameNotify');
   if (!btn) return;
   if (typeof Notification === 'undefined') {
-    btn.textContent = '🔔 In-App Popup Alerts: ON';
+    btn.textContent = 'In-App Alerts: ON';
     btn.disabled = true;
     return;
   }
   if (Notification.permission === 'granted') {
-    btn.textContent = '🔔 Browser + App Notifications: ON';
-    btn.classList.add('btn-primary');
-    btn.classList.remove('btn-secondary');
+    btn.textContent = 'Desktop Alerts: ON';
   } else if (Notification.permission === 'denied') {
-    btn.textContent = '🔔 In-App Alerts: ON (Desktop Blocked)';
+    btn.textContent = 'In-App Alerts: ON';
   } else {
-    btn.textContent = '🔔 Enable Desktop Popup Alerts';
+    btn.textContent = 'Enable Desktop Alerts';
   }
 }
 
@@ -115,37 +113,32 @@ function renderActiveGamesLivePanel(activeLogs) {
   }
   panel.style.display = 'block';
   panel.innerHTML = `
-    <div class="active-games-live-box">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
-        <strong style="font-size:0.88rem; color:var(--accent-amber);">🎮 Games Currently Open &amp; Playing (${activeLogs.length})</strong>
-        <span style="font-size:0.74rem; color:var(--text-muted);">Manual control only — click Block to drop that user's internet connection to an unplayable rate.</span>
+    <div class="game-section-panel amber">
+      <div class="game-panel-head">
+        <span class="game-panel-title">Active Open Sessions (${activeLogs.length})</span>
+        <span class="game-panel-sub">Manual enforcement — choose Throttle Speed to degrade a user's connection or Cut Wi-Fi to disconnect</span>
       </div>
-      <div class="active-games-live-list">
+      <div class="game-panel-rows">
         ${activeLogs
           .map(
             item => `
-          <div class="active-game-card">
-            <div class="active-game-meta">
-              <div style="display:flex; align-items:center; gap:9px; flex-wrap:wrap;">
-                <span style="font-size:1.35rem; line-height:1;">${esc(item.gameIcon || '🎮')}</span>
-                <div>
-                  <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                    <strong style="font-size:0.9rem;">${esc(item.gameName)}</strong>
-                    <span class="status-pill warning">🎮 OPEN &amp; PLAYING NOW</span>
-                  </div>
-                  <div style="font-size:0.76rem; color:var(--text-muted); margin-top:2px;">
-                    <strong>${esc(item.deviceName)}</strong> (<span class="mono">${esc(item.ip)}</span>${item.deviceType ? ` · ${esc(item.deviceType)}` : ''}) · 📡 <strong>${esc(item.connectedTo || 'Main Gateway Router')}</strong>
-                  </div>
-                  <div style="font-size:0.72rem; color:var(--text-dim); margin-top:2px;">
-                    Trigger: <span class="mono">${esc(item.matchedIndicator || '—')}</span> (${esc(item.detectionMethod || 'Network Detection')})
-                  </div>
-                </div>
+          <div class="game-panel-row">
+            <div class="game-row-info">
+              <div class="game-row-title">
+                <span>${esc(item.gameName)}</span>
+                <span class="status-pill warning">Playing</span>
+              </div>
+              <div class="game-row-sub">
+                <strong>${esc(item.deviceName)}</strong> (<span class="mono">${esc(item.ip)}</span>${item.deviceType ? ` · ${esc(item.deviceType)}` : ''}) · Via <strong>${esc(item.connectedTo || 'Main Gateway Router')}</strong>
+              </div>
+              <div class="game-row-indicator">
+                Signal: <span class="mono">${esc(item.matchedIndicator || '—')}</span> · ${esc(item.detectionMethod || 'Network Detection')}
               </div>
             </div>
-            <div class="active-game-actions">
-              <button type="button" class="btn btn-primary btn-sm game-btn-danger" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_throttle', false)">🐌 Block (Drop Internet to Unplayable)</button>
-              <button type="button" class="btn btn-secondary btn-sm game-btn-warn" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_wifi_cut', true)">🛑 Cut Wi-Fi</button>
-              <button type="button" class="btn btn-secondary btn-sm" onclick="dismissGameSession('${esc(item.id)}')">✓ Dismiss</button>
+            <div class="game-row-actions">
+              <button type="button" class="btn btn-secondary btn-sm game-btn-danger" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_throttle', false)" title="Drop user's internet rate to an unplayable speed">Throttle Speed</button>
+              <button type="button" class="btn btn-secondary btn-sm game-btn-warn" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_wifi_cut', true)" title="Disconnect device from Wi-Fi / LAN">Cut Wi-Fi</button>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="dismissGameSession('${esc(item.id)}')">Dismiss</button>
             </div>
           </div>
         `
@@ -203,8 +196,8 @@ function renderGamingSection() {
   setTxt(
     'gameTerminalPromptText',
     activeCount > 0
-      ? `🎮 ${activeCount} game(s) open now — click Block to drop that user's internet to an unplayable rate.`
-      : `Watching ${onlineCount} company devices in real time — never auto-blocks; click Block on any detected game.`
+      ? `${activeCount} open session(s) detected across ${onlineCount} devices — use Throttle Speed or Cut Wi-Fi to restrict access.`
+      : `Watching ${onlineCount} company devices in real time — manual control only (never auto-blocks users).`
   );
 
   const sideBadge = document.getElementById('sideBadgeGaming');
@@ -216,7 +209,7 @@ function renderGamingSection() {
   const headBadge = document.getElementById('gamingStatusBadge');
   if (headBadge) {
     headBadge.textContent =
-      activeCount > 0 ? `🎮 ${activeCount} GAME(S) OPEN NOW` : 'WATCHING · NO GAMES OPEN';
+      activeCount > 0 ? `${activeCount} Active Session${activeCount > 1 ? 's' : ''}` : 'Watching · Live';
     headBadge.className = `status-pill ${activeCount > 0 ? 'warning' : 'online'}`;
   }
 
@@ -251,17 +244,17 @@ function renderGamingSection() {
     );
   }
 
-  // Keep only the most recent 80 entries so logs never over-stack, sorted oldest -> newest (tail -f)
+  // Keep only the most recent 80 entries, showing newest activity first for clean scannable review
   const capped = filtered.slice(0, 80);
   const ordered = [...capped].sort((a, b) => {
     const ta = new Date(a.timestamp || 0).getTime() || 0;
     const tb = new Date(b.timestamp || 0).getTime() || 0;
-    return ta - tb;
+    return tb - ta;
   });
 
   setTxt(
     'gameTerminalShowingCount',
-    `${ordered.length} ${ordered.length === 1 ? 'line' : 'lines'}`
+    `${ordered.length} ${ordered.length === 1 ? 'entry' : 'entries'}`
   );
 
   const container = document.getElementById('gamingTerminalContainer');
@@ -277,29 +270,24 @@ function renderGamingSection() {
     return;
   }
 
-  const isVisible = container.clientHeight > 0;
   const prevScrollTop = container.scrollTop;
-  const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-  const wasNearBottom = distFromBottom <= 40;
-  const shouldPinBottom =
-    (!gameTerminalHasVisibleRender && isVisible) ||
-    (!gameTerminalUserScrolledUp && wasNearBottom);
-  if (isVisible) gameTerminalHasVisibleRender = true;
   lastGameTerminalSignature = signature;
 
   if (!ordered.length) {
+    const filterTitle =
+      gameActivityFilter === 'blocked'
+        ? 'No blocked or throttled devices'
+        : gameActivityFilter === 'active'
+        ? 'No active game sessions right now'
+        : 'No recorded game detections';
     const modeDesc =
-      prevMode === 'auto_wifi_cut'
-        ? 'ZERO-TOLERANCE PREVENTION ON: any opened game is blocked & user Wi-Fi is cut immediately at packet arrival.'
-        : prevMode === 'auto_block_game'
-        ? 'AUTO-PREVENTION ON: any opened game is blocked in real time; blocked entries appear above & in Blocked Users.'
-        : 'No game is currently open. Terminal will display live game sessions and Block buttons automatically as soon as a user opens a game.';
+      prevMode === 'alert_only'
+        ? `Monitoring ${onlineCount} LAN device(s) in real time via DNS, TLS SNI & Wireshark DPI. Switch to All History to inspect past detections.`
+        : 'Auto-prevention policy is currently active.';
     container.innerHTML = `
-      <div class="ps-log-line game-term-line ps-lvl-live">
-        <span class="ps-ts">[${esc(formatGameTerminalTime(new Date().toISOString()))}]</span>
-        <span class="ps-sev">[${prevMode === 'alert_only' ? 'WATCHING' : 'GUARDING'}]</span>
-        <span class="ps-tag">[IDLE · REAL-TIME]</span>
-        <span class="ps-body-col"><span class="ps-msg">${esc(modeDesc)}</span></span>
+      <div class="game-empty-state">
+        <div class="game-empty-title">${esc(filterTitle)}</div>
+        <div class="game-empty-sub">${esc(modeDesc)}</div>
       </div>
     `;
     return;
@@ -309,53 +297,52 @@ function renderGamingSection() {
     .map(item => {
       const matchingRule = findRule(item);
       const isBlocked = Boolean(item.isBlocked || matchingRule);
-      const lvlCls = isBlocked
-        ? 'ps-lvl-crit'
-        : item.isActive
-        ? 'ps-lvl-warn'
-        : 'ps-lvl-info';
-      const sevLabel = isBlocked ? 'BLOCKED' : item.isActive ? 'PLAYING' : 'ENDED';
+      const rowCls = isBlocked ? 'is-blocked' : item.isActive ? 'is-live' : '';
+      const pillCls = isBlocked ? 'critical' : item.isActive ? 'warning' : 'online';
+      const sevLabel = isBlocked ? 'Blocked' : item.isActive ? 'Playing' : 'Ended';
       const ts = formatGameTerminalTime(item.timestamp);
       const devType = item.deviceType ? ` · ${item.deviceType}` : '';
       const actionsHtml = matchingRule
-        ? `<button type="button" class="game-term-btn unblock" onclick="unblockGameRule('${esc(
+        ? `<button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule('${esc(
             matchingRule.id
-          )}')">🟢 Unblock User</button>`
-        : `<button type="button" class="game-term-btn shutoff" onclick="shutOffGameSession('${esc(
+          )}')">Unblock</button>`
+        : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameSession('${esc(
             item.id
           )}', '${esc(item.ip)}', '${esc(
             item.gameId
-          )}', 'device_throttle', false)" title="Drop this user's internet speed to an unplayable rate (Router QoS 1 KB/s + DNS lag + socket reset)">🐌 Block (Unplayable Lag)</button><button type="button" class="game-term-btn blockall" onclick="shutOffGameSession('${esc(
+          )}', 'device_throttle', false)" title="Drop user's internet speed to an unplayable rate (Router QoS 1 KB/s + DNS lag + socket reset)">Throttle</button><button type="button" class="btn btn-secondary btn-xs game-btn-warn" onclick="shutOffGameSession('${esc(
             item.id
           )}', '${esc(item.ip)}', '${esc(
             item.gameId
-          )}', 'device_wifi_cut', true)" title="Cut Wi-Fi connectivity completely for this device">🛑 Cut Wi-Fi</button>${
+          )}', 'device_wifi_cut', true)" title="Cut Wi-Fi connectivity completely for this device">Cut Wi-Fi</button>${
             item.isActive
-              ? `<button type="button" class="game-term-btn clear" onclick="dismissGameSession('${esc(
+              ? `<button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameSession('${esc(
                   item.id
-                )}')">✓ Dismiss</button>`
+                )}')">Dismiss</button>`
               : ''
           }`;
 
       return `
-        <div class="ps-log-line game-term-line ${lvlCls}">
-          <span class="ps-ts">[${esc(ts)}]</span>
-          <span class="ps-sev">[${esc(sevLabel)}]</span>
-          <span class="ps-tag" title="${esc(item.gameName)}">${esc(item.gameIcon || '🎮')} ${esc(item.gameName)}</span>
-          <span class="ps-body-col game-term-body-col">
-            <span class="game-term-msg"><span class="ps-target">${esc(item.deviceName)}</span> <span class="mono">(${esc(item.ip)}${esc(devType)})</span> via 📡 <strong>${esc(item.connectedTo || 'Main Gateway Router')}</strong> — <span class="mono">${esc(item.matchedIndicator || '—')}</span> (${esc(item.detectionMethod || 'Network Detection')})</span>
-            <span class="game-term-actions">${actionsHtml}</span>
-          </span>
+        <div class="game-activity-row ${rowCls}">
+          <div class="game-col-status">
+            <span class="status-pill ${pillCls}">${esc(sevLabel)}</span>
+            <span class="game-col-time">${esc(ts)}</span>
+          </div>
+          <div class="game-col-title">
+            <div class="game-title-main" title="${esc(item.gameName)}">${esc(item.gameName)}</div>
+            <div class="game-title-method">${esc(item.detectionMethod || 'Network Detection')}</div>
+          </div>
+          <div class="game-col-device">
+            <div class="game-device-main">${esc(item.deviceName)} <span class="mono" style="font-weight:500;">(${esc(item.ip)}${esc(devType)})</span></div>
+            <div class="game-device-sub">${esc(item.connectedTo || 'Main Gateway Router')} · Signal: <code>${esc(item.matchedIndicator || '—')}</code></div>
+          </div>
+          <div class="game-row-actions">${actionsHtml}</div>
         </div>
       `;
     })
     .join('');
 
-  if (shouldPinBottom) {
-    container.scrollTop = container.scrollHeight;
-  } else {
-    container.scrollTop = prevScrollTop;
-  }
+  container.scrollTop = prevScrollTop;
 }
 
 function renderGameBlocksPanel(blocks) {
@@ -368,38 +355,43 @@ function renderGameBlocksPanel(blocks) {
   }
   panel.style.display = 'block';
   panel.innerHTML = `
-    <div class="game-blocks-box">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
-        <strong style="font-size:0.84rem; color:var(--accent-red);">🐌 Active User Internet Throttles &amp; Blocks (${blocks.length})</strong>
-        <span style="font-size:0.73rem; color:var(--text-muted);">Degrades the user's connection to an unplayable rate (Router QoS 1 KB/s + 2.4s DNS lag &amp; drops + active socket RST) until unblocked.</span>
+    <div class="game-section-panel danger">
+      <div class="game-panel-head">
+        <span class="game-panel-title">Active Restrictions (${blocks.length})</span>
+        <span class="game-panel-sub">Throttled or disconnected devices remain restricted until manually unblocked</span>
       </div>
-      <div class="game-blocks-list">
+      <div class="game-panel-rows">
         ${blocks
           .map(
             b => `
-          <div class="game-block-chip">
-            <div>
-              <strong style="font-size:0.79rem;">${esc(b.gameName)}</strong>
-              <span class="dev-row-sub">on ${esc(b.deviceName)} (${esc(b.ip)})</span>
+          <div class="game-panel-row">
+            <div class="game-row-info">
+              <div class="game-row-title">
+                <span>${esc(b.deviceName || b.ip)}</span>
+                <span class="status-pill critical">${b.scope === 'device_wifi_cut' ? 'Wi-Fi Cut Off' : b.scope === 'device_throttle' ? 'Throttled · Unplayable' : 'Blocked'}</span>
+              </div>
+              <div class="game-row-sub">
+                IP: <span class="mono">${esc(b.ip)}</span>${b.mac ? ` · MAC: <span class="mono">${esc(b.mac)}</span>` : ''} · Rule: ${esc(b.gameName)}
+              </div>
             </div>
-            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <div class="game-row-actions">
               ${
                 b.ip && b.ip !== '*' && b.scope !== 'device_throttle' && b.scope !== 'device_wifi_cut'
-                  ? `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-amber); color:var(--accent-amber);" onclick="shutOffGameSession('', '${esc(
+                  ? `<button type="button" class="btn btn-secondary btn-xs game-btn-warn" onclick="shutOffGameSession('', '${esc(
                       b.ip
-                    )}', '${esc(b.gameId || '*')}', 'device_throttle', false)">🐌 Drop to Unplayable</button>`
+                    )}', '${esc(b.gameId || '*')}', 'device_throttle', false)">Throttle Speed</button>`
                   : ''
               }
               ${
                 b.ip && b.ip !== '*' && b.scope !== 'device_wifi_cut'
-                  ? `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red);" onclick="shutOffGameSession('', '${esc(
+                  ? `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameSession('', '${esc(
                       b.ip
-                    )}', '${esc(b.gameId || '*')}', 'device_wifi_cut', true)">🛑 Cut Wi-Fi</button>`
+                    )}', '${esc(b.gameId || '*')}', 'device_wifi_cut', true)">Cut Wi-Fi</button>`
                   : ''
               }
-              <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-green); color:var(--accent-green);" onclick="unblockGameRule('${esc(
+              <button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule('${esc(
                 b.id
-              )}')">🟢 Unblock User</button>
+              )}')">Unblock</button>
             </div>
           </div>
         `
@@ -443,10 +435,10 @@ function renderGameSensorBanner(data, onlineCount) {
     if (bar) bar.classList.add('warn');
     if (badge) {
       badge.className = 'status-pill warning';
-      badge.textContent = `🟠 SENSOR STANDBY · ${onlineCount} DEVICES WATCHED`;
+      badge.textContent = `Sensor Standby · ${onlineCount} Devices`;
     }
     if (line) {
-      line.innerHTML = `Host DNS sensor (<code>host_game_sensor.py</code>) has not checked in yet — run <code>start-monitor.bat</code> for sub-second UDP/TCP 53 interception on <code>${esc(hostIp)}</code>.`;
+      line.innerHTML = `Host DNS sensor offline — run <code>host_game_sensor.py</code> for live UDP/TCP 53 capture on <code>${esc(hostIp)}</code>.`;
     }
     if (setupBtn) setupBtn.style.display = 'inline-flex';
     return;
@@ -456,26 +448,25 @@ function renderGameSensorBanner(data, onlineCount) {
     if (bar) bar.classList.remove('warn');
     if (badge) {
       badge.className = 'status-pill online';
-      badge.textContent = `🟢 REAL-TIME LIVE · ${cCount} WIFI/DNS CLIENTS (${qTotal} QUERIES)`;
+      badge.textContent = `Sensor Live · ${cCount} DNS Clients`;
     }
     if (line) {
       const lastDom = s.lastDnsDomain
-        ? ` · Last query: <code>${esc(s.lastDnsClientIp || '')}</code> → <code>${esc(s.lastDnsDomain)}</code>`
+        ? ` · Latest: <code>${esc(s.lastDnsClientIp || '')}</code> → <code>${esc(s.lastDnsDomain)}</code>`
         : '';
-      line.innerHTML = `Listening on <code>${esc(hostIp)}:53</code>${s.hotspotIp ? ` + Hotspot <code>${esc(s.hotspotIp)}:53</code>` : ''}, Syslog <code>514</code> &amp; LAN sweep — <strong>${bTotal}</strong> prevented.${lastDom}`;
+      line.innerHTML = `Host <code>${esc(hostIp)}:53</code>${s.hotspotIp ? ` + <code>${esc(s.hotspotIp)}:53</code>` : ''} · Syslog <code>514</code> · ${qTotal.toLocaleString()} queries · ${bTotal} blocked${lastDom}`;
     }
     if (setupBtn) setupBtn.style.display = 'none';
   } else {
     if (bar) bar.classList.add('warn');
     if (badge) {
       badge.className = 'status-pill warning';
-      badge.textContent = `🟠 SENSOR ON · WAITING FOR ROUTER DHCP DNS`;
+      badge.textContent = `Sensor Active · External DHCP DNS`;
     }
     if (line) {
-      const dnsNote = bypass.length
-        ? `Router (<code>${esc(routerIp)}</code>) currently assigns DNS <code>${esc(bypass.join(', '))}</code> instead of <code>${esc(hostIp)}</code> — phones bypass the monitor until router DHCP DNS (or test phone DNS / Windows Mobile Hotspot) points to <code>${esc(hostIp)}</code>.`
-        : `Set Router DHCP Primary DNS (or a phone Wi-Fi DNS) to <code>${esc(hostIp)}</code> for instant packet-0 mobile detection &amp; prevention.`;
-      line.innerHTML = dnsNote;
+      line.innerHTML = bypass.length
+        ? `Router (<code>${esc(routerIp)}</code>) DHCP assigns <code>${esc(bypass.join(', '))}</code>. Set DHCP DNS to <code>${esc(hostIp)}</code> for packet-0 mobile inspection.`
+        : `Set Router DHCP DNS to <code>${esc(hostIp)}</code> for instant packet-0 mobile DNS visibility.`;
     }
     if (setupBtn) setupBtn.style.display = 'inline-flex';
   }
@@ -489,17 +480,15 @@ function renderGamingPolicyControls(policy) {
   const isManual = mode === 'alert_only';
   if (badge) {
     badge.className = `status-pill ${isManual ? 'online' : 'warning'}`;
-    badge.textContent = isManual
-      ? '🔔 DETECT & ALERT ONLY (MANUAL BLOCK)'
-      : '⚠️ AUTO-BLOCK ACTIVE';
+    badge.textContent = isManual ? 'Manual Block Only' : 'Auto-Block Active';
   }
   if (resetBtn) {
     resetBtn.style.display = isManual ? 'none' : 'inline-flex';
   }
   if (!hint) return;
   hint.innerHTML = isManual
-    ? 'Detections &amp; topology scans only list open games — <strong>never auto-blocks users</strong>. Click <strong>Block</strong> to drop a user\'s internet to an unplayable rate.'
-    : '<strong style="color:var(--accent-amber);">Auto-block was enabled via config/API.</strong> Click <strong>Disable Auto-Block</strong> to return to manual-only control.';
+    ? 'Manual enforcement mode — scans never auto-block users.'
+    : '<strong style="color:var(--accent-amber);">Auto-block is active via policy config.</strong> Click Revert to Manual to restore prompt-only enforcement.';
 }
 
 function showGameDetectedToast(detection) {
@@ -520,22 +509,22 @@ function showGameDetectedToast(detection) {
     card.className = 'game-toast-card';
     card.innerHTML = `
       <div class="game-toast-head">
-        <span class="game-toast-badge">${isAuto ? '🛡️ AUTO-PREVENTED IN REAL TIME' : `${esc(detection.gameIcon || '🎮')} GAME DETECTED`}</span>
+        <span class="game-toast-badge">${isAuto ? 'Auto-Prevented' : 'Game Detected'}</span>
         <button type="button" class="game-toast-close" onclick="dismissGameToast('${esc(toastId)}')" aria-label="Close">✕</button>
       </div>
-      <div class="game-toast-title">${esc(detection.gameName)} ${isAuto ? 'blocked' : 'opened'}</div>
+      <div class="game-toast-title">${esc(detection.gameName)}</div>
       <div class="game-toast-meta">
         <div><strong>Device:</strong> ${esc(detection.deviceName)} <span class="mono">(${esc(detection.ip)})</span></div>
-        <div><strong>Connected To:</strong> 📡 ${esc(detection.connectedTo)}</div>
-        <div class="dev-row-sub">Trigger: ${esc(detection.matchedIndicator || '')} · ${esc(detection.detectionMethod || '')}</div>
+        <div><strong>Via:</strong> ${esc(detection.connectedTo)}</div>
+        <div class="dev-row-sub">${esc(detection.matchedIndicator || '')} · ${esc(detection.detectionMethod || '')}</div>
       </div>
       <div class="game-toast-actions">
         ${
           isAuto
             ? ''
-            : `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red); font-weight:700;" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">🐌 Block (Drop Internet to Unplayable)</button>`
+            : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">Throttle Speed</button>`
         }
-        <button type="button" class="btn btn-primary btn-xs" onclick="jumpToGamingWorkspace('${esc(toastId)}')">View Game Log</button>
+        <button type="button" class="btn btn-primary btn-xs" onclick="jumpToGamingWorkspace('${esc(toastId)}')">Inspect</button>
         <button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameToast('${esc(toastId)}')">Dismiss</button>
       </div>
     `;
@@ -567,11 +556,11 @@ async function runLanGameScan() {
   const banner = document.getElementById('gameScanResultBanner');
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '⏳ Scanning Topology...';
+    btn.textContent = 'Scanning Network...';
   }
   if (banner) {
     banner.style.display = 'block';
-    banner.innerHTML = `<div class="game-auto-status-bar"><span class="status-pill warning">⏳ SCANNING NETWORK TOPOLOGY...</span><span style="font-size:0.78rem; color:var(--text-muted);">Polling routers/APs, ARP neighbors, host DNS/sockets &amp; every online device across all subnets for active games...</span></div>`;
+    banner.innerHTML = `<div class="game-scan-banner"><div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;"><span class="status-pill warning">Scanning Topology</span><span style="font-size:0.78rem; color:var(--text-muted);">Polling routers, APs, ARP neighbors, DNS cache &amp; game ports across subnets...</span></div></div>`;
   }
   try {
     const res = await apiJson('/api/gaming/scan', {
@@ -597,18 +586,18 @@ async function runLanGameScan() {
       const bypass = (act.sensorStatus && act.sensorStatus.bypassingExternalDns) || [];
       const noteHtml =
         foundCnt > 0 || activeCnt > 0 || blockedCnt > 0
-          ? `Scanned ${hubsCnt} router/AP hub(s)${nodesCnt ? ` (${nodesCnt} map nodes)` : ''} &amp; ${devCnt} connected device(s) — fetched <strong>${foundCnt}</strong> live game hit(s) (${activeCnt} open, ${blockedCnt} blocked).`
+          ? `Scanned ${hubsCnt} router/AP hub(s)${nodesCnt ? ` (${nodesCnt} map nodes)` : ''} &amp; ${devCnt} device(s) — <strong>${foundCnt}</strong> live hit(s) (${activeCnt} active, ${blockedCnt} blocked).`
           : bypass.length && !(act.sensorStatus && act.sensorStatus.dnsInterceptReady)
-          ? `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} connected device(s). 0 local game ports/processes active. Wi-Fi phones currently resolve via external DNS (<code>${esc(bypass.join(', '))}</code>) — click <strong>⚡ Setup Whole-Wi-Fi Interception</strong> to capture phone game lookups.`
-          : `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} connected device(s) across the topology — no open games detected right now.`;
+          ? `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} device(s). 0 open game ports/processes. External DHCP DNS detected (<code>${esc(bypass.join(', '))}</code>) — configure Wi-Fi DNS interception to capture phone lookups.`
+          : `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} device(s) across the topology — no active games detected.`;
       banner.style.display = 'block';
       banner.innerHTML = `
-        <div class="game-auto-status-bar">
+        <div class="game-scan-banner">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
-            <span class="status-pill ${foundCnt > 0 || activeCnt > 0 ? 'warning' : 'online'}">${foundCnt > 0 ? `🎮 FOUND ${foundCnt} GAME(S)` : '✓ TOPOLOGY SCAN COMPLETE'}</span>
+            <span class="status-pill ${foundCnt > 0 || activeCnt > 0 ? 'warning' : 'online'}">${foundCnt > 0 ? `Found ${foundCnt} Match(es)` : 'Scan Complete'}</span>
             <span style="font-size:0.78rem; color:var(--text-muted);">${noteHtml}</span>
           </div>
-          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">✕ Close</button>
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">Dismiss</button>
         </div>
       `;
     }
@@ -620,7 +609,7 @@ async function runLanGameScan() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = '🔍 Scan Connected Devices Now';
+      btn.textContent = 'Scan Connected Devices Now';
     }
   }
 }
@@ -682,13 +671,13 @@ async function shutOffGameSession(
         : 'Rule Saved';
       banner.style.display = 'block';
       banner.innerHTML = `
-        <div class="game-auto-status-bar">
+        <div class="game-scan-banner">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
-            <span class="status-pill ${hasSetupGap ? 'warning' : 'online'}">${hasSetupGap ? '⚠️ ROUTER QOS / DNS SETUP NEEDED' : (scope === 'device_throttle' ? '🐌 THROTTLED TO UNPLAYABLE RATE' : '🛑 USER BLOCK APPLIED')}</span>
+            <span class="status-pill ${hasSetupGap ? 'warning' : 'online'}">${hasSetupGap ? 'Router Setup Needed' : (scope === 'device_throttle' ? 'Connection Throttled' : 'Restriction Applied')}</span>
             <span style="font-size:0.78rem; color:var(--text-muted);">${hasSetupGap ? esc(det.setupHint) : `Active layers for ${esc(ip || 'device')}: <strong>${esc(layerText)}</strong>.`}</span>
           </div>
-          ${hasSetupGap && typeof openModal === 'function' ? `<button type="button" class="btn btn-primary btn-xs" onclick="openModal('routerConfigModal')">🔐 Open Router Settings</button>` : ''}
-          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">✕ Close</button>
+          ${hasSetupGap && typeof openModal === 'function' ? `<button type="button" class="btn btn-primary btn-xs" onclick="openModal('routerConfigModal')">Router Settings</button>` : ''}
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">Dismiss</button>
         </div>
       `;
     }
@@ -735,7 +724,7 @@ async function configureRouterGameDns() {
   const btn = document.getElementById('btnSetupRouterDns');
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '⏳ Configuring...';
+    btn.textContent = 'Configuring...';
   }
   try {
     const res = await apiJson('/api/gaming/setup-router-dns', {
@@ -754,7 +743,7 @@ async function configureRouterGameDns() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = '⚡ Setup Whole-Wi-Fi Interception';
+      btn.textContent = 'Setup Wi-Fi DNS';
     }
   }
 }
@@ -783,45 +772,40 @@ function renderWiresharkStatusBar(ws) {
   if (badge) {
     if (!enabled) {
       badge.className = 'status-pill';
-      badge.textContent = '⏸ WIRESHARK CAPTURE PAUSED';
+      badge.textContent = 'Wireshark · Paused';
     } else if (active) {
       badge.className = 'status-pill online';
-      badge.textContent = `🦈 WIRESHARK · ${tsharkOn ? 'TSHARK LIVE' : 'NPCAP LIVE'} (${pkts.toLocaleString()} PKTS)`;
+      badge.textContent = `Wireshark · ${tsharkOn ? 'TShark Live' : 'Npcap Live'} (${pkts.toLocaleString()} pkts)`;
     } else if (npcapOn || tsharkOn) {
       badge.className = 'status-pill warning';
-      badge.textContent = '🟠 WIRESHARK · STANDBY';
+      badge.textContent = 'Wireshark · Standby';
     } else {
       badge.className = 'status-pill';
-      badge.textContent = '📂 WIRESHARK · OFFLINE PCAP MODE';
+      badge.textContent = 'Wireshark · Offline .pcap Mode';
     }
   }
   if (bar) {
     bar.classList.toggle('warn', Boolean(enabled && !active && (npcapOn || tsharkOn)));
   }
   if (toggleBtn) {
-    toggleBtn.textContent = enabled ? '⏸ Pause Capture' : '▶ Resume Capture';
+    toggleBtn.textContent = enabled ? 'Pause' : 'Resume';
   }
   if (sum) {
-    const engineLabel = tsharkOn
-      ? 'TShark CLI Dissector'
-      : npcapOn
-      ? 'Built-in Npcap (wpcap.dll)'
-      : 'Offline .pcap/.pcapng Parser';
-    const tzspText = s.tzspActive ? ` · TZSP Mirror :${s.tzspPort || 37008}` : '';
+    const engineLabel = tsharkOn ? 'TShark' : npcapOn ? 'Npcap (wpcap)' : 'Offline Parser';
+    const tzspText = s.tzspActive ? ` · TZSP :${s.tzspPort || 37008}` : '';
     const nicText = ifaceCount > 0 ? ` · ${ifaceCount} NIC(s)` : '';
     sum.innerHTML =
-      `Engine: <strong>${esc(engineLabel)}</strong>${esc(nicText)}${esc(tzspText)} · ` +
-      `Matched: <strong>${matched}</strong> (TLS SNI ${tlsCnt} · DNS ${dnsCnt} · Flows ${flowCnt}) · ` +
-      `.pcap: <code>${esc(pcapKB)} KB</code>` +
-      (!tsharkOn ? ' · <span style="opacity:0.85;">Tip: install Wireshark/TShark for full protocol trees</span>' : '');
+      `${esc(engineLabel)}${esc(nicText)}${esc(tzspText)} · ` +
+      `Matched: <strong>${matched}</strong> (SNI ${tlsCnt} · DNS ${dnsCnt} · Flows ${flowCnt}) · ` +
+      `<code>${esc(pcapKB)} KB</code>`;
   }
   if (strip) {
-    const hits = Array.isArray(s.recentHits) ? s.recentHits.slice(0, 3) : [];
+    const hits = Array.isArray(s.recentHits) ? s.recentHits.slice(0, 2) : [];
     const lastA = s.lastAnalyze;
     const parts = [];
     if (hits.length) {
       parts.push(
-        `<strong>Live Packet Hits:</strong> ` +
+        `<strong>Recent DPI Hits:</strong> ` +
           hits
             .map(
               h =>
@@ -834,9 +818,9 @@ function renderWiresharkStatusBar(ws) {
     }
     if (lastA && lastA.filename) {
       parts.push(
-        `<strong>Last File:</strong> <code>${esc(lastA.filename)}</code> (${Number(
+        `<strong>Analyzed:</strong> <code>${esc(lastA.filename)}</code> (${Number(
           lastA.packetsParsed || 0
-        )} pkts, <strong>${Number(lastA.uniqueMatches || 0)}</strong> game matches)`
+        )} pkts, <strong>${Number(lastA.uniqueMatches || 0)}</strong> match(es))`
       );
     }
     if (parts.length) {
@@ -874,7 +858,7 @@ async function copyWiresharkDisplayFilter() {
     await navigator.clipboard.writeText(filter);
     if (btn) {
       const prev = btn.textContent;
-      btn.textContent = '✓ Filter Copied!';
+      btn.textContent = 'Copied!';
       setTimeout(() => {
         btn.textContent = prev;
       }, 2000);
@@ -900,7 +884,7 @@ async function handleWiresharkPcapUpload(input) {
     }
     if (banner) {
       banner.style.display = 'block';
-      banner.innerHTML = `<div class="game-auto-status-bar"><span class="status-pill warning">🦈 ANALYZING WIRESHARK CAPTURE...</span><span style="font-size:0.78rem; color:var(--text-muted);">Dissecting DNS, TLS SNI, HTTP &amp; UDP/TCP game packets from <code>${esc(file.name)}</code>...</span></div>`;
+      banner.innerHTML = `<div class="game-scan-banner"><div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;"><span class="status-pill warning">Analyzing Capture</span><span style="font-size:0.78rem; color:var(--text-muted);">Dissecting DNS, TLS SNI, HTTP &amp; UDP/TCP game packets from <code>${esc(file.name)}</code>...</span></div></div>`;
     }
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -918,12 +902,12 @@ async function handleWiresharkPcapUpload(input) {
     if (banner) {
       banner.style.display = 'block';
       banner.innerHTML = `
-        <div class="game-auto-status-bar">
+        <div class="game-scan-banner">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
-            <span class="status-pill ${res.uniqueMatches > 0 ? 'warning' : 'online'}">🦈 ${esc(file.name)}</span>
-            <span style="font-size:0.78rem; color:var(--text-muted);">Parsed <strong>${Number(res.packetsParsed || 0)}</strong> packets — found <strong>${Number(res.uniqueMatches || 0)}</strong> game match(es) (${Number(res.detectionsLogged || 0)} logged into Playing Now).</span>
+            <span class="status-pill ${res.uniqueMatches > 0 ? 'warning' : 'online'}">${esc(file.name)}</span>
+            <span style="font-size:0.78rem; color:var(--text-muted);">Parsed <strong>${Number(res.packetsParsed || 0)}</strong> packets — found <strong>${Number(res.uniqueMatches || 0)}</strong> match(es) (${Number(res.detectionsLogged || 0)} active session(s)).</span>
           </div>
-          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">✕ Close</button>
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">Dismiss</button>
         </div>
       `;
     }

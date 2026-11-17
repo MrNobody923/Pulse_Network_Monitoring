@@ -17,7 +17,7 @@
 
   <!-- Modular Stylesheets -->
   <link rel="stylesheet" href="css/base.css?v=20261117f">
-  <link rel="stylesheet" href="css/components.css?v=20261116h">
+  <link rel="stylesheet" href="css/components.css?v=20261117h">
   <link rel="stylesheet" href="css/isp-speedtest.css?v=20261117e">
   <link rel="stylesheet" href="css/nmap-scanner.css?v=20261116h">
   <link rel="stylesheet" href="css/topology.css?v=20261116h">
@@ -1928,150 +1928,147 @@
 
     <!-- MOBILE & ONLINE GAME DETECTOR SECTION -->
     <section class="glass-card" id="gamingSection" style="display: none;">
-      <div class="card-header">
+      <div class="card-header game-header">
         <div class="card-title-group">
-          <div class="card-icon cyan">🎮</div>
+          <div class="card-icon cyan" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="4"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/><circle cx="15.5" cy="11" r="1" fill="currentColor"/><circle cx="18" cy="13.5" r="1" fill="currentColor"/></svg>
+          </div>
           <div>
-            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-              <h2>Mobile &amp; Online Game Detector</h2>
-              <span class="status-pill online" id="gamingStatusBadge">AUTO DETECTION · LIVE</span>
+            <div class="game-title-row">
+              <h2>Game Activity Detector</h2>
+              <span class="status-pill online" id="gamingStatusBadge">Watching · Live</span>
             </div>
-            <p>Automatically watches every phone, tablet, and PC on your network (<code>192.168.0.0/22</code>) and detects open games in real time — showing the exact device, the game being played, and the Wi-Fi / router it is connected to.</p>
+            <p class="game-subtitle">Real-time DNS, TLS SNI, socket &amp; Wireshark/Npcap packet inspection across <code>192.168.0.0/22</code>.</p>
           </div>
         </div>
 
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-          <button type="button" class="btn btn-secondary" id="btnGameNotify" onclick="requestGameNotificationPermission()">
-            🔔 Enable Desktop Popup Alerts
+        <div class="game-header-actions">
+          <button type="button" class="btn btn-primary" id="btnScanGames" onclick="runLanGameScan()">
+            Scan Connected Devices Now
           </button>
-          <button type="button" class="btn btn-secondary" id="btnScanGames" onclick="runLanGameScan()">
-            🔍 Scan Connected Devices Now
+          <button type="button" class="btn btn-secondary" id="btnGameNotify" onclick="requestGameNotificationPermission()">
+            Desktop Alerts
           </button>
           <button type="button" class="btn btn-secondary" onclick="clearGameActivity()">
-            🗑️ Clear History
+            Clear History
           </button>
         </div>
       </div>
 
       <div class="game-kpi-strip">
         <div class="kpi-card">
-          <div class="kpi-top"><span class="kpi-label">Active Games Playing</span><span class="kpi-icon">🎮</span></div>
+          <div class="kpi-top"><span class="kpi-label">Active Sessions</span><span class="game-kpi-tag">LIVE</span></div>
           <strong class="kpi-value amber" id="gameStatActive">0</strong>
-          <small class="kpi-sub">Current open sessions</small>
+          <small class="kpi-sub">Currently open games</small>
         </div>
         <div class="kpi-card">
-          <div class="kpi-top"><span class="kpi-label">Total Game Launches</span><span class="kpi-icon">📊</span></div>
+          <div class="kpi-top"><span class="kpi-label">Total Detections</span><span class="game-kpi-tag">LOG</span></div>
           <strong class="kpi-value" id="gameStatTotal">0</strong>
-          <small class="kpi-sub">Logged game detections</small>
+          <small class="kpi-sub">Recorded launches</small>
         </div>
         <div class="kpi-card">
-          <div class="kpi-top"><span class="kpi-label">Most Opened Game</span><span class="kpi-icon">🏆</span></div>
-          <strong class="kpi-value cyan" style="font-size: 1.05rem;" id="gameStatTopGame">None yet</strong>
-          <small class="kpi-sub">Most frequent detected title</small>
+          <div class="kpi-top"><span class="kpi-label">Top Detected Title</span><span class="game-kpi-tag">TOP</span></div>
+          <strong class="kpi-value cyan game-kpi-ellipsis" id="gameStatTopGame">None yet</strong>
+          <small class="kpi-sub">Most frequent game</small>
         </div>
         <div class="kpi-card">
-          <div class="kpi-top"><span class="kpi-label">Most Active Wi-Fi / Router</span><span class="kpi-icon">📡</span></div>
-          <strong class="kpi-value green" style="font-size: 0.96rem;" id="gameStatTopZone">No traffic yet</strong>
+          <div class="kpi-top"><span class="kpi-label">Most Active Zone</span><span class="game-kpi-tag">AP</span></div>
+          <strong class="kpi-value green game-kpi-ellipsis" id="gameStatTopZone">No traffic yet</strong>
           <small class="kpi-sub">Connected router or AP</small>
         </div>
       </div>
 
-      <!-- Live Sensor Readiness & Router DHCP Interception Bar -->
-      <div class="game-auto-status-bar" id="gameAutoStatusBar">
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1; min-width:260px;">
-          <span class="status-pill online" id="gameAutoPulseBadge">🟢 CHECKING LIVE SENSOR...</span>
-          <span id="gameSensorTelemetryLine" style="font-size:0.76rem; color:var(--text-muted); line-height:1.4;">
-            Checking host DNS (UDP/TCP 53), Router Syslog (UDP 514), Broadcast Listeners &amp; LAN Game Port Sweep...
-          </span>
-        </div>
-        <button type="button" class="btn btn-secondary btn-xs" id="btnSetupRouterDns" onclick="configureRouterGameDns()" style="display:none; flex-shrink:0;">
-          ⚡ Setup Whole-Wi-Fi Interception
-        </button>
-      </div>
-
-      <!-- Wireshark / TShark & Npcap Deep Packet Capture Integration -->
-      <div class="game-auto-status-bar" id="gameWiresharkBar">
-        <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:260px;">
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <span class="status-pill online" id="gameWiresharkBadge">🦈 WIRESHARK · INITIALIZING</span>
-            <span id="gameWiresharkSummary" style="font-size:0.76rem; color:var(--text-muted); line-height:1.4;">
-              Inspecting DNS Wire, TLS SNI, HTTP Host, TZSP (UDP 37008) &amp; Game Flows...
-            </span>
+      <!-- Compact 2-Column Telemetry & Deep Packet Inspection Deck -->
+      <div class="game-telemetry-deck">
+        <div class="game-deck-card" id="gameAutoStatusBar">
+          <div class="game-deck-head">
+            <div class="game-deck-badges">
+              <span class="status-pill online" id="gameAutoPulseBadge">Checking Sensor</span>
+              <span class="status-pill online" id="gameManualModeBadge">Manual Block Only</span>
+            </div>
+            <div class="game-deck-actions">
+              <button type="button" class="btn btn-secondary btn-xs" id="btnSetupRouterDns" onclick="configureRouterGameDns()" style="display:none;">
+                Setup Wi-Fi DNS
+              </button>
+              <button type="button" class="btn btn-secondary btn-xs" id="btnForceManualMode" onclick="setGamingPolicyMode('alert_only')" style="display:none;">
+                Revert to Manual
+              </button>
+            </div>
           </div>
-          <div id="gameWiresharkHitsStrip" style="display:none; font-size:0.72rem; color:var(--text-dim); line-height:1.4;"></div>
+          <div class="game-deck-meta" id="gameSensorTelemetryLine">
+            Initializing DNS (53), Syslog (514), Broadcast &amp; LAN socket telemetry...
+          </div>
+          <div class="game-deck-sub" id="gamePolicyBar">
+            <span id="gamePolicyHint">Manual mode enabled — never auto-blocks users; use Block on any active session to throttle speed.</span>
+          </div>
         </div>
-        <div class="row-actions-group" style="justify-content:flex-end; flex-shrink:0;">
-          <button type="button" class="btn btn-secondary btn-xs" id="btnToggleWireshark" onclick="toggleWiresharkCapture()">
-            ⏸ Pause Capture
-          </button>
-          <a class="btn btn-secondary btn-xs" id="btnDownloadWiresharkPcap" href="/api/gaming/wireshark/capture.pcap" download="pulse-game-capture.pcap">
-            ⬇ Download .pcap
-          </a>
-          <button type="button" class="btn btn-secondary btn-xs" onclick="triggerWiresharkPcapImport()">
-            📂 Analyze .pcap/.pcapng
-          </button>
-          <button type="button" class="btn btn-secondary btn-xs" id="btnCopyWiresharkFilter" onclick="copyWiresharkDisplayFilter()">
-            📋 Copy Filter
-          </button>
-          <input type="file" id="wiresharkPcapFileInput" accept=".pcap,.pcapng,.cap" style="display:none;" onchange="handleWiresharkPcapUpload(this)">
+
+        <div class="game-deck-card" id="gameWiresharkBar">
+          <div class="game-deck-head">
+            <div class="game-deck-badges">
+              <span class="status-pill online" id="gameWiresharkBadge">Wireshark · Initializing</span>
+            </div>
+            <div class="game-deck-actions">
+              <button type="button" class="btn btn-secondary btn-xs" id="btnToggleWireshark" onclick="toggleWiresharkCapture()">
+                Pause
+              </button>
+              <a class="btn btn-secondary btn-xs" id="btnDownloadWiresharkPcap" href="/api/gaming/wireshark/capture.pcap" download="pulse-game-capture.pcap">
+                .pcap
+              </a>
+              <button type="button" class="btn btn-secondary btn-xs" onclick="triggerWiresharkPcapImport()">
+                Analyze File
+              </button>
+              <button type="button" class="btn btn-secondary btn-xs" id="btnCopyWiresharkFilter" onclick="copyWiresharkDisplayFilter()">
+                Filter
+              </button>
+              <input type="file" id="wiresharkPcapFileInput" accept=".pcap,.pcapng,.cap" style="display:none;" onchange="handleWiresharkPcapUpload(this)">
+            </div>
+          </div>
+          <div class="game-deck-meta" id="gameWiresharkSummary">
+            Inspecting DNS Wire, TLS SNI, HTTP Host, TZSP (37008) &amp; Game Flows...
+          </div>
+          <div class="game-deck-sub game-ws-hits" id="gameWiresharkHitsStrip" style="display:none;"></div>
         </div>
       </div>
 
-      <!-- Manual Control Policy Strip (Never Auto-Blocks Users) -->
-      <div class="game-policy-bar" id="gamePolicyBar">
-        <div class="game-policy-label">
-          <strong>🛡️ Manual Control Mode — Never Auto-Blocks Users</strong>
-          <span id="gamePolicyHint" class="dev-row-sub">Detections &amp; topology scans only report open games. Nothing is blocked automatically — click Block to drop a user's internet speed to an unplayable rate.</span>
-        </div>
-        <div class="filter-tab-pills" id="gamePolicyModePills">
-          <span class="status-pill online" id="gameManualModeBadge">🔔 DETECT &amp; ALERT ONLY (MANUAL BLOCK)</span>
-          <button type="button" class="btn btn-secondary btn-xs" id="btnForceManualMode" style="display:none;" onclick="setGamingPolicyMode('alert_only')">↩ Disable Auto-Block</button>
-        </div>
-      </div>
+      <!-- Scan / Upload Feedback Banner -->
+      <div id="gameScanResultBanner" style="display: none; margin-bottom: 14px;"></div>
 
-      <!-- Topology Scan Results Summary Banner -->
-      <div id="gameScanResultBanner" style="display: none; margin-bottom: 12px;"></div>
-
-      <!-- Currently Open / Playing Games (Shown ONLY when a game is open) -->
+      <!-- Active Unblocked Sessions (Shown Only When Playing) -->
       <div id="activeGamesLivePanel" style="display: none; margin-bottom: 14px;"></div>
 
-      <!-- Active Game Blocks Panel -->
+      <!-- Throttled / Blocked Devices (Shown Only When Rules Active) -->
       <div id="gameBlocksPanel" style="display: none; margin-bottom: 14px;"></div>
 
-      <div class="alert-filter-bar" style="margin-bottom: 12px;">
-        <div class="filter-tab-pills" id="gameFilterTabs">
-          <button type="button" class="filter-tab active" data-game-filter="active" onclick="setGameActivityFilter('active')">
-            🎮 Playing Now (<span id="gameTabActiveCount">0</span>)
-          </button>
-          <button type="button" class="filter-tab" data-game-filter="blocked" onclick="setGameActivityFilter('blocked')">
-            🛑 Blocked Users (<span id="gameTabBlockedCount">0</span>)
-          </button>
-          <button type="button" class="filter-tab" data-game-filter="all" onclick="setGameActivityFilter('all')">
-            📜 Past History (<span id="gameTabAllCount">0</span>)
-          </button>
-        </div>
-        <div class="filter-search-box">
-          <input type="text" id="gameSearchInput" placeholder="Search by game name, device name, IP, or router/AP..." oninput="handleGameActivitySearch(this.value)">
-        </div>
-      </div>
-
-      <div class="ps-terminal-shell">
-        <div class="ps-terminal-titlebar">
-          <div class="ps-terminal-dots">
-            <span class="dot-red"></span>
-            <span class="dot-amber"></span>
-            <span class="dot-green"></span>
-            <span class="ps-terminal-cmd">PS C:\Pulse\GameDetector&gt; Watch-NetworkGames -AutoDetect -LiveStream</span>
+      <!-- Structured Activity Table Card -->
+      <div class="game-table-shell">
+        <div class="game-table-toolbar">
+          <div class="filter-tab-pills" id="gameFilterTabs">
+            <button type="button" class="filter-tab active" data-game-filter="active" onclick="setGameActivityFilter('active')">
+              Playing Now (<span id="gameTabActiveCount">0</span>)
+            </button>
+            <button type="button" class="filter-tab" data-game-filter="blocked" onclick="setGameActivityFilter('blocked')">
+              Blocked (<span id="gameTabBlockedCount">0</span>)
+            </button>
+            <button type="button" class="filter-tab" data-game-filter="all" onclick="setGameActivityFilter('all')">
+              All History (<span id="gameTabAllCount">0</span>)
+            </button>
           </div>
-          <span class="ps-terminal-hint" id="gameTerminalShowingCount">0 lines</span>
+          <div class="game-table-right">
+            <div class="filter-search-box game-search-box">
+              <input type="text" id="gameSearchInput" placeholder="Filter by game, device, IP, or AP..." oninput="handleGameActivitySearch(this.value)">
+            </div>
+            <span class="game-table-count" id="gameTerminalShowingCount">0 entries</span>
+          </div>
         </div>
-        <div class="ps-terminal-body game-terminal-body" id="gamingTerminalContainer">
-          <!-- Terminal-style compact live game logs rendered here -->
+
+        <div class="game-log-list" id="gamingTerminalContainer">
+          <!-- Activity rows rendered here -->
         </div>
-        <div class="ps-terminal-prompt-bar">
-          <span class="ps-prompt-prefix">PS C:\Pulse\GameDetector&gt;</span>
-          <span class="ps-prompt-text" id="gameTerminalPromptText">Watching all connected phones, tablets &amp; PCs for open games...</span>
-          <span class="ps-cursor"></span>
+
+        <div class="game-table-footer">
+          <span class="live-indicator-dot" aria-hidden="true"></span>
+          <span id="gameTerminalPromptText">Monitoring LAN devices in real time — manual block control only.</span>
         </div>
       </div>
     </section>
@@ -2366,7 +2363,7 @@
   <script src="js/charts-timeline.js?v=20261117g"></script>
   <script src="js/nmap-scanner.js?v=20261117a"></script>
   <script src="js/topology.js?v=20261117a"></script>
-  <script src="js/game-detector.js?v=20261117e"></script>
+  <script src="js/game-detector.js?v=20261117h"></script>
   <script src="js/modals-tools.js?v=20261117f"></script>
   <script src="js/app.js?v=20261117g"></script>
 </body>
