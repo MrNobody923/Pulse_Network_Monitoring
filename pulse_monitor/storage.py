@@ -149,16 +149,28 @@ class StorageMixin:
         if not name:
             raise ValueError("Device name is required")
         port = self._validate_port(device.get("port", 80))
+        raw_mac = self._normalize_mac(device.get("mac")) if device.get("mac") else ""
+        if not raw_mac:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT mac FROM discovered_devices WHERE ip=? ORDER BY last_seen DESC LIMIT 1",
+                    (ip,),
+                ).fetchone()
+            if row and row["mac"]:
+                raw_mac = str(row["mac"]).lower()
         new_device = {
-            "id": str(device.get("id") or f"dev-{uuid.uuid4().hex[:12]}"),
+            "id": str(device.get("id") or f"dev-custom-{uuid.uuid4().hex[:10]}"),
             "name": name[:120],
             "ip": ip,
             "type": str(device.get("type") or "ap")[:24],
+            "vendor": str(device.get("vendor") or "")[:80],
+            "subnet": self._subnet_for_ip(ip) if hasattr(self, "_subnet_for_ip") else "",
             "checkMethod": "auto",
             "port": port,
             "location": str(device.get("location") or "Office")[:120],
-            "critical": bool(device.get("critical", False)),
-            "mac": self._normalize_mac(device.get("mac")) if device.get("mac") else "",
+            "critical": bool(device.get("critical", True)),
+            "manual": bool(device.get("manual", False)),
+            "mac": raw_mac,
         }
         with self.lock:
             if any(d["ip"] == ip for d in self.config["devices"]):
@@ -219,13 +231,17 @@ class StorageMixin:
                 return False
             self.save_config()
         if removed_dev:
+            rem_ip = removed_dev.get("ip", "")
+            if rem_ip:
+                self._clear_ip_state_and_alerts(rem_ip)
+                self._prune_orphaned_device_alerts(save=True)
             self._record_event(
                 "DEVICE_REMOVED",
                 "WARNING",
                 "Monitored Device Removed",
-                f"Removed {removed_dev.get('name', removed_dev.get('ip'))} ({removed_dev.get('ip', '')}) from active monitoring.",
+                f"Removed {removed_dev.get('name', rem_ip)} ({rem_ip}) from active monitoring.",
                 mac=removed_dev.get("mac", ""),
-                ip=removed_dev.get("ip", ""),
+                ip=rem_ip,
                 device_name=removed_dev.get("name", ""),
             )
         return True
@@ -267,8 +283,12 @@ class StorageMixin:
             fp_model = str(fp.get("model") or "")
             preferred_port = int(fp.get("preferredPort") or 80)
 
-            # Live OS/SSH server fingerprint explicitly overrides false infrastructure guesses
-            if fp_role == "server":
+            # Live server/IoT/client fingerprints explicitly override false infrastructure guesses
+            fp_mac = str(fp.get("mac") or "").lower()
+            if fp_mac and mac and fp_mac != mac:
+                fp = {}
+                fp_role = fp_vendor = fp_model = ""
+            if fp_role in {"server", "client", "iot"}:
                 continue
 
             octets = ip.split(".")
@@ -280,8 +300,8 @@ class StorageMixin:
             is_switch = (
                 fp_role == "switch"
                 or oui_type == "switch"
-                or "cisco" in vendor_lower
-                or "switch" in suggested.lower()
+                or ("cisco" in vendor_lower and fp_role not in {"ap", "router"})
+                or ("switch" in suggested.lower() and fp_role not in {"ap", "router"})
             )
             if local_nets:
                 is_gateway = (
@@ -300,7 +320,7 @@ class StorageMixin:
             is_router = (
                 not is_gateway
                 and not is_switch
-                and (fp_role == "router" or oui_type == "router")
+                and (fp_role == "router" or (oui_type == "router" and fp_role != "ap"))
             )
             is_ap = (
                 not is_gateway
@@ -330,10 +350,16 @@ class StorageMixin:
                 )
             )
             short_model = (
-                fp_model.split("Dual-Band")[0].split("4-Stream")[0].strip()
+                fp_model.split("Dual-Band")[0].split("4-Stream")[0].split("Mesh System")[0].strip()
                 if fp_model
                 else ""
             )
+            if "deco" in fp_model.lower():
+                clean_vendor = "TP-Link"
+                short_model = "Deco Mesh"
+            elif "omada eap" in fp_model.lower():
+                clean_vendor = "TP-Link"
+                short_model = "Omada EAP"
             prefixed_model = (
                 short_model
                 if short_model and short_model.lower().startswith(clean_vendor.lower())
@@ -351,11 +377,15 @@ class StorageMixin:
                 location = f"Main Gateway · {subnet_cidr}"
             elif is_router:
                 dev_type = "router"
-                model_tag = prefixed_model if short_model else f"{clean_vendor} Router"
-                if "router" not in model_tag.lower():
-                    model_tag = f"{model_tag} Router"
+                if "deco mesh" in fp_model.lower() or "deco" in prefixed_model.lower():
+                    model_tag = "TP-Link Deco Mesh"
+                    location = f"Deco Mesh Zone {subnet_zone} · {subnet_cidr}"
+                else:
+                    model_tag = prefixed_model if short_model else f"{clean_vendor} Router"
+                    if "router" not in model_tag.lower():
+                        model_tag = f"{model_tag} Router"
+                    location = f"Router Zone {subnet_zone} · {subnet_cidr}"
                 dev_name = f"{model_tag} · .{subnet_zone}.{last_octet}"
-                location = f"Router Zone {subnet_zone} · {subnet_cidr}"
             elif is_switch:
                 dev_type = "switch"
                 dev_name = f"{short_model or 'Network Switch'} ({ip})"
@@ -415,7 +445,10 @@ class StorageMixin:
                     removed_ips.add(dev_ip)
                     continue
                 # Prune previously auto-enrolled entries whose MAC/IP is no longer verified infrastructure
-                is_auto_enrolled = dev_id.startswith(("dev-gateway-", "dev-router-", "dev-ap-", "dev-switch-"))
+                is_auto_enrolled = (
+                    dev_id.startswith(("dev-gateway-", "dev-router-", "dev-ap-", "dev-switch-"))
+                    and not dev.get("manual")
+                )
                 if is_auto_enrolled and dev_ip != router_ip:
                     is_valid_cand = dev_mac in cand_by_mac or dev_ip in cand_by_ip
                     db_row = db_by_mac.get(dev_mac)
@@ -438,6 +471,11 @@ class StorageMixin:
             for cand in infra_candidates:
                 existing = by_mac.get(cand["mac"]) or by_ip.get(cand["ip"])
                 if existing is not None:
+                    if existing.get("manual") or str(existing.get("id") or "").startswith("dev-custom-"):
+                        if not existing.get("mac") and cand["mac"]:
+                            existing["mac"] = cand["mac"]
+                            updated_count += 1
+                        continue
                     changed = False
                     if existing.get("ip") != cand["ip"]:
                         old_ip = existing.get("ip")
@@ -452,6 +490,7 @@ class StorageMixin:
                         existing.get("name") != cand["name"]
                         or existing.get("location") != cand["location"]
                         or existing.get("type") != cand["type"]
+                        or existing.get("hardwareModel") != cand.get("hardwareModel", "")
                     ):
                         existing["name"] = cand["name"]
                         existing["location"] = cand["location"]

@@ -340,6 +340,13 @@ function renderRouterSection() {
                         <div class="row-actions-group">
                           <button type="button" class="btn btn-secondary btn-xs" onclick="selectRouterForInspection('${esc(r.ip)}')">Inspect</button>
                           <button type="button" class="btn btn-secondary btn-xs" onclick="openRouterConfigForIp('${esc(r.ip)}')">Settings</button>
+                          ${
+                            !(typeof appState !== 'undefined' && appState.router && r.ip === appState.router.ip) &&
+                            typeof appState !== 'undefined' &&
+                            (appState.devices || []).some(d => d.ip === r.ip)
+                              ? `<button type="button" class="btn btn-secondary btn-xs" style="color:var(--danger,#ef4444);border-color:rgba(239,68,68,0.35);" onclick="removeRouterFromFleet('${esc(r.ip)}')" title="Remove pulled-out or decommissioned router/AP from fleet">Remove</button>`
+                              : ''
+                          }
                         </div>
                       </td>
                     </tr>

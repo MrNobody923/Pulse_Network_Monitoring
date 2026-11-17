@@ -972,5 +972,113 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(mlbb_resp[-4:], b"\x00\x00\x00\x00")
 
 
+    def test_win32_icmp_fallback_rejects_unreachable_with_zero_returncode(self):
+        from unittest.mock import MagicMock
+
+        unreachable_proc = MagicMock(
+            returncode=0,
+            stdout="\nPinging 192.168.0.212 with 32 bytes of data:\nReply from 192.168.0.24: Destination host unreachable.\n\nPackets: Sent = 1, Received = 1, Lost = 0 (0% loss),\n",
+            stderr="",
+        )
+        with patch("pulse_monitor.probes.os.name", "nt"), patch(
+            "pulse_monitor.probes.subprocess.run", return_value=unreachable_proc
+        ):
+            alive, latency = monitor_module.Monitor._probe_icmp("192.168.0.212", 1000)
+        self.assertFalse(alive)
+        self.assertIsNone(latency)
+
+        reachable_proc = MagicMock(
+            returncode=0,
+            stdout="\nPinging 192.168.1.195 with 32 bytes of data:\nReply from 192.168.1.195: bytes=32 time=7ms TTL=128\n",
+            stderr="",
+        )
+        with patch("pulse_monitor.probes.os.name", "nt"), patch(
+            "pulse_monitor.probes.subprocess.run", return_value=reachable_proc
+        ):
+            alive_ok, latency_ok = monitor_module.Monitor._probe_icmp("192.168.1.195", 1000)
+        self.assertTrue(alive_ok)
+        self.assertEqual(latency_ok, 7.0)
+
+    def test_deco_omada_ship_iot_classification_and_manual_ap_persistence(self):
+        import ipaddress
+        from unittest.mock import MagicMock
+
+        # 1. Identify TP-Link Deco Mesh via TLS CN (tplinkdeco.net), Omada EAP via omadaeap.net, and SHIP 2.0 Smart IoT
+        fake_resp = MagicMock()
+        fake_resp.headers = {"Server": "SHIP 2.0"}
+        fake_resp.read.return_value = b"<html><body><center>200 OK</center></body></html>"
+        fake_resp.__enter__.return_value = fake_resp
+        fake_resp.__exit__.return_value = False
+
+        with patch.object(
+            self.monitor, "_inspect_tls_cert_der", return_value=b"CN=tplinkdeco.net"
+        ), patch("urllib.request.urlopen", side_effect=OSError("no root html")):
+            deco_fp = self.monitor.identify_network_device("192.168.2.134", open_ports=[443, 20001])
+        self.assertEqual(deco_fp["role"], "router")
+        self.assertIn("Deco", deco_fp["model"])
+
+        with patch.object(
+            self.monitor, "_inspect_tls_cert_der", return_value=b"CN=omadaeap.net"
+        ), patch("urllib.request.urlopen", side_effect=OSError("no root html")):
+            omada_fp = self.monitor.identify_network_device("192.168.0.203", open_ports=[443])
+        self.assertEqual(omada_fp["role"], "ap")
+        self.assertIn("Omada", omada_fp["model"])
+
+        with patch.object(self.monitor, "_inspect_tls_cert_der", return_value=b""), patch(
+            "urllib.request.urlopen", return_value=fake_resp
+        ):
+            iot_fp = self.monitor.identify_network_device("192.168.2.81", open_ports=[80])
+        self.assertEqual(iot_fp["role"], "client")
+
+        # 2. Seed discovered LAN rows + fingerprints + manual AP (192.168.1.195), then run sync_infrastructure_devices()
+        for ip, mac, vendor, sugg in [
+            ("192.168.2.134", "98:03:8e:c3:be:0c", "TP-Link Deco Mesh", "TP-Link Deco Mesh (.2.134)"),
+            ("192.168.2.81", "50:3d:d1:11:22:33", "TP-Link Systems Inc.", "TP-Link Tapo IoT"),
+            ("192.168.0.203", "c0:3a:55:44:55:66", "TP-Link Systems Inc.", "Smart Switch (.0.203)"),
+            ("192.168.1.195", "40:c7:3c:12:3f:8b", "Intel Corporate", "Intel Corporate (192.168.1.195)"),
+        ]:
+            self.monitor._upsert_inventory(
+                {"mac": mac, "ip": ip, "vendor": vendor, "suggestedName": sugg, "arpType": "dynamic"},
+                scan_id="test-scan",
+            )
+        with self.monitor._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO monitor_metadata (key, value) VALUES ('device_fingerprints', ?)",
+                (
+                    json.dumps({
+                        "192.168.2.134": {**deco_fp, "mac": "98:03:8e:c3:be:0c"},
+                        "192.168.2.81": {**iot_fp, "mac": "50:3d:d1:11:22:33"},
+                        "192.168.0.203": {**omada_fp, "mac": "c0:3a:55:44:55:66"},
+                    }),
+                ),
+            )
+            db.commit()
+
+        manual_ap = self.monitor.add_device({
+            "name": "Deployed Access Point · .1.195",
+            "ip": "192.168.1.195",
+            "type": "ap",
+            "manual": True,
+        })
+        self.assertEqual(manual_ap["mac"], "40:c7:3c:12:3f:8b")
+
+        with patch.object(
+            self.monitor, "_known_local_networks", return_value=[ipaddress.ip_network("192.168.0.0/22")]
+        ), patch.object(
+            self.monitor, "_known_local_gateways", return_value={"192.168.0.1"}
+        ):
+            self.monitor.sync_infrastructure_devices()
+
+        devices_by_ip = {d["ip"]: d for d in self.monitor.get_devices()}
+        self.assertIn("192.168.2.134", devices_by_ip)
+        self.assertEqual(devices_by_ip["192.168.2.134"]["type"], "router")
+        self.assertIn("192.168.0.203", devices_by_ip)
+        self.assertEqual(devices_by_ip["192.168.0.203"]["type"], "ap")
+        self.assertNotIn("192.168.2.81", devices_by_ip)
+        self.assertNotIn("192.168.2.81", self.monitor.config.get("routers", {}))
+        self.assertIn("192.168.1.195", devices_by_ip)
+        self.assertTrue(devices_by_ip["192.168.1.195"].get("manual"))
+
+
 if __name__ == "__main__":
     unittest.main()

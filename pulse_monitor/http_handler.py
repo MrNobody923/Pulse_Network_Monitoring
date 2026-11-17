@@ -338,7 +338,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             body = self._json_body()
             if path == "/api/devices":
-                self._send_json(mon.add_device(body), 201)
+                created = mon.add_device(body)
+                self._send_json(created, 201)
+                mon.broadcast(
+                    "telemetry",
+                    {
+                        "timestamp": utc_now(),
+                        "router": mon.router_state,
+                        "isp": mon.get_isp_state(),
+                        "devices": mon._hydrated_devices(),
+                        "activeAlerts": mon.get_active_alerts(),
+                        "alertStats": mon.get_alert_stats(),
+                    },
+                )
             elif path == "/api/devices/probe-all":
                 results = mon.probe_all_devices()
                 self._send_json({
@@ -730,7 +742,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not match:
             self._send_error_json("Not found", 404)
             return
-        self._send_json({"success": mon.delete_device(_safe_key(match.group(1)))})
+        deleted = mon.delete_device(_safe_key(match.group(1)))
+        if deleted:
+            mon.broadcast(
+                "telemetry",
+                {
+                    "timestamp": utc_now(),
+                    "devices": mon._hydrated_devices(),
+                    "routers": mon.get_router_fleet() if hasattr(mon, "get_router_fleet") else [],
+                    "activeAlerts": mon.get_active_alerts(),
+                    "alertStats": mon.get_alert_stats(),
+                },
+            )
+        self._send_json({"success": deleted})
 
     def _import_devices(self, mon: object, body: dict) -> None:
         items = body.get("devices")

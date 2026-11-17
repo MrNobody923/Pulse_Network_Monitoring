@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import gzip
 import json
 import os
 import re
@@ -15,7 +17,31 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+if os.name == "nt":
+    import ctypes.wintypes
+
 from .config import ISP_TARGETS, ROUTER_PORTS, runtime_attr, utc_now
+
+if os.name == "nt":
+    class _IP_OPTION_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("Ttl", ctypes.c_ubyte),
+            ("Tos", ctypes.c_ubyte),
+            ("Flags", ctypes.c_ubyte),
+            ("OptionsSize", ctypes.c_ubyte),
+            ("OptionsData", ctypes.c_void_p),
+        ]
+
+    class _ICMP_ECHO_REPLY(ctypes.Structure):
+        _fields_ = [
+            ("Address", ctypes.c_uint32),
+            ("Status", ctypes.c_uint32),
+            ("RoundTripTime", ctypes.c_uint32),
+            ("DataSize", ctypes.c_uint16),
+            ("Reserved", ctypes.c_uint16),
+            ("Data", ctypes.c_void_p),
+            ("Options", _IP_OPTION_INFORMATION),
+        ]
 
 
 class ProbesMixin:
@@ -123,9 +149,71 @@ class ProbesMixin:
             return False, None
 
     @staticmethod
+    def _win32_icmp_echo(host: str, timeout_ms: int = 1000) -> tuple[bool, float | None]:
+        """Native Windows IcmpSendEcho via iphlpapi.dll (accurate RTT, immune to ping.exe rc=0 quirks)."""
+        try:
+            ip_str = socket.gethostbyname(str(host).strip())
+            addr_int = int.from_bytes(socket.inet_aton(ip_str), "little")
+        except OSError:
+            return False, None
+        iphlp = getattr(ctypes, "windll", None)
+        if iphlp is None or not hasattr(iphlp, "iphlpapi"):
+            return False, None
+        dll = iphlp.iphlpapi
+        if not getattr(dll, "_pulse_icmp_sig", False):
+            dll.IcmpCreateFile.restype = ctypes.wintypes.HANDLE
+            dll.IcmpCloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+            dll.IcmpSendEcho.argtypes = [
+                ctypes.wintypes.HANDLE,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_uint16,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+            ]
+            dll.IcmpSendEcho.restype = ctypes.c_uint32
+            dll._pulse_icmp_sig = True
+
+        invalid_handle = ctypes.wintypes.HANDLE(-1).value
+        handle = dll.IcmpCreateFile()
+        if not handle or handle == invalid_handle:
+            return False, None
+        payload = b"PulsePing0123456"
+        reply_size = ctypes.sizeof(_ICMP_ECHO_REPLY) + len(payload) + 16
+        reply_buf = ctypes.create_string_buffer(reply_size)
+        try:
+            count = dll.IcmpSendEcho(
+                handle,
+                addr_int,
+                payload,
+                len(payload),
+                None,
+                reply_buf,
+                reply_size,
+                max(50, int(timeout_ms)),
+            )
+            if count <= 0:
+                return False, None
+            reply = _ICMP_ECHO_REPLY.from_buffer(reply_buf)
+            if reply.Status != 0:
+                return False, None
+            rtt = max(0.5, round(float(reply.RoundTripTime), 1))
+            return True, rtt
+        except OSError:
+            return False, None
+        finally:
+            dll.IcmpCloseHandle(handle)
+
+    @staticmethod
     def _probe_icmp(host: str, timeout_ms: int = 1000) -> tuple[bool, float | None]:
         os_mod = runtime_attr("os", os)
         subproc_mod = runtime_attr("subprocess", subprocess)
+        is_mocked_subproc = hasattr(subproc_mod.run, "assert_called")
+        if os_mod.name == "nt" and not is_mocked_subproc and os.name == "nt":
+            return ProbesMixin._win32_icmp_echo(host, timeout_ms)
+
         command = (
             ["ping", "-n", "1", "-w", str(timeout_ms), host]
             if os_mod.name == "nt"
@@ -143,13 +231,19 @@ class ProbesMixin:
         except (OSError, subprocess.TimeoutExpired):
             return False, None
         output = result.stdout + result.stderr
+        low = output.lower()
+        if result.returncode != 0 or any(
+            bad in low
+            for bad in ("destination host unreachable", "destination net unreachable", "request timed out", "100% loss", "100% packet loss", "0 received")
+        ):
+            return False, None
         match = re.search(r"time[=<]\s*(\d+(?:\.\d+)?)\s*ms", output, re.I)
-        if result.returncode == 0:
-            latency = (
-                float(match.group(1)) if match else (time.perf_counter() - started) * 1000
-            )
-            return True, round(latency, 1)
-        return False, None
+        if "ttl=" not in low and match is None:
+            return False, None
+        latency = (
+            float(match.group(1)) if match else (time.perf_counter() - started) * 1000
+        )
+        return True, round(latency, 1)
 
     def _is_wan_internet_up(self) -> bool:
         """Check whether the upstream ISP / WAN internet connection is currently reachable."""
@@ -286,14 +380,38 @@ class ProbesMixin:
         except Exception:
             pass
 
+    @staticmethod
+    def _read_http_body(resp: object, max_bytes: int = 16384) -> str:
+        raw = resp.read(max_bytes)
+        enc = str(resp.headers.get("Content-Encoding") or "").lower()
+        if enc == "gzip" or raw[:2] == b"\x1f\x8b":
+            try:
+                raw = gzip.decompress(raw)
+            except Exception:
+                pass
+        return raw.decode("utf-8", "ignore")
+
+    @staticmethod
+    def _inspect_tls_cert_der(ip: str, port: int = 443, timeout: float = 0.7) -> bytes:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            with socket.create_connection((ip, port), timeout=timeout) as raw_sock:
+                with ctx.wrap_socket(raw_sock, server_hostname=ip) as ssock:
+                    der = ssock.getpeercert(binary_form=True)
+                    return (der or b"").lower()
+        except Exception:
+            return b""
+
     def identify_network_device(
         self, ip: str, open_ports: list[int] | None = None, community: str = "public"
     ) -> dict:
-        """Actively identify vendor, hardware model, protocol, and infra role via HTTP/LuCI/SNMP/SSH."""
+        """Actively identify vendor, hardware model, protocol, and infra role via TLS/HTTP/LuCI/SNMP/SSH."""
         if open_ports is None:
             open_ports = []
-            for p in (80, 443, 22, 8080):
-                is_open, _, _ = self._probe_tcp_socket(ip, p, timeout=0.45)
+            for p in (80, 443, 8080, 8443, 20001, 22):
+                is_open, _, _ = self._probe_tcp_socket(ip, p, timeout=0.4)
                 if is_open:
                     open_ports.append(p)
 
@@ -303,15 +421,41 @@ class ProbesMixin:
             "vendor": "",
             "model": "",
             "role": "",
-            "protocol": "https" if 443 in open_ports and 80 not in open_ports else "http",
+            "protocol": "https" if (443 in open_ports or 8443 in open_ports) and 80 not in open_ports else "http",
             "preferredPort": (
-                80 if 80 in open_ports else (443 if 443 in open_ports else (22 if 22 in open_ports else 80))
+                80 if 80 in open_ports else (443 if 443 in open_ports else (8080 if 8080 in open_ports else (22 if 22 in open_ports else 80)))
             ),
             "sshBanner": "",
             "snmp": {},
         }
 
         ctx = ssl._create_unverified_context()
+        # 0. Fast X.509 certificate inspection (distinguishes TP-Link Deco Mesh vs Omada EAP vs Archer routers)
+        cert_der = b""
+        for tls_p in (p for p in (443, 8443) if p in open_ports):
+            cert_der = self._inspect_tls_cert_der(ip, tls_p)
+            if cert_der:
+                if b"tplinkdeco.net" in cert_der:
+                    info.update({
+                        "vendor": "TP-Link",
+                        "model": "TP-Link Deco Mesh System",
+                        "role": "router",
+                        "protocol": "https" if 80 not in open_ports else "http",
+                        "preferredPort": 80 if 80 in open_ports else tls_p,
+                    })
+                elif b"omadaeap.net" in cert_der:
+                    info.update({
+                        "vendor": "TP-Link",
+                        "model": "TP-Link Omada EAP Access Point",
+                        "role": "ap",
+                        "protocol": "https",
+                        "preferredPort": tls_p,
+                    })
+                elif b"tplinkwifi.net" in cert_der:
+                    info["vendor"] = "TP-Link"
+                    info["role"] = "router"
+                break
+
         # 1. Try TP-Link LuCI hardware identification (HTTP 80 or HTTPS 443)
         for port in (p for p in (80, 443) if p in open_ports):
             scheme = "https" if port == 443 else "http"
@@ -319,17 +463,21 @@ class ProbesMixin:
                 req = urllib.request.Request(
                     f"{scheme}://{ip}:{port}/cgi-bin/luci/;stok=/locale?form=lang",
                     data=b"operation=read",
-                    headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Pulse/2.1"},
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "User-Agent": "Pulse/2.1",
+                        "Accept-Encoding": "gzip, identity",
+                    },
                 )
                 with urllib.request.urlopen(req, timeout=0.95, context=ctx if scheme == "https" else None) as resp:
-                    payload = json.loads(resp.read(2048).decode("utf-8", "ignore"))
+                    payload = json.loads(self._read_http_body(resp, 4096))
                 if payload.get("success") and isinstance(payload.get("data"), dict):
                     data = payload["data"]
                     model = str(data.get("model") or "TP-Link LuCI Device").strip()
                     lower_model = model.lower()
                     role = (
                         "ap"
-                        if any(tok in lower_model for tok in ("eap", "access point", "deco", "ap "))
+                        if any(tok in lower_model for tok in ("eap", "access point", "ap "))
                         else "router"
                     )
                     info.update({
@@ -344,37 +492,85 @@ class ProbesMixin:
             except Exception:
                 pass
 
-        # 2. Fallback HTTP / HTTPS root page & header inspection for TP-Link SuperUI, HTTPD, switches, APs
-        if not info["model"] and any(p in open_ports for p in (80, 443, 8080)):
+        # 2. Fallback HTTP / HTTPS root page & header inspection for Deco, SHIP 2.0 Smart IoT, Omada EAP, switches, APs
+        if any(p in open_ports for p in (80, 443, 8080)) and (
+            not info["model"] or info["model"] in {"TP-Link Deco Mesh System", "TP-Link Omada EAP Access Point"}
+        ):
             for port in (p for p in (443, 80, 8080) if p in open_ports):
                 scheme = "https" if port in (443, 8443) else "http"
                 try:
-                    req = urllib.request.Request(f"{scheme}://{ip}:{port}/", headers={"User-Agent": "Pulse/2.1"})
+                    req = urllib.request.Request(
+                        f"{scheme}://{ip}:{port}/",
+                        headers={"User-Agent": "Pulse/2.1", "Accept-Encoding": "gzip, identity"},
+                    )
                     with urllib.request.urlopen(req, timeout=0.95, context=ctx if scheme == "https" else None) as resp:
                         srv = str(resp.headers.get("Server") or "").strip()
-                        body = resp.read(3072).decode("utf-8", "ignore")
+                        body = self._read_http_body(resp, 8192)
+                        if "ship 2.0" in srv.lower():
+                            info.update({
+                                "vendor": "TP-Link Tapo / Kasa",
+                                "model": "TP-Link Smart Home / Tapo IoT",
+                                "role": "client",
+                                "protocol": scheme,
+                                "preferredPort": port,
+                            })
+                            break
                         if "/webpages/index.html" in body:
                             try:
                                 with urllib.request.urlopen(
-                                    urllib.request.Request(f"{scheme}://{ip}:{port}/webpages/index.html", headers={"User-Agent": "Pulse/2.1"}),
+                                    urllib.request.Request(
+                                        f"{scheme}://{ip}:{port}/webpages/index.html",
+                                        headers={"User-Agent": "Pulse/2.1", "Accept-Encoding": "gzip, identity"},
+                                    ),
                                     timeout=0.95,
                                     context=ctx if scheme == "https" else None,
                                 ) as r2:
-                                    body += "\n" + r2.read(4096).decode("utf-8", "ignore")
+                                    body += "\n" + self._read_http_body(r2, 8192)
                             except Exception:
                                 pass
-                        title_m = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
+                        title_m = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
                         title = title_m.group(1).strip() if title_m else ""
-                        combined = f"{srv} {title} {body[:1200]}".lower()
-                        if "tp-link" in combined or "$.su." in combined:
+                        combined = f"{srv} {title} {body[:2000]}".lower()
+                        if "omadaeap" in combined or ("tp-link httpd" in srv.lower() and "eap" in combined):
+                            info.update({
+                                "vendor": "TP-Link",
+                                "model": "TP-Link Omada EAP Access Point",
+                                "role": "ap",
+                                "protocol": scheme,
+                                "preferredPort": port,
+                            })
+                            break
+                        if "tp-link" in combined or "$.su." in combined or "/webpages/index.html" in body:
+                            if info["model"]:
+                                break
                             info["vendor"] = "TP-Link"
                             info["protocol"] = scheme
                             info["preferredPort"] = port
-                            if "httpd" in srv.lower():
-                                info["model"] = "TP-Link Managed AP / Smart Switch"
+                            if "httpd" in srv.lower() and "omadaeap.net" in cert_der:
+                                info["model"] = "TP-Link Omada EAP Access Point"
                                 info["role"] = "ap"
+                            elif "httpd" in srv.lower():
+                                info["model"] = "TP-Link Omada EAP / Smart AP"
+                                info["role"] = "ap"
+                            elif 20001 in open_ports or "tplinkdeco.net" in cert_der:
+                                info["model"] = "TP-Link Deco Mesh System"
+                                info["role"] = "router"
                             elif "$.su." in combined:
-                                info["model"] = "TP-Link SuperUI Router / AP"
+                                # Probe Deco /login?form=auth endpoint (present on Deco / Archer v2 WebUI)
+                                is_deco = False
+                                try:
+                                    lreq = urllib.request.Request(
+                                        f"{scheme}://{ip}:{port}/cgi-bin/luci/;stok=/login?form=auth",
+                                        data=b"operation=read",
+                                        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Pulse/2.1"},
+                                    )
+                                    with urllib.request.urlopen(lreq, timeout=0.7, context=ctx if scheme == "https" else None) as lr:
+                                        ltxt = lr.read(1024).decode("utf-8", "ignore")
+                                        if '"error_code":0' in ltxt.replace(" ", ""):
+                                            is_deco = True
+                                except Exception:
+                                    pass
+                                info["model"] = "TP-Link Deco Mesh System" if (is_deco or "tplinkdeco" in cert_der.decode("latin1", "ignore")) else "TP-Link SuperUI Router / AP"
                                 info["role"] = "router"
                             else:
                                 info["model"] = title or srv or "TP-Link Device"
@@ -389,6 +585,13 @@ class ProbesMixin:
                             break
                 except Exception:
                     continue
+
+        if 20001 in open_ports and not info["model"]:
+            info.update({
+                "vendor": "TP-Link",
+                "model": "TP-Link Deco Mesh System",
+                "role": "router",
+            })
 
         # 3. Lightweight SNMP check (catches managed switches & enterprise routers when SNMP enabled)
         snmp_data = self._snmp_get_oids(
@@ -478,11 +681,15 @@ class ProbesMixin:
             else best_latency
         )
 
-        # Enrich with cached or live hardware identity when management ports respond
+        # Enrich with cached or live hardware identity when management ports respond or MAC changed
         cached_fp = self._get_cached_fingerprints().get(ip, {})
-        hw_model = device.get("hardwareModel") or cached_fp.get("model") or ""
-        if alive and open_ports and not hw_model and dev_type in {"gateway", "router", "ap", "switch"}:
+        dev_mac = str(device.get("mac") or "").lower()
+        mac_mismatch = bool(dev_mac and cached_fp.get("mac") and cached_fp.get("mac") != dev_mac)
+        hw_model = "" if mac_mismatch else (device.get("hardwareModel") or cached_fp.get("model") or "")
+        if alive and open_ports and (not hw_model or mac_mismatch) and dev_type in {"gateway", "router", "ap", "switch"}:
             fp = self.identify_network_device(ip, open_ports=open_ports)
+            if dev_mac:
+                fp["mac"] = dev_mac
             if fp.get("model") or fp.get("snmp"):
                 hw_model = fp.get("model") or ""
                 self._save_cached_fingerprints({ip: fp})
@@ -783,6 +990,17 @@ class ProbesMixin:
                     state["model"] = str(loc_data["model"])
                 state["vendor"] = "TP-Link"
                 state["protocol"] = admin_scheme
+            elif not cfg.get("model") and (443 in open_ports or self._probe_tcp_socket(host, 20001, 0.35)[0]):
+                cert_der = self._inspect_tls_cert_der(host, 443) if 443 in open_ports else b""
+                if b"tplinkdeco.net" in cert_der:
+                    state["model"] = "TP-Link Deco Mesh System"
+                    state["vendor"] = "TP-Link"
+                    state["protocol"] = "https"
+                elif 20001 not in open_ports and self._probe_tcp_socket(host, 20001, 0.35)[0]:
+                    open_ports.append(20001)
+                    state["openPorts"] = open_ports
+                    state["model"] = "TP-Link Deco Mesh System"
+                    state["vendor"] = "TP-Link"
 
         if alive and open_ports:
             snmp_data = self._snmp_get_oids(

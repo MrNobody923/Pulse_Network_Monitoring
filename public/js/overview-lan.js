@@ -362,8 +362,22 @@ function renderOverviewAndLanCardsAndList() {
                 row.monitored && row.id
                   ? `<button type="button" class="btn btn-secondary btn-xs" onclick="probeMonitoredDevice('${esc(
                       row.id
-                    )}')">Probe</button>`
-                  : ''
+                    )}')">Probe</button>${
+                      !(typeof appState !== 'undefined' && appState.router && row.ip === appState.router.ip)
+                        ? `<button type="button" class="btn btn-secondary btn-xs" style="color:var(--danger,#ef4444);border-color:rgba(239,68,68,0.35);" onclick="deleteMonitoredDevice('${esc(
+                            row.id
+                          )}', '${esc(
+                            encodeURIComponent(row.name || row.ip)
+                          )}', '${esc(
+                            row.ip
+                          )}')" title="Remove from Monitored Infrastructure">Remove</button>`
+                        : ''
+                    }`
+                  : `<button type="button" class="btn btn-secondary btn-xs" onclick="promoteLanDeviceAsInfra('${esc(
+                      row.ip
+                    )}', '${esc(row.mac || '')}', '${esc(
+                      encodeURIComponent(row.name || row.ip)
+                    )}')" title="Promote this LAN device to Monitored Access Point / Router">+ Track AP</button>`
               }
               ${
                 !row.authorized && row.mac

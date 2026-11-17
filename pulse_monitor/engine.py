@@ -292,6 +292,7 @@ class Monitor(
 
     def _monitor_loop(self) -> None:
         last_scan_attempt: float | None = None
+        last_arp_sync: float = 0.0
         while not self._stop.is_set():
             cycle_started = time.monotonic()
 
@@ -301,6 +302,12 @@ class Monitor(
             except Exception as exc:
                 print(f"[monitor] Multi-router fleet probe warning: {exc}", flush=True)
                 fleet = self.get_router_fleet()
+            if (cycle_started - last_arp_sync) >= 45 and hasattr(self, "refresh_live_arp_and_infra"):
+                last_arp_sync = cycle_started
+                try:
+                    self.refresh_live_arp_and_infra()
+                except Exception as exc:
+                    print(f"[monitor] Live ARP sync warning: {exc}", flush=True)
             try:
                 self.expire_stale_game_sessions()
                 self.scan_lan_for_games()
@@ -325,18 +332,25 @@ class Monitor(
                     **({"gameActivity": game_activity} if game_activity is not None else {}),
                 },
             )
-            if self._daily_discovery_due() and (
-                last_scan_attempt is None or cycle_started - last_scan_attempt >= 3600
+            full_sweep_due = (
+                self._daily_discovery_due()
+                or last_scan_attempt is None
+                or (cycle_started - last_scan_attempt >= 300)
+            )
+            if full_sweep_due and (
+                last_scan_attempt is None or cycle_started - last_scan_attempt >= 120
             ):
                 last_scan_attempt = cycle_started
                 try:
                     self.discover_devices()
                     results = self.probe_all_devices()
+                    fleet = self.probe_routers_fleet()
                     self.broadcast(
                         "telemetry",
                         {
                             "timestamp": utc_now(),
                             "router": self.router_state,
+                            "routers": fleet,
                             "isp": self.get_isp_state(),
                             "devices": results if results else self._hydrated_devices(),
                             "topology": self.get_topology(),
@@ -347,12 +361,12 @@ class Monitor(
                         },
                     )
                 except (RuntimeError, OSError) as exc:
-                    print(f"[monitor] Daily LAN discovery failed: {exc}", flush=True)
+                    print(f"[monitor] Real-time LAN discovery failed: {exc}", flush=True)
             try:
                 poll_interval = max(
-                    5, int(self.config.get("devicePollIntervalSec", 30))
+                    5, min(20, int(self.config.get("devicePollIntervalSec", 15)))
                 )
             except (TypeError, ValueError):
-                poll_interval = 30
+                poll_interval = 15
             self._stop.wait(max(0.5, poll_interval - (time.monotonic() - cycle_started)))
 

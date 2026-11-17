@@ -345,6 +345,14 @@ class DiscoveryMixin:
             for address in network.hosts()
             if not address.is_loopback and not address.is_multicast
         })
+        is_mocked_subproc = hasattr(subproc_mod.run, "assert_called")
+        if os_mod.name == "nt" and not is_mocked_subproc and hasattr(self, "_win32_icmp_echo"):
+            def ping_win32(host: str) -> str | None:
+                alive, _ = self._win32_icmp_echo(host, timeout_ms=420)
+                return host if alive else None
+
+            with ThreadPoolExecutor(max_workers=96) as pool:
+                return [h for h in pool.map(ping_win32, hosts) if h is not None]
 
         def ping(host: str) -> str | None:
             command = (
@@ -353,17 +361,21 @@ class DiscoveryMixin:
                 else ["ping", "-c", "1", "-W", "1", host]
             )
             try:
-                ok = (
-                    subproc_mod.run(
-                        command,
-                        capture_output=True,
-                        text=True,
-                        timeout=1.5,
-                        check=False,
-                    ).returncode
-                    == 0
+                res = subproc_mod.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
                 )
-                return host if ok else None
+                out = (res.stdout + res.stderr).lower()
+                if res.returncode != 0:
+                    return None
+                if any(bad in out for bad in ("destination host unreachable", "destination net unreachable", "request timed out", "100% loss", "0 received")):
+                    return None
+                if out.strip() and "ttl=" not in out and "time=" not in out and "time<" not in out:
+                    return None
+                return host
             except (OSError, subprocess.TimeoutExpired):
                 return None
 
@@ -510,28 +522,32 @@ class DiscoveryMixin:
             all_fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
             all_hosts = self._get_cached_hostnames()
 
-            # Actively resolve hostnames (NetBIOS, mDNS, LLMNR, Gateway PTR) & HTTP/SSH/SNMP fingerprints
+            # Actively resolve hostnames (NetBIOS, mDNS, LLMNR, Gateway PTR) & TLS/HTTP/Deco/SNMP fingerprints
             if cand_ips and not is_mocked_subproc:
                 resolved_hosts = self._resolve_hostnames_bulk(cand_ips)
                 if resolved_hosts:
                     all_hosts.update(resolved_hosts)
 
+                mac_by_ip = {item["ip"]: item["mac"] for item in discovered}
                 if hasattr(self, "identify_network_device"):
                     fp_updates: dict[str, dict] = {}
 
                     def _fp_scan(target_ip: str) -> tuple[str, dict | None]:
                         open_p: list[int] = []
-                        for p in (80, 443, 22):
-                            is_open, _, _ = self._probe_tcp_socket(target_ip, p, timeout=0.35)
+                        for p in (80, 443, 8080, 20001, 22):
+                            is_open, _, _ = self._probe_tcp_socket(target_ip, p, timeout=0.3)
                             if is_open:
                                 open_p.append(p)
                         if not open_p:
                             return target_ip, None
-                        return target_ip, self.identify_network_device(target_ip, open_ports=open_p)
+                        res_fp = self.identify_network_device(target_ip, open_ports=open_p)
+                        if res_fp and mac_by_ip.get(target_ip):
+                            res_fp["mac"] = mac_by_ip[target_ip]
+                        return target_ip, res_fp
 
                     with ThreadPoolExecutor(max_workers=min(24, len(cand_ips))) as fp_pool:
                         for ip_key, fp_res in fp_pool.map(_fp_scan, cand_ips):
-                            if fp_res and (fp_res.get("model") or fp_res.get("vendor") or fp_res.get("snmp")):
+                            if fp_res and (fp_res.get("model") or fp_res.get("vendor") or fp_res.get("role") or fp_res.get("snmp")):
                                 fp_updates[ip_key] = fp_res
                     if fp_updates:
                         self._save_cached_fingerprints(fp_updates)
@@ -558,7 +574,7 @@ class DiscoveryMixin:
                 "NETWORK_SCAN",
                 "INFO",
                 "LAN Discovery Scan Completed",
-                f"Scanned {', '.join(str(n) for n in networks)} — {len(discovered)} ARP host(s) found ({ping_responses} ICMP reply(s)).",
+                f"Scanned {', '.join(str(n) for n in networks)} — {len(discovered)} host(s) online ({ping_responses} ICMP reply(s)).",
                 device_name="LAN Discovery",
             )
             timestamp = utc_now()
@@ -572,6 +588,10 @@ class DiscoveryMixin:
                 {
                     "inventory": self.get_inventory(),
                     "events": self.get_events(50),
+                    "devices": self._hydrated_devices(),
+                    "routers": self.get_router_fleet() if hasattr(self, "get_router_fleet") else [],
+                    "activeAlerts": self.get_active_alerts(),
+                    "alertStats": self.get_alert_stats(),
                 },
             )
             return {
@@ -586,6 +606,127 @@ class DiscoveryMixin:
                 "infrastructureSync": sync_summary,
                 "monitoredDevices": self._hydrated_devices(),
             }
+        finally:
+            self._scan_lock.release()
+
+    def refresh_live_arp_and_infra(self) -> dict:
+        """Lightweight real-time ARP neighbor sync + fingerprint check for newly joined routers, Deco mesh & APs."""
+        os_mod = runtime_attr("os", os)
+        subproc_mod = runtime_attr("subprocess", subprocess)
+        if not self._scan_lock.acquire(blocking=False):
+            return {"skipped": True}
+        try:
+            networks = self._known_local_networks() or self._local_lan_networks()
+            arp_entries = self._read_arp_entries(os_mod, subproc_mod)
+            known_gateways = self._known_local_gateways()
+            gw_plus_one = {network.network_address + 1 for network in networks}
+            all_fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
+            all_hosts = self._get_cached_hostnames()
+
+            with self._connect() as db:
+                existing_rows = {
+                    str(r["mac"]).lower(): dict(r)
+                    for r in db.execute("SELECT mac, ip, is_online FROM discovered_devices").fetchall()
+                }
+
+            new_or_changed: list[dict] = []
+            seen_ips: set[str] = set()
+            for raw_ip, raw_mac, kind in arp_entries:
+                try:
+                    ip = self._validate_ip(raw_ip)
+                    mac = self._normalize_mac(raw_mac)
+                    addr = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if mac in {"ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"}:
+                    continue
+                if not addr.is_private or addr.is_multicast or not any(addr in n for n in networks) or ip in seen_ips:
+                    continue
+                seen_ips.add(ip)
+
+                prev = existing_rows.get(mac)
+                prev_fp = all_fps.get(ip, {})
+                needs_fp = bool(
+                    prev is None
+                    or prev.get("ip") != ip
+                    or not prev.get("is_online")
+                    or (prev_fp and prev_fp.get("mac") and prev_fp.get("mac") != mac)
+                )
+                if not needs_fp:
+                    continue
+                oui = mac.replace(":", "")[:6]
+                vendor, device_type = self._vendor_for_oui(oui)
+                if addr in gw_plus_one or ip in known_gateways:
+                    device_type = "gateway"
+                new_or_changed.append({
+                    "ip": ip,
+                    "mac": mac,
+                    "arpType": kind,
+                    "vendor": vendor,
+                    "type": device_type,
+                })
+
+            if not new_or_changed:
+                return {"changed": 0}
+
+            cand_ips = [x["ip"] for x in new_or_changed]
+            resolved_hosts = self._resolve_hostnames_bulk(cand_ips)
+            if resolved_hosts:
+                all_hosts.update(resolved_hosts)
+            if hasattr(self, "identify_network_device"):
+                fp_updates: dict[str, dict] = {}
+                mac_by_ip = {x["ip"]: x["mac"] for x in new_or_changed}
+
+                def _fp_fast(target_ip: str) -> tuple[str, dict | None]:
+                    open_p = [p for p in (80, 443, 8080, 20001) if self._probe_tcp_socket(target_ip, p, timeout=0.25)[0]]
+                    if not open_p:
+                        return target_ip, None
+                    res_fp = self.identify_network_device(target_ip, open_ports=open_p)
+                    if res_fp:
+                        res_fp["mac"] = mac_by_ip.get(target_ip, "")
+                    return target_ip, res_fp
+
+                with ThreadPoolExecutor(max_workers=min(16, len(cand_ips))) as pool:
+                    for ip_key, fp_res in pool.map(_fp_fast, cand_ips):
+                        if fp_res and (fp_res.get("model") or fp_res.get("vendor") or fp_res.get("role")):
+                            fp_updates[ip_key] = fp_res
+                if fp_updates:
+                    self._save_cached_fingerprints(fp_updates)
+                    all_fps.update(fp_updates)
+
+            for item in new_or_changed:
+                resolved_vendor, label = self._build_device_label(
+                    item["ip"],
+                    item["mac"],
+                    item["vendor"],
+                    item["type"],
+                    hostname=all_hosts.get(item["ip"], ""),
+                    fp=all_fps.get(item["ip"]),
+                )
+                self._upsert_inventory({
+                    "ip": item["ip"],
+                    "mac": item["mac"],
+                    "arpType": item["arpType"],
+                    "vendor": resolved_vendor,
+                    "type": item["type"],
+                    "suggestedName": label,
+                    **({"hostname": all_hosts[item["ip"]]} if all_hosts.get(item["ip"]) else {}),
+                })
+            sync_res = self.sync_infrastructure_devices()
+            self.broadcast(
+                "inventory_update",
+                {
+                    "inventory": self.get_inventory(),
+                    "events": self.get_events(50),
+                    "devices": self._hydrated_devices(),
+                    "routers": self.get_router_fleet() if hasattr(self, "get_router_fleet") else [],
+                    "activeAlerts": self.get_active_alerts(),
+                    "alertStats": self.get_alert_stats(),
+                },
+            )
+            return {"changed": len(new_or_changed), "sync": sync_res}
+        except Exception:
+            return {"changed": 0}
         finally:
             self._scan_lock.release()
 

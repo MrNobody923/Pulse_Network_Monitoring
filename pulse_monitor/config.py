@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "isp": {
         "targetHosts": ["1.1.1.1", "8.8.8.8", "9.9.9.9"],
         "dnsTestDomain": "google.com",
-        "pollIntervalSec": 25,
+        "pollIntervalSec": 5,
         "speedTestIntervalMinutes": 60,
     },
     "thresholds": {
@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
         "preventionMode": "alert_only",
         "staleSessionSeconds": 75,
     },
-    "devicePollIntervalSec": 30,
+    "devicePollIntervalSec": 15,
     "soundAlertsEnabled": False,
     "devices": [
         {
@@ -128,11 +128,12 @@ ISP_TARGETS = [
 ]
 
 KNOWN_OUI_VENDORS: dict[str, tuple[str, str]] = {
-    # Verified TP-Link Routers & Access Points
+    # Verified TP-Link Routers, Deco Mesh & Access Points
     "687ff0": ("TP-Link", "router"),
     "6c5ab0": ("TP-Link", "router"),
     "e4fac4": ("TP-Link", "router"),
     "503dd1": ("TP-Link", "router"),
+    "98038e": ("TP-Link Deco Mesh", "router"),
     "c03a55": ("TP-Link", "ap"),
     "1027f5": ("TP-Link", "ap"),
     "f44d30": ("TP-Link", "ap"),
@@ -198,10 +199,9 @@ CLIENT_OUI_VENDORS: dict[str, tuple[str, str]] = {
     "3ca067": ("Liteon Technology", "client"),
     "d03957": ("Liteon Technology", "client"),
     "e00af6": ("Liteon Technology", "client"),
-    "105a95": ("TP-Link Client NIC", "client"),
-    "3c7895": ("TP-Link Client NIC", "client"),
+    "105a95": ("TP-Link Device", "client"),
+    "3c7895": ("TP-Link Device", "client"),
     "7cc2c6": ("TP-Link Client NIC", "client"),
-    "98038e": ("TP-Link Client NIC", "client"),
     "9c5322": ("TP-Link Client NIC", "client"),
     "b4b024": ("TP-Link Client NIC", "client"),
     "200db0": ("Four Seas Wi-Fi NIC", "client"),
