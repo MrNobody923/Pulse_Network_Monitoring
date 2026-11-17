@@ -1293,12 +1293,30 @@ class InventoryTests(unittest.TestCase):
                 )
             )
 
-        # Kernel BPF candidate filters stay valid and include DNS/TLS handshake/game ports
+        # Kernel BPF candidate filters stay valid and include DNS/TLS handshake/game ports + SYN filter
         bpfs = build_wireshark_bpf_filters(_NETSTAT_GAME_PORTS)
         self.assertEqual(len(bpfs), 2)
         self.assertIn("tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16", bpfs[0])
+        self.assertIn("not (ip and tcp and (tcp[13] & 0x12 = 0x02))", bpfs[0])
         self.assertIn("port 27036", bpfs[0])
         self.assertIn("tcp port 443", bpfs[1])
+
+        # Full Wireshark Display Filter includes games beyond index 40 (Roblox, Steam, Riot)
+        from pulse_monitor.wireshark_capture import build_wireshark_display_filter
+        disp_filter = build_wireshark_display_filter()
+        self.assertIn("roblox", disp_filter)
+        self.assertIn("steam", disp_filter)
+        self.assertIn("riot", disp_filter)
+
+        # Idempotent alert dismiss returns 200 even if alert already dismissed / absent
+        from pulse_monitor.http_handler import RequestHandler
+        responses = []
+        handler = object.__new__(RequestHandler)
+        handler._send_json = lambda data, code=200: responses.append((code, data))
+        handler._send_error_json = lambda msg, code=404: responses.append((code, {"error": msg}))
+        handler._alert_action(self.monitor, "dev-192.0.2.99", "dismiss", {})
+        self.assertEqual(responses[0][0], 200)
+        self.assertTrue(responses[0][1]["alreadyDismissed"])
 
         # Verify frontend browser state binding & top-level action handlers
         repo_root = Path(__file__).resolve().parent.parent

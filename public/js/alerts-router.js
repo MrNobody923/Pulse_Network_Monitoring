@@ -175,7 +175,7 @@ function renderAlertsCenter() {
             )}')">💬 Note</button>
             <button class="btn btn-secondary btn-xs" onclick="dismissAlert('${esc(
               alert.key
-            )}')">✕ Dismiss</button>
+            )}', this)">✕ Dismiss</button>
           </div>
         </div>
       `;
@@ -195,15 +195,34 @@ async function triggerLiveAlertDrill() {
   }
 }
 
-async function acknowledgeAllAlerts() {
+async function acknowledgeAllAlerts(btnEl) {
+  const btn = btnEl || document.getElementById('btnDismissAll');
+  const prevText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Acknowledging...';
+  }
   try {
-    await apiJson('/api/alerts/acknowledge-all', {
+    const res = await apiJson('/api/alerts/acknowledge-all', {
       method: 'POST',
       body: JSON.stringify({ technician: 'Network Admin' })
     });
+    if (res && Array.isArray(res.active)) {
+      appState.activeAlerts = res.active;
+      renderAlertsCenter();
+    }
     await loadInitialState();
+    if (btn) {
+      btn.textContent = '✓ All Acknowledged';
+      setTimeout(() => {
+        btn.textContent = prevText || '👁️ Acknowledge All';
+      }, 2000);
+    }
   } catch (err) {
+    if (btn) btn.textContent = prevText || '👁️ Acknowledge All';
     alert(err.message);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -255,14 +274,18 @@ async function promptAlertNote(key) {
   }
 }
 
-async function dismissAlert(key) {
+async function dismissAlert(key, btnEl) {
+  if (btnEl) btnEl.disabled = true;
   try {
     await apiJson(`/api/alerts/${encodeURIComponent(key)}/dismiss`, {
       method: 'POST',
       body: JSON.stringify({})
     });
+    appState.activeAlerts = (appState.activeAlerts || []).filter(a => a.key !== key);
+    renderAlertsCenter();
     await loadInitialState();
   } catch (err) {
+    if (btnEl) btnEl.disabled = false;
     alert(err.message);
   }
 }

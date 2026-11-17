@@ -509,7 +509,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/alerts/acknowledge-all":
                 now = utc_now()
                 tech = str(body.get("technician") or "Network Administrator")[:120]
-                for alert in mon.active_alerts.values():
+                for alert in list(mon.active_alerts.values()):
                     alert["status"] = "ACKNOWLEDGED"
                     alert["acknowledgedBy"] = tech
                     alert["acknowledgedAt"] = now
@@ -883,6 +883,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     ) -> None:
         alert = mon.active_alerts.get(key)
         if alert is None:
+            if action == "dismiss":
+                self._send_json({"success": True, "alreadyDismissed": True})
+                return
             self._send_error_json("Alert not found or already resolved", 404)
             return
         if action == "acknowledge":

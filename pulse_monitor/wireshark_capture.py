@@ -95,9 +95,8 @@ def build_wireshark_display_filter(game_signatures: list[dict] | None = None) ->
 
     clauses: list[str] = []
     if domains:
-        top_domains = domains[:40]
-        dns_expr = " or ".join(f'dns.qry.name contains "{d}"' for d in top_domains)
-        sni_expr = " or ".join(f'tls.handshake.extensions_server_name contains "{d}"' for d in top_domains)
+        dns_expr = " or ".join(f'dns.qry.name contains "{d}"' for d in domains)
+        sni_expr = " or ".join(f'tls.handshake.extensions_server_name contains "{d}"' for d in domains)
         clauses.append(f"({dns_expr})")
         clauses.append(f"({sni_expr})")
     if ports:
@@ -850,10 +849,10 @@ def build_wireshark_bpf_filters(game_ports: set[int] | tuple[int, ...] | list[in
     game_terms = " or ".join(f"port {p}" for p in extra_ports)
     suffix = f" or {game_terms}" if game_terms else ""
     strict = (
-        "port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
+        "(port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
         "or (ip and (tcp port 443 or tcp port 8443) and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16) "
         "or (ip6 and (tcp port 443 or tcp port 8443))"
-        f"{suffix}"
+        f"{suffix}) and not (ip and tcp and (tcp[13] & 0x12 = 0x02))"
     )
     fallback = (
         "port 53 or udp port 37008 or tcp port 80 or tcp port 8080 or tcp port 443 or tcp port 8443"

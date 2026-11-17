@@ -105,6 +105,7 @@ class HostGameSensor:
         self._throttle_seq: dict[str, int] = {}
         self._bound_dns_ips: set[str] = set()
         self._forwarded_dns_domains: dict[str, float] = {}
+        self._last_rst_burst: dict[str, float] = {}
         self._wireshark_engine: WiresharkCaptureEngine | None = None
         self._stop = threading.Event()
 
@@ -513,8 +514,19 @@ class HostGameSensor:
             if target_ip not in ports_by_ip or use_broad:
                 ports_by_ip[target_ip] = broad_ports if use_broad else SCAN_GAME_PORTS
         if ports_by_ip:
-            with ThreadPoolExecutor(max_workers=min(16, len(ports_by_ip))) as pool:
-                list(pool.map(self._rst_client_ports, list(ports_by_ip.items())))
+            now_rst = time.monotonic()
+            for dead_ip in [k for k in self._last_rst_burst if k not in ports_by_ip]:
+                self._last_rst_burst.pop(dead_ip, None)
+            due_items = [
+                (ip_k, plist)
+                for ip_k, plist in ports_by_ip.items()
+                if (now_rst - self._last_rst_burst.get(ip_k, 0.0)) >= 4.0
+            ]
+            if due_items:
+                for ip_k, _ in due_items:
+                    self._last_rst_burst[ip_k] = now_rst
+                with ThreadPoolExecutor(max_workers=min(8, len(due_items))) as pool:
+                    list(pool.map(self._rst_client_ports, due_items))
 
     def _scan_host_netstat_ports(self) -> None:
         if sys.platform != "win32":
@@ -580,7 +592,7 @@ class HostGameSensor:
                 self._scan_host_dns_cache()
                 self._scan_host_netstat_ports()
                 now = time.monotonic()
-                if (now - last_lan_sweep) >= 4.0:
+                if (now - last_lan_sweep) >= 25.0:
                     last_lan_sweep = now
                     self._sweep_lan_game_ports()
             except Exception as exc:
