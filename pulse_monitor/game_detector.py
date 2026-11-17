@@ -1471,7 +1471,7 @@ class GameDetectorMixin:
     def _should_sinkhole_query(
         client_ip: str, qname: str, matched_sig: dict | None, active_blocks: list[dict]
     ) -> dict | None:
-        """Decide whether a DNS query from client_ip must be sinkholed to 0.0.0.0."""
+        """Decide whether a DNS query from client_ip must be sinkholed immediately to 0.0.0.0."""
         gid = matched_sig["id"] if matched_sig else ""
         is_captive = GameDetectorMixin._is_wifi_captive_domain(qname)
         for rule in active_blocks:
@@ -1479,6 +1479,10 @@ class GameDetectorMixin:
             r_gid = str(rule.get("gameId") or "")
             r_scope = str(rule.get("scope") or "")
             if r_ip == client_ip:
+                if r_scope == "device_throttle":
+                    if matched_sig is not None:
+                        return rule
+                    continue
                 if r_gid == "*" or r_scope in {"device_all_games", "device_wifi_cut"}:
                     return rule
                 if matched_sig is not None and r_gid == gid:
@@ -1489,19 +1493,41 @@ class GameDetectorMixin:
                 return rule
         return None
 
+    @staticmethod
+    def _classify_dns_query_action(
+        client_ip: str, qname: str, matched_sig: dict | None, active_blocks: list[dict]
+    ) -> tuple[str, dict | None]:
+        """Classify DNS handling as ('sinkhole', rule), ('throttle', rule), or ('allow', None)."""
+        sink = GameDetectorMixin._should_sinkhole_query(client_ip, qname, matched_sig, active_blocks)
+        if sink is not None:
+            return "sinkhole", sink
+        for rule in active_blocks:
+            if (
+                str(rule.get("ip") or "") == client_ip
+                and str(rule.get("scope") or "") == "device_throttle"
+            ):
+                return "throttle", rule
+        return "allow", None
+
     def _match_active_block_rule(self, client_ip: str, game_id: str) -> dict | None:
         for rule in self.get_game_blocks():
             if rule["ip"] in (client_ip, "*") and (
                 rule["gameId"] in (game_id, "*")
-                or rule.get("scope") in {"device_all_games", "device_wifi_cut"}
+                or rule.get("scope") in {"device_all_games", "device_wifi_cut", "device_throttle"}
             ):
                 return rule
         return None
 
     def _enforce_router_client_block(
-        self, ip: str, mac: str, device_name: str, router_ip: str, block: bool
+        self,
+        ip: str,
+        mac: str,
+        device_name: str,
+        router_ip: str,
+        block: bool,
+        mode: str = "cut",
     ) -> list[str]:
-        """Best-effort TP-Link LuCI MAC access-control block/unblock on company routers with valid stok."""
+        """Best-effort TP-Link LuCI QoS bandwidth throttle (1 KB/s) or MAC access-control block/unblock."""
         clean_mac = str(mac or "").strip().upper().replace("-", ":")
         if ip == "*" or not clean_mac or getattr(self, "_skip_live_probe_in_test", False):
             return []
@@ -1531,24 +1557,65 @@ class GameDetectorMixin:
             scheme = "https" if use_https else "http"
             encoded_stok = urllib.parse.quote(str(cfg.get("stok") or ""), safe="")
             mac_dash = clean_mac.replace(":", "-")
-            endpoints = (
-                (
-                    f"/cgi-bin/luci/;stok={encoded_stok}/admin/access_control?form=black_devices",
-                    urllib.parse.urlencode({
-                        "operation": "insert" if block else "remove",
-                        "key": clean_mac,
-                        "name": str(device_name or ip)[:32],
-                        "mac": mac_dash,
-                    }).encode("utf-8"),
-                ),
-                (
-                    f"/cgi-bin/luci/;stok={encoded_stok}/admin/client?form=client_list",
-                    urllib.parse.urlencode({
-                        "operation": "block" if block else "unblock",
-                        "mac": mac_dash,
-                    }).encode("utf-8"),
-                ),
-            )
+            if mode == "throttle":
+                endpoints = (
+                    (
+                        f"/cgi-bin/luci/;stok={encoded_stok}/admin/qos?form=device_list",
+                        urllib.parse.urlencode({
+                            "operation": "update" if block else "remove",
+                            "key": mac_dash,
+                            "mac": mac_dash,
+                            "ip": ip,
+                            "name": str(device_name or ip)[:32],
+                            "enable": "on" if block else "off",
+                            "up_band": "1" if block else "0",
+                            "down_band": "1" if block else "0",
+                            "up_unit": "KB/s",
+                            "down_unit": "KB/s",
+                        }).encode("utf-8"),
+                    ),
+                    (
+                        f"/cgi-bin/luci/;stok={encoded_stok}/admin/qos?form=device_list",
+                        urllib.parse.urlencode({
+                            "operation": "insert" if block else "remove",
+                            "mac": mac_dash,
+                            "ip": ip,
+                            "name": str(device_name or ip)[:32],
+                            "enable": "on" if block else "off",
+                            "up_band": "1" if block else "0",
+                            "down_band": "1" if block else "0",
+                        }).encode("utf-8"),
+                    ),
+                    (
+                        f"/cgi-bin/luci/;stok={encoded_stok}/admin/client?form=client_list",
+                        urllib.parse.urlencode({
+                            "operation": "speed_limit",
+                            "mac": mac_dash,
+                            "enable": "on" if block else "off",
+                            "up_limit": "1" if block else "0",
+                            "down_limit": "1" if block else "0",
+                        }).encode("utf-8"),
+                    ),
+                )
+            else:
+                endpoints = (
+                    (
+                        f"/cgi-bin/luci/;stok={encoded_stok}/admin/access_control?form=black_devices",
+                        urllib.parse.urlencode({
+                            "operation": "insert" if block else "remove",
+                            "key": clean_mac,
+                            "name": str(device_name or ip)[:32],
+                            "mac": mac_dash,
+                        }).encode("utf-8"),
+                    ),
+                    (
+                        f"/cgi-bin/luci/;stok={encoded_stok}/admin/client?form=client_list",
+                        urllib.parse.urlencode({
+                            "operation": "block" if block else "unblock",
+                            "mac": mac_dash,
+                        }).encode("utf-8"),
+                    ),
+                )
             for ep_path, body in endpoints:
                 req = urllib.request.Request(
                     f"{scheme}://{r_host}:{r_port}{ep_path}",
@@ -1571,14 +1638,14 @@ class GameDetectorMixin:
         return enforced
 
     def block_game_session(self, payload: dict) -> dict:
-        """Block/shut off a user's game (and optionally their Wi-Fi access) via DNS sinkhole, socket RST & router MAC block."""
+        """Throttle/block a user's internet rate to unplayable speed, cut Wi-Fi, or block a game via router QoS/ACL, DNS lag & socket RST."""
         if not isinstance(payload, dict):
             raise ValueError("Invalid block request payload")
         session_id = str(payload.get("sessionId") or "").strip()
-        scope = str(payload.get("scope") or "device_game").strip().lower()
-        if scope not in {"device_game", "device_all_games", "device_wifi_cut", "network_game"}:
-            scope = "device_game"
-        cut_wifi = bool(payload.get("cutWifi", True))
+        scope = str(payload.get("scope") or "device_throttle").strip().lower()
+        if scope not in {"device_throttle", "device_game", "device_all_games", "device_wifi_cut", "network_game"}:
+            scope = "device_throttle"
+        cut_wifi = bool(payload.get("cutWifi", False))
 
         raw_ip = str(payload.get("ip") or payload.get("clientIp") or "").strip()
         raw_game_id = str(payload.get("gameId") or "").strip().lower()
@@ -1607,18 +1674,28 @@ class GameDetectorMixin:
             router_ip = ctx.get("routerIp", "")
             device_name = ctx["deviceName"]
 
-        if scope in {"device_all_games", "device_wifi_cut"} or raw_game_id == "*":
+        if scope in {"device_all_games", "device_wifi_cut", "device_throttle"} or raw_game_id == "*":
             sig = self._match_game_signature(game_id=raw_game_id) if raw_game_id and raw_game_id != "*" else None
             game_id = "*"
-            if scope == "device_wifi_cut":
+            if scope == "device_throttle":
+                cut_wifi = False
+                game_name = (
+                    f"Unplayable Rate (1 KB/s + Lag) — {sig['name']}"
+                    if sig is not None
+                    else "Unplayable Internet Rate (1 KB/s + Lag)"
+                )
+                game_ports: tuple[int, ...] = tuple(dict.fromkeys([*SCAN_GAME_PORTS, 80, 443, 8443, 3074, 3478]))
+            elif scope == "device_wifi_cut":
+                cut_wifi = True
                 game_name = (
                     f"{sig['name']} + User Wi-Fi Cut Off"
                     if sig is not None
                     else "All Games + User Wi-Fi Cut Off"
                 )
+                game_ports = SCAN_GAME_PORTS
             else:
                 game_name = "All Games + User Wi-Fi" if cut_wifi else "All Mobile & Online Games"
-            game_ports: tuple[int, ...] = SCAN_GAME_PORTS
+                game_ports = SCAN_GAME_PORTS
         else:
             sig = self._match_game_signature(game_id=raw_game_id)
             if sig is None:
@@ -1684,11 +1761,11 @@ class GameDetectorMixin:
             ]
             self.save_config()
 
-        # Best-effort TCP RST burst across game + scan ports to drop active local sockets
+        # Best-effort TCP RST burst across game + client ports to drop active sockets
         if ip != "*" and not getattr(self, "_skip_live_probe_in_test", False):
             linger = struct.pack("ii", 1, 0)
             burst_ports = list(dict.fromkeys([*game_ports, *SCAN_GAME_PORTS]))
-            for p in burst_ports[:10]:
+            for p in burst_ports[:14]:
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rsock:
                         rsock.settimeout(0.06)
@@ -1697,23 +1774,89 @@ class GameDetectorMixin:
                 except OSError:
                     pass
 
-        router_applied = (
-            self._enforce_router_client_block(ip, mac, device_name, router_ip, block=True)
-            if (cut_wifi or scope in {"device_all_games", "device_wifi_cut"})
-            else []
+        router_applied: list[str] = []
+        if scope == "device_throttle":
+            router_applied = self._enforce_router_client_block(
+                ip, mac, device_name, router_ip, block=True, mode="throttle"
+            )
+        elif cut_wifi or scope in {"device_all_games", "device_wifi_cut"}:
+            router_applied = self._enforce_router_client_block(
+                ip, mac, device_name, router_ip, block=True, mode="cut"
+            )
+
+        sensor_status = self._get_gaming_sensor_status()
+        is_host_ip = ip in (str(sensor_status.get("dnsHost") or ""), "127.0.0.1")
+        dns_ready = bool(sensor_status.get("dnsInterceptReady"))
+        client_in_dns = ip in set(sensor_status.get("dnsActiveClients") or [])
+        local_dhcp_has_host = str(sensor_status.get("dnsHost") or "") in (
+            sensor_status.get("localDhcpDnsServers") or []
         )
-        router_note = (
-            f" Router MAC kick applied on {', '.join(router_applied)}."
-            if router_applied
-            else " Enforced via per-device DNS 0.0.0.0 sinkhole & active socket reset."
+        dns_active_for_target = bool(client_in_dns or local_dhcp_has_host or dns_ready)
+        enforced_layers: list[str] = []
+        if router_applied:
+            enforced_layers.append(
+                f"Router QoS 1 KB/s ({', '.join(router_applied)})"
+                if scope == "device_throttle"
+                else f"Router MAC Kick ({', '.join(router_applied)})"
+            )
+        if client_in_dns or local_dhcp_has_host:
+            enforced_layers.append(
+                "DNS Bandwidth Lag + Game Sinkhole"
+                if scope == "device_throttle"
+                else "DNS 0.0.0.0 Sinkhole"
+            )
+        if is_host_ip:
+            enforced_layers.append("Host Socket Reset & Process Stop")
+        elif ip != "*":
+            enforced_layers.append("LAN Socket RST Disruption")
+
+        requires_setup = bool(
+            ip != "*"
+            and not is_host_ip
+            and not router_applied
+            and not client_in_dns
+            and not local_dhcp_has_host
         )
+        setup_hint = ""
+        if requires_setup:
+            r_ip = sensor_status.get("routerIp") or "192.168.0.1"
+            h_ip = sensor_status.get("dnsHost") or self.HOST_DNS_IP
+            setup_hint = (
+                f"Block rule saved for {ip}, but router QoS admin login is not connected and {ip} is currently "
+                f"using external DHCP DNS ({', '.join(sensor_status.get('localDhcpDnsServers') or ['1.1.1.1'])}). "
+                f"Sign into Router Settings ({r_ip}) or set router DHCP DNS to {h_ip} to drop {ip}'s connection to unplayable speed."
+            )
+
+        enforcement_details = {
+            "scope": scope,
+            "routerEnforced": router_applied,
+            "routerAuthenticated": bool(sensor_status.get("routerAuthenticated")),
+            "dnsInterceptReady": dns_active_for_target,
+            "clientObservedOnDns": client_in_dns,
+            "isLocalHost": is_host_ip,
+            "layers": enforced_layers,
+            "requiresSetup": requires_setup,
+            "setupHint": setup_hint,
+        }
+
+        if router_applied:
+            router_note = (
+                f" Router QoS 1 KB/s limit applied on {', '.join(router_applied)}."
+                if scope == "device_throttle"
+                else f" Router MAC kick applied on {', '.join(router_applied)}."
+            )
+        elif scope == "device_throttle":
+            router_note = " Enforced via unplayable 2.4s DNS lag/drop + game sinkhole & active socket RST."
+        else:
+            router_note = " Enforced via per-device DNS 0.0.0.0 sinkhole & active socket reset."
+
         auto_prevented = bool(payload.get("autoPrevented"))
-        action_prefix = "🛡️ Auto-Prevented" if auto_prevented else "🛑 Blocked"
+        action_prefix = "🛡️ Auto-Prevented" if auto_prevented else ("🐌 Throttled" if scope == "device_throttle" else "🛑 Blocked")
         self._record_event(
             "GAME_AUTO_PREVENTED" if auto_prevented else "GAME_BLOCKED",
             "WARNING",
             f"{action_prefix}: {game_name}",
-            f"Shut off {game_name} on {device_name} ({ip}).{router_note}",
+            f"Applied control on {device_name} ({ip}): {game_name}.{router_note}",
             mac=mac,
             ip="" if ip == "*" else ip,
             device_name=device_name,
@@ -1740,8 +1883,10 @@ class GameDetectorMixin:
         return {
             "success": True,
             "ruleId": rule_id,
+            "scope": scope,
             "autoPrevented": auto_prevented,
             "routerEnforced": router_applied,
+            "enforcementDetails": enforcement_details,
             "gameActivity": activity,
         }
 
@@ -1771,8 +1916,9 @@ class GameDetectorMixin:
                     (rule["ip"], rule["game_id"]),
                 )
 
+        unblock_mode = "throttle" if str(rule.get("scope") or "") == "device_throttle" else "cut"
         self._enforce_router_client_block(
-            rule["ip"], rule.get("mac") or "", rule["device_name"], "", block=False
+            rule["ip"], rule.get("mac") or "", rule["device_name"], "", block=False, mode=unblock_mode
         )
         self._record_event(
             "GAME_UNBLOCKED",
@@ -2122,6 +2268,7 @@ class GameDetectorMixin:
             for sig_payload in self._collect_local_os_game_signals():
                 confirmed_hits += 1
                 try:
+                    sig_payload["skipAutoPrevent"] = True
                     res = self.record_game_detection(sig_payload)
                     if res.get("detection"):
                         detections.append(res["detection"])
@@ -2195,6 +2342,7 @@ class GameDetectorMixin:
                 res = self.record_game_detection({
                     "ip": ip_key,
                     "port": open_port,
+                    "skipAutoPrevent": True,
                     "detectionMethod": "Whole-Topology Port Scan" if include_topology_refresh else "Active Game Port Scan",
                 })
                 if res.get("detection"):

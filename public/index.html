@@ -1990,22 +1990,15 @@
         </button>
       </div>
 
-      <!-- Real-Time Prevention Mode Strip (Zero Dropdowns) -->
+      <!-- Manual Control Policy Strip (Never Auto-Blocks Users) -->
       <div class="game-policy-bar" id="gamePolicyBar">
         <div class="game-policy-label">
-          <strong>🛡️ Real-Time Detection &amp; Prevention Mode</strong>
-          <span id="gamePolicyHint" class="dev-row-sub">Select whether detected games alert you or get blocked immediately at DNS/socket arrival.</span>
+          <strong>🛡️ Manual Control Mode — Never Auto-Blocks Users</strong>
+          <span id="gamePolicyHint" class="dev-row-sub">Detections &amp; topology scans only report open games. Nothing is blocked automatically — click Block to drop a user's internet speed to an unplayable rate.</span>
         </div>
         <div class="filter-tab-pills" id="gamePolicyModePills">
-          <button type="button" class="filter-tab active" data-policy-mode="alert_only" onclick="setGamingPolicyMode('alert_only')">
-            🔔 Detect &amp; Alert Only
-          </button>
-          <button type="button" class="filter-tab" data-policy-mode="auto_block_game" onclick="setGamingPolicyMode('auto_block_game')">
-            🛡️ Auto-Block Games (Real-Time)
-          </button>
-          <button type="button" class="filter-tab" data-policy-mode="auto_wifi_cut" onclick="setGamingPolicyMode('auto_wifi_cut')">
-            🛑 Auto-Block Game + Cut User Wi-Fi
-          </button>
+          <span class="status-pill online" id="gameManualModeBadge">🔔 DETECT &amp; ALERT ONLY (MANUAL BLOCK)</span>
+          <button type="button" class="btn btn-secondary btn-xs" id="btnForceManualMode" style="display:none;" onclick="setGamingPolicyMode('alert_only')">↩ Disable Auto-Block</button>
         </div>
       </div>
 
@@ -2347,7 +2340,7 @@
   <script src="js/charts-timeline.js?v=20261117a"></script>
   <script src="js/nmap-scanner.js?v=20261117a"></script>
   <script src="js/topology.js?v=20261117a"></script>
-  <script src="js/game-detector.js?v=20261117a"></script>
+  <script src="js/game-detector.js?v=20261117b"></script>
   <script src="js/modals-tools.js?v=20261117a"></script>
   <script src="js/app.js?v=20261117a"></script>
 </body>

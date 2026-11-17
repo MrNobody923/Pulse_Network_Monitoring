@@ -117,7 +117,7 @@ function renderActiveGamesLivePanel(activeLogs) {
     <div class="active-games-live-box">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
         <strong style="font-size:0.88rem; color:var(--accent-amber);">🎮 Games Currently Open &amp; Playing (${activeLogs.length})</strong>
-        <span style="font-size:0.74rem; color:var(--text-muted);">Choose an action below to lag &amp; shut off the game and Wi-Fi strictly for that user.</span>
+        <span style="font-size:0.74rem; color:var(--text-muted);">Manual control only — click Block to drop that user's internet connection to an unplayable rate.</span>
       </div>
       <div class="active-games-live-list">
         ${activeLogs
@@ -142,8 +142,8 @@ function renderActiveGamesLivePanel(activeLogs) {
               </div>
             </div>
             <div class="active-game-actions">
-              <button type="button" class="btn btn-primary btn-sm game-btn-danger" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_wifi_cut', true)">🛑 Block Game &amp; Cut User Wi-Fi</button>
-              <button type="button" class="btn btn-secondary btn-sm game-btn-warn" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_game', false)">🚫 Block Game Only</button>
+              <button type="button" class="btn btn-primary btn-sm game-btn-danger" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_throttle', false)">🐌 Block (Drop Internet to Unplayable)</button>
+              <button type="button" class="btn btn-secondary btn-sm game-btn-warn" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_wifi_cut', true)">🛑 Cut Wi-Fi</button>
               <button type="button" class="btn btn-secondary btn-sm" onclick="dismissGameSession('${esc(item.id)}')">✓ Dismiss</button>
             </div>
           </div>
@@ -201,8 +201,8 @@ function renderGamingSection() {
   setTxt(
     'gameTerminalPromptText',
     activeCount > 0
-      ? `🎮 ${activeCount} game(s) open now — use Block buttons to shut off the game & user Wi-Fi.`
-      : `Watching ${onlineCount} company devices in real time — entries appear the instant a game opens.`
+      ? `🎮 ${activeCount} game(s) open now — click Block to drop that user's internet to an unplayable rate.`
+      : `Watching ${onlineCount} company devices in real time — never auto-blocks; click Block on any detected game.`
   );
 
   const sideBadge = document.getElementById('sideBadgeGaming');
@@ -323,11 +323,11 @@ function renderGamingSection() {
             item.id
           )}', '${esc(item.ip)}', '${esc(
             item.gameId
-          )}', 'device_wifi_cut', true)" title="Lag & shut off all games + Wi-Fi access for this device IP/MAC only">🛑 Block Game &amp; Cut Wi-Fi</button><button type="button" class="game-term-btn blockall" onclick="shutOffGameSession('${esc(
+          )}', 'device_throttle', false)" title="Drop this user's internet speed to an unplayable rate (Router QoS 1 KB/s + DNS lag + socket reset)">🐌 Block (Unplayable Lag)</button><button type="button" class="game-term-btn blockall" onclick="shutOffGameSession('${esc(
             item.id
           )}', '${esc(item.ip)}', '${esc(
             item.gameId
-          )}', 'device_game', false)" title="Block only this game for this device">🚫 Block Game Only</button>${
+          )}', 'device_wifi_cut', true)" title="Cut Wi-Fi connectivity completely for this device">🛑 Cut Wi-Fi</button>${
             item.isActive
               ? `<button type="button" class="game-term-btn clear" onclick="dismissGameSession('${esc(
                   item.id
@@ -368,8 +368,8 @@ function renderGameBlocksPanel(blocks) {
   panel.innerHTML = `
     <div class="game-blocks-box">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
-        <strong style="font-size:0.84rem; color:var(--accent-red);">🛑 Active Per-User Game &amp; Wi-Fi Cut-Offs (${blocks.length})</strong>
-        <span style="font-size:0.73rem; color:var(--text-muted);">Cuts DNS/Wi-Fi connectivity (<code>0.0.0.0</code>, TTL 1s) + drops open game sockets strictly for the targeted company device until unblocked.</span>
+        <strong style="font-size:0.84rem; color:var(--accent-red);">🐌 Active User Internet Throttles &amp; Blocks (${blocks.length})</strong>
+        <span style="font-size:0.73rem; color:var(--text-muted);">Degrades the user's connection to an unplayable rate (Router QoS 1 KB/s + 2.4s DNS lag &amp; drops + active socket RST) until unblocked.</span>
       </div>
       <div class="game-blocks-list">
         ${blocks
@@ -382,10 +382,17 @@ function renderGameBlocksPanel(blocks) {
             </div>
             <div style="display:flex; gap:6px; flex-wrap:wrap;">
               ${
+                b.ip && b.ip !== '*' && b.scope !== 'device_throttle' && b.scope !== 'device_wifi_cut'
+                  ? `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-amber); color:var(--accent-amber);" onclick="shutOffGameSession('', '${esc(
+                      b.ip
+                    )}', '${esc(b.gameId || '*')}', 'device_throttle', false)">🐌 Drop to Unplayable</button>`
+                  : ''
+              }
+              ${
                 b.ip && b.ip !== '*' && b.scope !== 'device_wifi_cut'
                   ? `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red);" onclick="shutOffGameSession('', '${esc(
                       b.ip
-                    )}', '${esc(b.gameId || '*')}', 'device_wifi_cut', true)">🛑 Cut User Wi-Fi</button>`
+                    )}', '${esc(b.gameId || '*')}', 'device_wifi_cut', true)">🛑 Cut Wi-Fi</button>`
                   : ''
               }
               <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-green); color:var(--accent-green);" onclick="unblockGameRule('${esc(
@@ -474,21 +481,23 @@ function renderGameSensorBanner(data, onlineCount) {
 
 function renderGamingPolicyControls(policy) {
   const mode = (policy && policy.preventionMode) || 'alert_only';
-  document.querySelectorAll('#gamePolicyModePills [data-policy-mode]').forEach(btn => {
-    btn.classList.toggle('active', btn.getAttribute('data-policy-mode') === mode);
-  });
+  const badge = document.getElementById('gameManualModeBadge');
+  const resetBtn = document.getElementById('btnForceManualMode');
   const hint = document.getElementById('gamePolicyHint');
-  if (!hint) return;
-  if (mode === 'auto_wifi_cut') {
-    hint.innerHTML =
-      '<strong style="color:var(--accent-red);">ZERO-TOLERANCE ACTIVE:</strong> Opening any mobile/PC game immediately sinkholes DNS, drops sockets &amp; cuts Wi-Fi for that device.';
-  } else if (mode === 'auto_block_game') {
-    hint.innerHTML =
-      '<strong style="color:var(--accent-amber);">REAL-TIME PREVENTION ACTIVE:</strong> Game servers are automatically blocked on packet arrival while normal work internet keeps working.';
-  } else {
-    hint.textContent =
-      'Real-time alerts appear when a game opens; click Block buttons to shut off the game or user Wi-Fi.';
+  const isManual = mode === 'alert_only';
+  if (badge) {
+    badge.className = `status-pill ${isManual ? 'online' : 'warning'}`;
+    badge.textContent = isManual
+      ? '🔔 DETECT & ALERT ONLY (MANUAL BLOCK)'
+      : '⚠️ AUTO-BLOCK ACTIVE';
   }
+  if (resetBtn) {
+    resetBtn.style.display = isManual ? 'none' : 'inline-flex';
+  }
+  if (!hint) return;
+  hint.innerHTML = isManual
+    ? 'Detections &amp; topology scans only list open games — <strong>never auto-blocks users</strong>. Click <strong>Block</strong> to drop a user\'s internet to an unplayable rate.'
+    : '<strong style="color:var(--accent-amber);">Auto-block was enabled via config/API.</strong> Click <strong>Disable Auto-Block</strong> to return to manual-only control.';
 }
 
 function showGameDetectedToast(detection) {
@@ -518,7 +527,7 @@ function showGameDetectedToast(detection) {
         ${
           isAuto
             ? ''
-            : `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red); font-weight:700;" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">🛑 Shut Off Game &amp; Wi-Fi</button>`
+            : `<button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red); font-weight:700;" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">🐌 Block (Drop Internet to Unplayable)</button>`
         }
         <button type="button" class="btn btn-primary btn-xs" onclick="jumpToGamingWorkspace('${esc(toastId)}')">View Game Log</button>
         <button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameToast('${esc(toastId)}')">Dismiss</button>
@@ -643,9 +652,10 @@ async function shutOffGameSession(
   sessionId,
   ip,
   gameId,
-  scope = 'device_wifi_cut',
-  cutWifi = true
+  scope = 'device_throttle',
+  cutWifi = false
 ) {
+  const banner = document.getElementById('gameScanResultBanner');
   try {
     const res = await apiJson('/api/gaming/block', {
       method: 'POST',
@@ -653,11 +663,29 @@ async function shutOffGameSession(
         sessionId: sessionId || '',
         ip: ip || '',
         gameId: gameId || '',
-        scope: scope || 'device_wifi_cut',
+        scope: scope || 'device_throttle',
         cutWifi: Boolean(cutWifi)
       })
     });
     if (res.gameActivity) appState.gameActivity = res.gameActivity;
+    const det = res.enforcementDetails || null;
+    if (banner && det) {
+      const hasSetupGap = Boolean(det.requiresSetup && det.setupHint);
+      const layerText = Array.isArray(det.layers) && det.layers.length
+        ? det.layers.join(' + ')
+        : 'Rule Saved';
+      banner.style.display = 'block';
+      banner.innerHTML = `
+        <div class="game-auto-status-bar">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
+            <span class="status-pill ${hasSetupGap ? 'warning' : 'online'}">${hasSetupGap ? '⚠️ ROUTER QOS / DNS SETUP NEEDED' : (scope === 'device_throttle' ? '🐌 THROTTLED TO UNPLAYABLE RATE' : '🛑 USER BLOCK APPLIED')}</span>
+            <span style="font-size:0.78rem; color:var(--text-muted);">${hasSetupGap ? esc(det.setupHint) : `Active layers for ${esc(ip || 'device')}: <strong>${esc(layerText)}</strong>.`}</span>
+          </div>
+          ${hasSetupGap && typeof openModal === 'function' ? `<button type="button" class="btn btn-primary btn-xs" onclick="openModal('routerConfigModal')">🔐 Open Router Settings</button>` : ''}
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">✕ Close</button>
+        </div>
+      `;
+    }
     renderGamingSection();
     await loadInitialState();
   } catch (err) {
@@ -667,7 +695,7 @@ async function shutOffGameSession(
 
 async function shutOffGameFromToast(toastId, sessionId, ip, gameId) {
   dismissGameToast(toastId);
-  await shutOffGameSession(sessionId, ip, gameId, 'device_wifi_cut', true);
+  await shutOffGameSession(sessionId, ip, gameId, 'device_throttle', false);
 }
 
 async function unblockGameRule(ruleId) {

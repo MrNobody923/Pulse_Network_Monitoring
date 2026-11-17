@@ -106,6 +106,7 @@ class HostGameSensor:
         self._last_dns_client_ip: str = ""
         self._last_dns_domain: str = ""
         self._last_dns_at: str | None = None
+        self._throttle_seq: dict[str, int] = {}
         self._stop = threading.Event()
 
     def _is_blocked(self, client_ip: str, game_id: str) -> dict | None:
@@ -114,7 +115,7 @@ class HostGameSensor:
         for rule in blocks:
             if rule.get("ip") in (client_ip, "*") and (
                 rule.get("gameId") in (game_id, "*")
-                or rule.get("scope") in {"device_all_games", "device_wifi_cut"}
+                or rule.get("scope") in {"device_all_games", "device_wifi_cut", "device_throttle"}
             ):
                 return rule
         return None
@@ -349,9 +350,10 @@ class HostGameSensor:
                     "detectionMethod": "Auto LAN Game Port Sensor",
                 })
 
-    def _rst_client_ports(self, target_ip: str) -> None:
+    def _rst_client_ports(self, item: tuple[str, tuple[int, ...]]) -> None:
+        target_ip, ports = item
         linger = struct.pack("ii", 1, 0)
-        for port in SCAN_GAME_PORTS:
+        for port in ports:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rsock:
                     rsock.settimeout(0.04)
@@ -422,15 +424,20 @@ class HostGameSensor:
             except Exception:
                 pass
 
-        # Concurrent TCP RST burst on blocked client IPs to drop open game sockets immediately
-        seen_client_ips: list[str] = []
+        # Concurrent TCP RST burst on blocked/throttled client IPs to degrade or drop active sockets
+        broad_ports = tuple(dict.fromkeys([*SCAN_GAME_PORTS, 80, 443, 8080, 8443, 3074, 3478, 5222, 5228, 9000]))
+        ports_by_ip: dict[str, tuple[int, ...]] = {}
         for rule in blocks:
             target_ip = str(rule.get("ip") or "").strip()
-            if target_ip and target_ip not in ("*", self.dns_host) and target_ip not in seen_client_ips:
-                seen_client_ips.append(target_ip)
-        if seen_client_ips:
-            with ThreadPoolExecutor(max_workers=min(16, len(seen_client_ips))) as pool:
-                list(pool.map(self._rst_client_ports, seen_client_ips))
+            if not target_ip or target_ip in ("*", self.dns_host):
+                continue
+            r_scope = str(rule.get("scope") or "").lower()
+            use_broad = r_scope in {"device_throttle", "device_wifi_cut", "device_all_games"}
+            if target_ip not in ports_by_ip or use_broad:
+                ports_by_ip[target_ip] = broad_ports if use_broad else SCAN_GAME_PORTS
+        if ports_by_ip:
+            with ThreadPoolExecutor(max_workers=min(16, len(ports_by_ip))) as pool:
+                list(pool.map(self._rst_client_ports, list(ports_by_ip.items())))
 
     def _scan_host_netstat_ports(self) -> None:
         if sys.platform != "win32":
@@ -526,14 +533,16 @@ class HostGameSensor:
                 return GameDetectorMixin._build_dns_nxdomain_reply(raw)
 
             sig = GameDetectorMixin._match_game_signature(domain=qname)
-            sink_rule = GameDetectorMixin._should_sinkhole_query(client_ip, qname, sig, blocks)
+            dns_action, action_rule = GameDetectorMixin._classify_dns_query_action(
+                client_ip, qname, sig, blocks
+            )
             auto_prevent = sig is not None and prev_mode in {"auto_block_game", "auto_wifi_cut"}
 
-            if sink_rule is not None or auto_prevent:
+            if dns_action == "sinkhole" or auto_prevent:
                 with self._lock:
                     self._dns_blocked_total += 1
                 sink = GameDetectorMixin._build_dns_sinkhole_reply(raw)
-                if sink_rule is None and sig is not None:
+                if action_rule is None and sig is not None:
                     print(
                         f"[host-sensor] REALTIME AUTO-PREVENT {client_ip} -> {qname} [{sig['name']}]",
                         flush=True,
@@ -555,6 +564,21 @@ class HostGameSensor:
                         flush=True,
                     )
                 return sink
+
+            if dns_action == "throttle":
+                with self._lock:
+                    seq = self._throttle_seq.get(client_ip, 0) + 1
+                    self._throttle_seq[client_ip] = seq
+                    self._dns_blocked_total += 1
+                if self._should_report(client_ip, "thr-dns", cooldown=15.0):
+                    print(
+                        f"[host-sensor] THROTTLED DNS {client_ip} -> {qname} (2.4s lag + intermittent drop)",
+                        flush=True,
+                    )
+                # Inject heavy latency (~2.4s) and drop 2/3 of resolutions to stall throughput to an unplayable rate
+                self._stop.wait(2.4)
+                if (seq % 3) != 0:
+                    return GameDetectorMixin._build_dns_sinkhole_reply(raw)
 
             if sig and self._should_report(client_ip, sig["id"], cooldown=4.0):
                 print(

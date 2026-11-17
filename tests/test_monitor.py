@@ -873,6 +873,49 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(scan_res["detectedCount"], 1)
         self.assertEqual(scan_res["detections"][0]["ip"], "192.168.2.99")
         self.assertEqual(scan_res["detections"][0]["gameId"], "minecraft")
+        # Scanning devices must never auto-block users
+        self.assertEqual(self.monitor.get_game_blocks(), [])
+
+        # 6. Explicit manual block with device_throttle drops user connection to unplayable rate
+        thr_res = self.monitor.block_game_session({
+            "ip": "192.168.2.99",
+            "gameId": "minecraft",
+            "scope": "device_throttle",
+            "cutWifi": False,
+        })
+        self.assertTrue(thr_res["success"])
+        self.assertEqual(thr_res["scope"], "device_throttle")
+        self.assertIn("enforcementDetails", thr_res)
+        self.assertTrue(thr_res["enforcementDetails"]["requiresSetup"])
+        thr_blocks = self.monitor.get_game_blocks()
+        self.assertEqual(len(thr_blocks), 1)
+        self.assertEqual(thr_blocks[0]["scope"], "device_throttle")
+        mc_sig = self.monitor._match_game_signature(game_id="minecraft")
+        act_game, _ = self.monitor._classify_dns_query_action("192.168.2.99", "minecraft.net", mc_sig, thr_blocks)
+        act_web, _ = self.monitor._classify_dns_query_action("192.168.2.99", "youtube.com", None, thr_blocks)
+        act_other, _ = self.monitor._classify_dns_query_action("192.168.2.50", "youtube.com", None, thr_blocks)
+        self.assertEqual(act_game, "sinkhole")
+        self.assertEqual(act_web, "throttle")
+        self.assertEqual(act_other, "allow")
+        self.monitor.unblock_game_rule(thr_res["ruleId"])
+        self.assertEqual(self.monitor.get_game_blocks(), [])
+
+
+        def fake_game_probe(ip: str, port: int, timeout: float = 0.06):
+            if ip == "192.168.2.99" and port == 19132:
+                return True, True, 2.0
+            return False, False, None
+
+        with patch.object(self.monitor, "_probe_tcp_socket", side_effect=fake_game_probe):
+            scan_res = self.monitor.scan_lan_for_games(include_topology_refresh=True)
+
+        self.assertTrue(scan_res["success"])
+        self.assertGreaterEqual(scan_res["scannedDevices"], 132)
+        self.assertGreaterEqual(scan_res["topologyNodesScanned"], 2)
+        self.assertEqual(scan_res["detectedCount"], 1)
+        self.assertEqual(scan_res["detections"][0]["ip"], "192.168.2.99")
+        self.assertEqual(scan_res["detections"][0]["gameId"], "minecraft")
+
 
 
 if __name__ == "__main__":
