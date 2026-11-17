@@ -124,7 +124,8 @@ Designed for company offices and internal networks, Pulse translates complex raw
 │   ├── port_scanner.py        # Nmap XML parser & socket scanner
 │   ├── probes.py              # Multi-target ping engine & router telemetry
 │   ├── storage.py             # SQLite database layer (WAL mode)
-│   └── topology.py            # Topology node/link persistence & PDU simulator
+│   ├── topology.py            # Topology node/link persistence & PDU simulator
+│   └── wireshark_capture.py   # Wireshark/TShark & Npcap DPI + PCAP/PCAPNG analyzer
 ├── public/                    # Frontend Single-Page Application (SPA)
 │   ├── index.html             # Main dashboard layout
 │   ├── css/                   # Modular stylesheet architecture
@@ -137,17 +138,16 @@ Designed for company offices and internal networks, Pulse translates complex raw
 │   └── js/                    # Modular JavaScript application
 │       ├── app.js             # Application bootstrapper & SSE event handlers
 │       ├── state.js           # Central reactive state store & API fetch client
-│       ├── audio.js           # Audio alert notifications
 │       ├── overview-lan.js    # LAN device inventory & discovery views
 │       ├── alerts-router.js   # Alerts panel & multi-router fleet metrics
 │       ├── charts-timeline.js # Timeseries latency graphs & Uptime Kuma cards
 │       ├── isp-speedtest.js   # Live animated speedometer & ISP diagnostics
 │       ├── nmap-scanner.js    # Security port scanner controls & risk grades
 │       ├── topology.js        # Topology graph interactions, drag-and-drop & cabling
-│       ├── game-detector.js   # Gaming terminal console & block enforcement controls
+│       ├── game-detector.js   # Gaming terminal console, Wireshark DPI & block controls
 │       └── modals-tools.js    # Diagnostics wizard, traceroute & dialog helpers
 ├── tests/                     # Unit & integration regression test suite
-│   └── test_monitor.py        # 25 comprehensive automated test cases
+│   └── test_monitor.py        # Comprehensive automated test suite
 └── data/                      # Persistent storage directory
     └── network.db             # SQLite database file (auto-created)
 ```

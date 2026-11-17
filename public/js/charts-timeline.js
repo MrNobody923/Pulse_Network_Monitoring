@@ -99,11 +99,6 @@ function formatKumaDateTime(isoOrStr) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function fmtMegabytesPerSec(mbps) {
-  const n = Math.max(0, Number(mbps) || 0) / 8;
-  return `${n.toFixed(2)} MB/s`;
-}
-
 function updateKumaLiveSpeed(live) {
   const el = document.getElementById('kumaStatLiveSpeed');
   if (!el) return;
@@ -1371,18 +1366,6 @@ async function clearEventLogs() {
     appState.networkEvents = [];
     liveTerminalTicks = [];
     renderTimeline();
-  } catch (err) {
-    alert(err.message);
-  }
-}
-
-async function clearAlertHistory() {
-  try {
-    await apiJson('/api/alerts/clear', {
-      method: 'POST',
-      body: JSON.stringify({})
-    });
-    await loadInitialState();
   } catch (err) {
     alert(err.message);
   }

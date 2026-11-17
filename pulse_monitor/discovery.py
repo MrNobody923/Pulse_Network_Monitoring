@@ -382,9 +382,6 @@ class DiscoveryMixin:
         with ThreadPoolExecutor(max_workers=64) as pool:
             return [h for h in pool.map(ping, hosts) if h is not None]
 
-    def _ping_sweep(self, networks: list[ipaddress.IPv4Network]) -> int:
-        return len(self._ping_sweep_hosts(networks))
-
     def _read_arp_entries(self, os_mod: object, subproc_mod: object) -> list[tuple[str, str, str]]:
         """Read IP -> MAC neighbor entries across Windows (`arp -a`) and Linux (`ip neigh` / `/proc/net/arp`)."""
         lines: list[str] = []

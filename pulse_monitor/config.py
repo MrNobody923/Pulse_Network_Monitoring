@@ -46,7 +46,6 @@ DEFAULT_CONFIG = {
         "staleSessionSeconds": 75,
     },
     "devicePollIntervalSec": 15,
-    "soundAlertsEnabled": False,
     "devices": [
         {
             "id": "dev-gateway",

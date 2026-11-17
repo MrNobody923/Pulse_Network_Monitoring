@@ -575,13 +575,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True})
             elif path == "/api/network/events/clear":
                 self._send_json(mon.clear_events())
-            elif path == "/api/settings/sound":
-                mon.config["soundAlertsEnabled"] = bool(body.get("enabled"))
-                mon.save_config()
-                self._send_json({
-                    "success": True,
-                    "soundAlertsEnabled": mon.config["soundAlertsEnabled"],
-                })
             elif path == "/api/alerts/test-drill":
                 self._test_drill(mon, body)
             elif path == "/api/topology/node":

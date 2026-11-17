@@ -576,8 +576,7 @@ code, pre, .mono {
   border-radius: 5px;
 }
 
-.theme-toggle-btn,
-.btn-icon-toggle {
+.theme-toggle-btn {
   width: 34px;
   height: 34px;
   border-radius: var(--radius-sm);
@@ -588,11 +587,6 @@ code, pre, .mono {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-}
-
-.btn-icon-toggle.active {
-  border-color: var(--accent-cyan);
-  background: rgba(0, 188, 235, 0.14);
 }
 
 /* Main Wrapper & Architectural NOC Panels */

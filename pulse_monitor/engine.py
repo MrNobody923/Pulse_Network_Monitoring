@@ -202,7 +202,6 @@ class Monitor(
             "gameActivity": self.get_game_activity(60),
             "lastDiscoveryAt": self.last_discovery_at(),
             "config": {
-                "soundAlertsEnabled": self.config.get("soundAlertsEnabled", True),
                 "routerConfig": {
                     "ip": self.config["router"].get("ip", "192.168.0.1"),
                     "hasToken": bool(self.config["router"].get("stok")),

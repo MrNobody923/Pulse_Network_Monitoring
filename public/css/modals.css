@@ -102,14 +102,6 @@
 }
 
 /* Incidents Timeline */
-.incidents-container {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 340px;
-  overflow-y: auto;
-}
-
 .incident-row {
   display: flex;
   align-items: center;

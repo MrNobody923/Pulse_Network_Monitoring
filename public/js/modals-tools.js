@@ -368,18 +368,6 @@ async function runNetworkDiscovery() {
   }
 }
 
-function scrollToAlerts() {
-  if (typeof navigateSidebar === 'function') {
-    navigateSidebar('alerts');
-    return;
-  }
-  const el = document.getElementById('notificationsCard');
-  if (el) {
-    el.style.display = '';
-    el.scrollIntoView({ behavior: 'smooth' });
-  }
-}
-
 function scrollToLanAssets() {
   if (typeof navigateSidebar === 'function') {
     navigateSidebar('devices');
