@@ -200,7 +200,7 @@ function handleSpeedTestProgress(data) {
     setActiveSpeedCard(null);
     if (typeof updateKumaLiveSpeed === 'function') {
       updateKumaLiveSpeed(
-        (window.appState && window.appState.isp && window.appState.isp.liveThroughput) || null
+        (typeof appState !== 'undefined' && appState && appState.isp && appState.isp.liveThroughput) || null
       );
     }
   }

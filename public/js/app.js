@@ -218,102 +218,6 @@ function initEventStream() {
       renderAll();
     } catch (_) {}
   });
-  window.promoteLanDeviceAsInfra = async function (ip, mac, encodedName) {
-    const rawName = encodedName ? decodeURIComponent(encodedName) : ip;
-    const cleanName =
-      rawName && !/^unknown|^generic/i.test(rawName)
-        ? rawName
-        : `Deployed AP · ${ip}`;
-    const defaultRole = /deco|router|gateway|mikrotik|edgerouter/i.test(cleanName)
-      ? 'router'
-      : 'ap';
-    if (
-      !window.confirm(
-        `Track "${cleanName}" (${ip}) as a Monitored ${
-          defaultRole === 'router' ? 'Router / Mesh Node' : 'Access Point'
-        }?\n\nThis pins it for continuous real-time uptime & latency checks.`
-      )
-    ) {
-      return;
-    }
-    try {
-      const res = await fetch('/api/devices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: cleanName,
-          ip,
-          mac: mac || '',
-          type: defaultRole,
-          manual: true,
-          critical: true,
-          location: 'LAN · Promoted Infrastructure',
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        window.alert(data.error || `Failed to track ${ip} (${res.status})`);
-        return;
-      }
-      if (data && data.id) {
-        await fetch(`/api/devices/${encodeURIComponent(data.id)}/probe`, {
-          method: 'POST',
-        }).catch(() => {});
-      }
-      if (typeof loadInitialState === 'function') {
-        await loadInitialState();
-      } else {
-        renderAll();
-      }
-    } catch (err) {
-      window.alert(err.message || `Failed to track ${ip}`);
-    }
-  };
-
-  window.deleteMonitoredDevice = async function (deviceId, encodedName, ip) {
-    const label =
-      (encodedName ? decodeURIComponent(encodedName) : '') || ip || deviceId;
-    if (
-      !window.confirm(
-        `Remove "${label}"${ip ? ` (${ip})` : ''} from Monitored Infrastructure?\n\nUse this for pulled-out or decommissioned APs/routers. Active alerts for this device will be cleared.`
-      )
-    ) {
-      return;
-    }
-    try {
-      const res = await fetch(
-        `/api/devices/${encodeURIComponent(deviceId)}`,
-        { method: 'DELETE' }
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        window.alert(data.error || `Failed to remove ${label} (${res.status})`);
-        return;
-      }
-      if (typeof loadInitialState === 'function') {
-        await loadInitialState();
-      } else {
-        renderAll();
-      }
-    } catch (err) {
-      window.alert(err.message || `Failed to remove ${label}`);
-    }
-  };
-
-  window.removeRouterFromFleet = async function (ip) {
-    const dev = (appState.devices || []).find(d => d.ip === ip);
-    if (!dev || !dev.id) {
-      window.alert(
-        `Router ${ip} does not have a removable monitored device entry.`
-      );
-      return;
-    }
-    await window.deleteMonitoredDevice(
-      dev.id,
-      encodeURIComponent(dev.name || ip),
-      ip
-    );
-  };
 
   es.addEventListener('inventory_update', e => {
     try {
@@ -449,6 +353,103 @@ function initEventStream() {
       }
     } catch (_) {}
   });
+}
+
+async function promoteLanDeviceAsInfra(ip, mac, encodedName) {
+  const rawName = encodedName ? decodeURIComponent(encodedName) : ip;
+  const cleanName =
+    rawName && !/^unknown|^generic/i.test(rawName)
+      ? rawName
+      : `Deployed AP · ${ip}`;
+  const defaultRole = /deco|router|gateway|mikrotik|edgerouter/i.test(cleanName)
+    ? 'router'
+    : 'ap';
+  if (
+    !window.confirm(
+      `Track "${cleanName}" (${ip}) as a Monitored ${
+        defaultRole === 'router' ? 'Router / Mesh Node' : 'Access Point'
+      }?\n\nThis pins it for continuous real-time uptime & latency checks.`
+    )
+  ) {
+    return;
+  }
+  try {
+    const res = await fetch('/api/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: cleanName,
+        ip,
+        mac: mac || '',
+        type: defaultRole,
+        manual: true,
+        critical: true,
+        location: 'LAN · Promoted Infrastructure',
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      window.alert(data.error || `Failed to track ${ip} (${res.status})`);
+      return;
+    }
+    if (data && data.id) {
+      await fetch(`/api/devices/${encodeURIComponent(data.id)}/probe`, {
+        method: 'POST',
+      }).catch(() => {});
+    }
+    if (typeof loadInitialState === 'function') {
+      await loadInitialState();
+    } else {
+      renderAll();
+    }
+  } catch (err) {
+    window.alert(err.message || `Failed to track ${ip}`);
+  }
+}
+
+async function deleteMonitoredDevice(deviceId, encodedName, ip) {
+  const label =
+    (encodedName ? decodeURIComponent(encodedName) : '') || ip || deviceId;
+  if (
+    !window.confirm(
+      `Remove "${label}"${ip ? ` (${ip})` : ''} from Monitored Infrastructure?\n\nUse this for pulled-out or decommissioned APs/routers. Active alerts for this device will be cleared.`
+    )
+  ) {
+    return;
+  }
+  try {
+    const res = await fetch(
+      `/api/devices/${encodeURIComponent(deviceId)}`,
+      { method: 'DELETE' }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      window.alert(data.error || `Failed to remove ${label} (${res.status})`);
+      return;
+    }
+    if (typeof loadInitialState === 'function') {
+      await loadInitialState();
+    } else {
+      renderAll();
+    }
+  } catch (err) {
+    window.alert(err.message || `Failed to remove ${label}`);
+  }
+}
+
+async function removeRouterFromFleet(ip) {
+  const dev = (appState.devices || []).find(d => d.ip === ip);
+  if (!dev || !dev.id) {
+    window.alert(
+      `Router ${ip} does not have a removable monitored device entry.`
+    );
+    return;
+  }
+  await deleteMonitoredDevice(
+    dev.id,
+    encodeURIComponent(dev.name || ip),
+    ip
+  );
 }
 
 document.addEventListener('DOMContentLoaded', () => {

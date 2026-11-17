@@ -1,6 +1,6 @@
 // Pulse Network Monitor — Shared State, API Helper, and Unified Device Row Builder
 
-let appState = {
+var appState = {
   router: null,
   routers: [],
   selectedRouterIp: null,

@@ -1245,6 +1245,69 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(hb["wireshark"]["enabled"])
         self.assertEqual(self.monitor.get_game_activity()["wiresharkStatus"]["packetsCaptured"], 99)
 
+    def test_wireshark_ignores_ephemeral_client_ports_on_web_flows_and_builds_bpf(self):
+        """Regression guard: external :443/:80 traffic with client ephemeral port 27036/27015 must not match games."""
+        import socket
+        import struct
+
+        from pulse_monitor.game_detector import _NETSTAT_GAME_PORTS
+        from pulse_monitor.wireshark_capture import (
+            build_wireshark_bpf_filters,
+            dissect_raw_packet,
+        )
+
+        def build_l4_frame(src_ip: str, dst_ip: str, proto: int, sport: int, dport: int, payload: bytes) -> bytes:
+            eth = b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\x08\x00"
+            if proto == 6:
+                l4 = struct.pack("!HHIIBBHHH", sport, dport, 1, 1, 0x50, 0x18, 65535, 0, 0) + payload
+            else:
+                l4 = struct.pack("!HHHH", sport, dport, 8 + len(payload), 0) + payload
+            ip = struct.pack(
+                "!BBHHHBBH4s4s",
+                0x45,
+                0,
+                20 + len(l4),
+                1,
+                0,
+                64,
+                proto,
+                0,
+                socket.inet_aton(src_ip),
+                socket.inet_aton(dst_ip),
+            )
+            return eth + ip + l4
+
+        # Host/LAN client ephemeral source port 27036 talking to Google HTTPS (:443) or HTTP (:80)
+        for p in (
+            build_l4_frame("192.168.0.224", "142.250.197.110", 6, 27036, 443, b"\x17\x03\x03\x00\x10data"),
+            build_l4_frame("142.250.197.110", "192.168.0.224", 6, 443, 27036, b"\x17\x03\x03\x00\x10resp"),
+            build_l4_frame("192.168.1.50", "142.250.197.110", 6, 27036, 443, b"\x17\x03\x03\x00\x10data"),
+            build_l4_frame("192.168.1.50", "142.250.197.110", 17, 27015, 443, b"\xc0\x00\x00\x01quic"),
+        ):
+            self.assertIsNone(
+                dissect_raw_packet(
+                    p,
+                    dlt=1,
+                    game_ports=_NETSTAT_GAME_PORTS,
+                    self_ips={"192.168.0.224"},
+                )
+            )
+
+        # Kernel BPF candidate filters stay valid and include DNS/TLS handshake/game ports
+        bpfs = build_wireshark_bpf_filters(_NETSTAT_GAME_PORTS)
+        self.assertEqual(len(bpfs), 2)
+        self.assertIn("tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16", bpfs[0])
+        self.assertIn("port 27036", bpfs[0])
+        self.assertIn("tcp port 443", bpfs[1])
+
+        # Verify frontend browser state binding & top-level action handlers
+        repo_root = Path(__file__).resolve().parent.parent
+        state_js = (repo_root / "public" / "js" / "state.js").read_text(encoding="utf-8")
+        self.assertIn("var appState =", state_js)
+        app_js = (repo_root / "public" / "js" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("async function promoteLanDeviceAsInfra(", app_js)
+        self.assertIn("async function deleteMonitoredDevice(", app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

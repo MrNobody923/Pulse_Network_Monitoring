@@ -557,15 +557,15 @@ def dissect_raw_packet(
     if proto == 6:
         if (tcp_flags & 0x05) != 0 or (tcp_flags & 0x12) == 0x02:
             return None
-        match_port = (
-            remote_port
-            if (is_external_flow and remote_port in ports_set)
-            else (
+        if is_external_flow:
+            # Only inspect the remote server port on WAN flows (never client ephemeral ports)
+            match_port = remote_port if remote_port in ports_set else None
+        else:
+            match_port = (
                 sport
                 if sport in lan_game_ports
                 else (dport if dport in lan_game_ports else None)
             )
-        )
         if match_port is not None:
             if len(app_payload) > 0 or ((tcp_flags & 0x12) == 0x12 and is_external_flow):
                 sig = _match_sig_helper(port=match_port, matcher=matcher)
@@ -584,11 +584,14 @@ def dissect_raw_packet(
                         "dstIp": dst_ip,
                     }
     elif proto == 17 and app_payload:
-        match_port = (
-            remote_port
-            if (is_external_flow and remote_port in ports_set and remote_port not in (19132, 27036))
-            else (27015 if 27015 in (sport, dport) else None)
-        )
+        if is_external_flow:
+            match_port = (
+                remote_port
+                if (remote_port in ports_set and remote_port != 27036)
+                else None
+            )
+        else:
+            match_port = 27015 if 27015 in (sport, dport) else None
         if match_port is not None:
             sig = _match_sig_helper(port=match_port, matcher=matcher)
             if sig:
@@ -837,6 +840,62 @@ def list_npcap_interfaces(wpcap_path: str = "", tshark_path: str = "") -> list[d
     return results
 
 
+class _BpfProgram(ctypes.Structure):
+    _fields_ = [("bf_len", ctypes.c_uint), ("bf_insns", ctypes.c_void_p)]
+
+
+def build_wireshark_bpf_filters(game_ports: set[int] | tuple[int, ...] | list[int]) -> list[str]:
+    """Return kernel BPF filter candidates (strict TLS-handshake-only first, then port-based fallback)."""
+    extra_ports = sorted({int(p) for p in game_ports if int(p) not in (53, 80, 443, 8080, 8443, 37008)})
+    game_terms = " or ".join(f"port {p}" for p in extra_ports)
+    suffix = f" or {game_terms}" if game_terms else ""
+    strict = (
+        "port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
+        "or (ip and (tcp port 443 or tcp port 8443) and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16) "
+        "or (ip6 and (tcp port 443 or tcp port 8443))"
+        f"{suffix}"
+    )
+    fallback = (
+        "port 53 or udp port 37008 or tcp port 80 or tcp port 8080 or tcp port 443 or tcp port 8443"
+        f"{suffix}"
+    )
+    return [strict, fallback]
+
+
+def _apply_wpcap_bpf_filter(dll, handle: int, game_ports: set[int] | tuple[int, ...] | list[int]) -> bool:
+    """Compile and attach a kernel BPF capture filter on wpcap handle; return True if applied."""
+    try:
+        if not getattr(dll, "_pulse_bpf_bound", False):
+            dll.pcap_compile.restype = ctypes.c_int
+            dll.pcap_compile.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(_BpfProgram),
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_uint32,
+            ]
+            dll.pcap_setfilter.restype = ctypes.c_int
+            dll.pcap_setfilter.argtypes = [ctypes.c_void_p, ctypes.POINTER(_BpfProgram)]
+            dll.pcap_freecode.restype = None
+            dll.pcap_freecode.argtypes = [ctypes.POINTER(_BpfProgram)]
+            dll._pulse_bpf_bound = True
+    except (AttributeError, OSError):
+        return False
+
+    for expr in build_wireshark_bpf_filters(game_ports):
+        prog = _BpfProgram()
+        try:
+            if dll.pcap_compile(ctypes.c_void_p(handle), ctypes.byref(prog), expr.encode("ascii"), 1, 0xFFFFFFFF) == 0:
+                try:
+                    if dll.pcap_setfilter(ctypes.c_void_p(handle), ctypes.byref(prog)) == 0:
+                        return True
+                finally:
+                    dll.pcap_freecode(ctypes.byref(prog))
+        except Exception:
+            continue
+    return False
+
+
 class WiresharkCaptureEngine:
     """Real-time Wireshark/TShark + Npcap deep packet sniffer and TZSP stream inspector."""
 
@@ -1000,7 +1059,8 @@ class WiresharkCaptureEngine:
         pkt_ptr = ctypes.POINTER(ctypes.c_ubyte)()
         from .game_detector import GameDetectorMixin, _NETSTAT_GAME_PORTS
 
-        print(f"[wireshark-npcap] Capturing live packets on {iface_name} (dlt={dlt})", flush=True)
+        bpf_ok = _apply_wpcap_bpf_filter(dll, handle, _NETSTAT_GAME_PORTS)
+        print(f"[wireshark-npcap] Capturing live packets on {iface_name} (dlt={dlt}, bpf={bpf_ok})", flush=True)
         try:
             while not self._stop.is_set() and not worker_stop.is_set():
                 res = dll.pcap_next_ex(handle, ctypes.byref(hdr_ptr), ctypes.byref(pkt_ptr))

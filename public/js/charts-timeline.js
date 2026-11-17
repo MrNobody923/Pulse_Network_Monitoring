@@ -106,7 +106,7 @@ function updateKumaLiveSpeed(live) {
   const titleEl = document.getElementById('kumaStatSpeedTitle');
   if (titleEl) titleEl.textContent = 'Internet Speed';
 
-  const isp = (window.appState && window.appState.isp) || {};
+  const isp = (typeof appState !== 'undefined' && appState && appState.isp) || {};
   const st =
     (live && live.lastDownloadMbps != null
       ? { downloadMbps: live.lastDownloadMbps, uploadMbps: live.lastUploadMbps }
@@ -883,6 +883,7 @@ function renderPingChartCanvas(skipHoverRecompute = false) {
   if (!canvas || !lastPingChartData) return;
   const { targets, timeseries } = lastPingChartData;
   const ctx = canvas.getContext('2d');
+  if (!canvas.parentElement) return;
   const rect = canvas.parentElement.getBoundingClientRect();
   const targetW = Math.max(400, Math.round(rect.width) || 700);
   const targetH = 240;
