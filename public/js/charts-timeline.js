@@ -136,22 +136,31 @@ function updateKumaLiveSpeed(live) {
     if (isActiveTransfer) {
       if (periodEl) periodEl.textContent = '(Active Live Transfer)';
       el.innerHTML = `
-        <div style="font-size: 1.05rem; font-weight: 800; white-space: nowrap; color: var(--accent-cyan);">↓ ${rxMB} MB/s</div>
-        <div style="font-size: 0.72rem; color: var(--accent-amber); font-weight: 600; margin-top: 2px;">↑ ${txMB} MB/s · Active Transfer</div>
+        <div class="kuma-speed-readout">
+          <span class="kuma-speed-item">↓ ${rxMB} MB/s</span>
+          <span class="kuma-speed-item" style="color: var(--accent-amber);">↑ ${txMB} MB/s</span>
+        </div>
+        <div class="kuma-speed-sub" style="color: var(--accent-amber);">Active Live Transfer</div>
       `;
     } else {
       if (periodEl) periodEl.textContent = '(Measured Line Speed)';
       el.innerHTML = `
-        <div style="font-size: 1.02rem; font-weight: 800; white-space: nowrap; color: var(--accent-cyan);">↓ ${dlMB} MB/s · ↑ ${ulMB} MB/s</div>
-        <div style="font-size: 0.72rem; color: var(--text-dim); font-weight: 600; margin-top: 2px;">${Math.round(dlMbps)} Mbps Down · ${Math.round(ulMbps)} Mbps Up</div>
+        <div class="kuma-speed-readout">
+          <span class="kuma-speed-item">↓ ${dlMB} MB/s</span>
+          <span class="kuma-speed-item" style="color: var(--accent-green, #10b981);">↑ ${ulMB} MB/s</span>
+        </div>
+        <div class="kuma-speed-sub">${Math.round(dlMbps)}↓ · ${Math.round(ulMbps)}↑ Mbps</div>
       `;
     }
     el.title = `Measured Line Speed: ${dlMB} MB/s (${dlMbps.toFixed(1)} Mbps) Down · ${ulMB} MB/s (${ulMbps.toFixed(1)} Mbps) Up\nCurrent Real-Time NIC Transfer: ${rxMB} MB/s (${rxMbps.toFixed(1)} Mbps) Down · ${txMB} MB/s (${txMbps.toFixed(1)} Mbps) Up`;
   } else {
     if (periodEl) periodEl.textContent = '(Live NIC Throughput)';
     el.innerHTML = `
-      <div style="font-size: 1.02rem; font-weight: 800; white-space: nowrap; color: var(--accent-cyan);">↓ ${rxMB} MB/s · ↑ ${txMB} MB/s</div>
-      <div style="font-size: 0.72rem; color: var(--text-dim); font-weight: 600; margin-top: 2px;">Measuring Internet Line...</div>
+      <div class="kuma-speed-readout">
+        <span class="kuma-speed-item">↓ ${rxMB} MB/s</span>
+        <span class="kuma-speed-item">↑ ${txMB} MB/s</span>
+      </div>
+      <div class="kuma-speed-sub">Measuring Internet Line...</div>
     `;
     el.title = `Current NIC Transfer: ${rxMB} MB/s Down · ${txMB} MB/s Up`;
   }
