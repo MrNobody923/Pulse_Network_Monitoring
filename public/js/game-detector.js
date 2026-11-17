@@ -5,6 +5,7 @@ let gameActivitySearch = '';
 const gameToastTimers = new Map();
 const shownGameNotificationIds = new Set();
 const seenActiveSessionIds = new Set();
+const displayedToastSessionIds = new Set();
 let gameBaselineSeeded = false;
 let gameAutoPollInFlight = false;
 let gameTerminalUserScrolledUp = false;
@@ -502,7 +503,11 @@ function renderGamingPolicyControls(policy) {
 
 function showGameDetectedToast(detection) {
   if (!detection || !detection.gameName) return;
-  if (detection.id) seenActiveSessionIds.add(detection.id);
+  if (detection.id) {
+    seenActiveSessionIds.add(detection.id);
+    if (displayedToastSessionIds.has(detection.id)) return;
+    displayedToastSessionIds.add(detection.id);
+  }
   const isAuto = Boolean(detection.autoPrevented);
   const container = document.getElementById('gameToastContainer');
   const toastId = `game-toast-${detection.id || Date.now()}`;
@@ -753,6 +758,17 @@ async function configureRouterGameDns() {
   }
 }
 
+function notifyUnseenActiveGames(activity) {
+  if (!activity || !Array.isArray(activity.logs) || !gameBaselineSeeded) return;
+  const activeLogs = activity.logs.filter(x => x && x.isActive && !x.isBlocked);
+  for (const item of activeLogs) {
+    if (item.id && !seenActiveSessionIds.has(item.id)) {
+      seenActiveSessionIds.add(item.id);
+      showGameDetectedToast(item);
+    }
+  }
+}
+
 let gamePollCounter = 0;
 
 async function refreshGameActivityAuto() {
@@ -767,15 +783,7 @@ async function refreshGameActivityAuto() {
     const activity = await apiJson('/api/gaming/activity');
     if (activity && typeof activity === 'object') {
       appState.gameActivity = activity;
-      const activeLogs = (activity.logs || []).filter(x => x && x.isActive && !x.isBlocked);
-      if (gameBaselineSeeded) {
-        for (const item of activeLogs) {
-          if (item.id && !seenActiveSessionIds.has(item.id)) {
-            seenActiveSessionIds.add(item.id);
-            showGameDetectedToast(item);
-          }
-        }
-      }
+      notifyUnseenActiveGames(activity);
       renderGamingSection();
     }
   } catch (_) {

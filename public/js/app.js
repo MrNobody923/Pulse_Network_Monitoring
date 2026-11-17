@@ -202,6 +202,9 @@ function initEventStream() {
     try {
       const d = JSON.parse(e.data);
       appState = { ...appState, ...d };
+      if (d.gameActivity && typeof notifyUnseenActiveGames === 'function') {
+        notifyUnseenActiveGames(d.gameActivity);
+      }
       if (typeof pushTerminalTick === 'function' && Array.isArray(d.devices)) {
         const up = d.devices.filter(x => x.alive).length;
         const down = d.devices.filter(x => x.status === 'offline').length;
@@ -271,6 +274,8 @@ function initEventStream() {
       if (typeof renderGamingSection === 'function') renderGamingSection();
       if (d.detection && typeof showGameDetectedToast === 'function') {
         showGameDetectedToast(d.detection);
+      } else if (d.gameActivity && typeof notifyUnseenActiveGames === 'function') {
+        notifyUnseenActiveGames(d.gameActivity);
       }
     } catch (_) {}
   });

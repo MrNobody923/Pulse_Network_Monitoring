@@ -41,15 +41,17 @@ GAME_SIGNATURES: list[dict] = [
             "m.mobilelegends.com",
             "mobilelegends.com",
             "mlbb.com",
+            "mlbb.io",
             "moonton.com",
             "moonton.net",
             "moontongame.com",
             "moontontech.com",
             "yuanzhanapp.com",
+            "yuanzhan.com",
             "akmweb.youngjoygame.com",
         ),
-        "domainKeywords": ("mobilelegends", "youngjoygame", "moonton", "yuanzhanapp", "mlbb.com"),
-        "ports": (5000, 5001, 5002, 5551, 30090, 30091),
+        "domainKeywords": ("mobilelegends", "youngjoygame", "moonton", "yuanzhanapp", "mlbb.com", "mlbb.io"),
+        "ports": (5551, 30090, 30091),
         "processes": (),
     },
     {
@@ -63,9 +65,6 @@ GAME_SIGNATURES: list[dict] = [
             "garena.codm.com",
             "codm.garenanow.com",
             "dl.codm.garena.com",
-            "tgl.garena.com",
-            "auth.garena.com",
-            "connect.garena.com",
             "codm.activision.com",
             "activision.com",
             "callofduty.com",
@@ -86,17 +85,16 @@ GAME_SIGNATURES: list[dict] = [
         "domains": (
             "igamecj.com",
             "gcloudsdk.com",
+            "gcloudcs.com",
             "pubgmobile.com",
             "www.pubgmobile.com",
             "pubg.com",
             "krafton.com",
             "lightspeed-studios.com",
             "gameloop.com",
-            "tencent-cloud.net",
-            "myqcloud.com",
             "gcloud.qq.com",
         ),
-        "domainKeywords": ("pubgmobile", "igamecj", "gcloudsdk", "lightspeed-studios", "gameloop"),
+        "domainKeywords": ("pubgmobile", "igamecj", "gcloudsdk", "gcloudcs", "lightspeed-studios", "gameloop"),
         "ports": (17500, 20001),
         "processes": (),
     },
@@ -108,6 +106,8 @@ GAME_SIGNATURES: list[dict] = [
         "isMobile": True,
         "domains": (
             "honorofkings.com",
+            "hok.qq.com",
+            "pvp.qq.com",
             "smoba.qq.com",
             "anticheatexpert.com",
             "worldofkings.com",
@@ -134,7 +134,7 @@ GAME_SIGNATURES: list[dict] = [
             "riotgames.net",
         ),
         "domainKeywords": ("wildrift", "riotcdn", "leagueoflegends", "rgpub.io", "riotgames.net"),
-        "ports": (5223,),
+        "ports": (),
         "processes": ("League of Legends.exe", "LeagueClientUx.exe"),
     },
     {
@@ -168,9 +168,10 @@ GAME_SIGNATURES: list[dict] = [
             "freefiremobile.com",
             "freefireind.com",
             "ff.garena.com",
+            "dl.ff.garena.com",
+            "ff.garenanow.com",
             "ggblueshark.com",
-            "garenanow.com",
-            "garena.com",
+            "freefire.com",
         ),
         "domainKeywords": ("freefire", "ggblueshark", "ff.garena"),
         "ports": (39698, 39800),
@@ -252,8 +253,8 @@ GAME_SIGNATURES: list[dict] = [
             "rbxinfra.net",
         ),
         "domainKeywords": ("roblox", "rbxcdn", "rbxinfra"),
-        "ports": (49152, 53640),
-        "processes": ("RobloxPlayerBeta.exe", "RobloxPlayerLauncher.exe", "Windows10Universal.exe"),
+        "ports": (53640,),
+        "processes": ("RobloxPlayerBeta.exe", "RobloxPlayerLauncher.exe"),
     },
     {
         "id": "valorant",
@@ -261,7 +262,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "PC Tactical FPS",
         "icon": "🎯",
         "isMobile": False,
-        "domains": ("playvalorant.com", "pvp.net", "riotgames.com"),
+        "domains": ("playvalorant.com", "valorant.com", "pvp.net", "riotgames.com"),
         "domainKeywords": ("playvalorant",),
         "ports": (8393, 8394),
         "processes": ("VALORANT.exe", "VALORANT-Win64-Shipping.exe"),
@@ -275,11 +276,28 @@ GAME_SIGNATURES: list[dict] = [
         "domains": ("sessionserver.mojang.com", "authserver.mojang.com", "minecraft.net", "minecraftservices.com"),
         "domainKeywords": ("minecraft", "mojang.com"),
         "ports": (19132, 25565),
-        "processes": ("Minecraft.Windows.exe", "javaw.exe"),
+        "processes": (
+            "Minecraft.Windows.exe",
+            "Minecraft.exe",
+            "MinecraftLauncher.exe",
+            "Lunar Client.exe",
+            "Badlion Client.exe",
+        ),
+    },
+    {
+        "id": "fortnite",
+        "name": "Fortnite (Epic Games)",
+        "category": "PC / Mobile Battle Royale",
+        "icon": "🪂",
+        "isMobile": True,
+        "domains": ("fortnite.com", "ol.epicgames.com", "epicgames.dev"),
+        "domainKeywords": ("fortnite",),
+        "ports": (5795, 5800),
+        "processes": ("FortniteClient-Win64-Shipping.exe", "FortniteLauncher.exe"),
     },
     {
         "id": "steam",
-        "name": "Dota 2 / CS2 (Steam)",
+        "name": "Steam Gaming Client / Dota 2 / CS2",
         "category": "PC Competitive",
         "icon": "🎮",
         "isMobile": False,
@@ -294,7 +312,7 @@ GAME_SIGNATURES: list[dict] = [
         ),
         "domainKeywords": ("steampowered", "steamserver", "steamcontent", "valvesoftware"),
         "ports": (27015, 27036),
-        "processes": ("dota2.exe", "cs2.exe", "ApexLegends.exe", "FortniteClient-Win64-Shipping.exe", "Overwatch.exe", "GTA5.exe"),
+        "processes": ("dota2.exe", "cs2.exe", "ApexLegends.exe", "Overwatch.exe", "GTA5.exe"),
     },
 ]
 
@@ -304,6 +322,8 @@ _DOH_CANARY_DOMAINS = (
     "mask-h2.icloud.com",
     "doh.dns.apple.com",
     "canary.dns.nextdns.io",
+    "chrome.cloudflare-dns.com",
+    "mozilla.cloudflare-dns.com",
 )
 
 _WIFI_CAPTIVE_DOMAINS = (
@@ -321,7 +341,7 @@ _GAME_ID_ALIASES = {
     "supercell": "clashofclans",
 }
 
-SCAN_GAME_PORTS = (19132, 25565, 27015, 27036, 9339, 5221, 5223, 7500, 17500, 22101, 30090)
+SCAN_GAME_PORTS = (19132, 25565, 27015, 27036, 9339, 7500, 17500, 22101, 30090)
 _PASSIVE_DNS_CACHE_EXCLUDE = frozenset({
     "steampowered.com",
     "steamcommunity.com",
@@ -330,10 +350,10 @@ _PASSIVE_DNS_CACHE_EXCLUDE = frozenset({
     "api.steampowered.com",
 })
 _NETSTAT_GAME_PORTS = frozenset({
-    5000, 5001, 5002, 5551, 30090, 30091, 7500, 7501, 10012,
-    17500, 20001, 10010, 10011, 5223, 22101, 22102, 39698, 39800,
-    9339, 3659, 17502, 8433, 22023, 8393, 8394, 19132, 25565,
-    27015, 27036,
+    5551, 30090, 30091, 7500, 7501, 10012,
+    17500, 20001, 10010, 10011, 22101, 22102, 39698, 39800,
+    9339, 3659, 17502, 8433, 22023, 8393, 8394, 5795, 5800,
+    19132, 25565, 27015, 27036,
 })
 
 _MOBILE_HINT_TOKENS = (
@@ -482,16 +502,17 @@ class GameDetectorMixin:
         return {"success": True, "policy": policy, "gameActivity": activity}
 
     @staticmethod
-    def _detect_host_lan_ip(fallback: str = "192.168.0.224") -> str:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.settimeout(0.25)
-                s.connect(("192.168.0.1", 80))
-                ip = s.getsockname()[0]
-                if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
-                    return ip
-        except OSError:
-            pass
+    def _detect_host_lan_ip(fallback: str = "192.168.0.224", gateway_ip: str = "192.168.0.1") -> str:
+        for probe_ip in (gateway_ip or "192.168.0.1", "1.1.1.1"):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.settimeout(0.25)
+                    s.connect((probe_ip, 80))
+                    ip = s.getsockname()[0]
+                    if ip and not ip.startswith(("127.", "169.254.")):
+                        return ip
+            except OSError:
+                continue
         return fallback
 
     @staticmethod
@@ -731,6 +752,17 @@ class GameDetectorMixin:
         return any(dom == sig or dom.endswith(f".{sig}") for sig in _DOH_CANARY_DOMAINS)
 
     @staticmethod
+    def _domain_keyword_matches(keyword: str, domain: str) -> bool:
+        """Match game keywords strictly on DNS label boundaries (never substring inside unrelated words)."""
+        kw = str(keyword or "").strip().lower()
+        if not kw or not domain:
+            return False
+        if kw.endswith("."):
+            core = re.escape(kw.rstrip("."))
+            return re.search(rf"(?:^|[.-]){core}\.", domain) is not None
+        return re.search(rf"(?:^|[.-]){re.escape(kw)}(?:[.-]|$)", domain) is not None
+
+    @staticmethod
     def _match_game_signature(
         game_id: object = "", domain: object = "", port: object = None, process: object = ""
     ) -> dict | None:
@@ -746,7 +778,7 @@ class GameDetectorMixin:
                 if any(dom == sig or dom.endswith(f".{sig}") for sig in g["domains"]):
                     return g
             for g in GAME_SIGNATURES:
-                if any(kw in dom for kw in g.get("domainKeywords", ())):
+                if any(GameDetectorMixin._domain_keyword_matches(kw, dom) for kw in g.get("domainKeywords", ())):
                     return g
         proc = str(process or "").strip().lower()
         if proc:
@@ -981,12 +1013,17 @@ class GameDetectorMixin:
 
         if self._match_active_block_rule(client_ip, game["id"]) is not None:
             with self._connect() as db:
-                db.execute(
-                    """UPDATE game_activity_logs
-                       SET is_active=0, is_blocked=1, timestamp=?, matched_indicator=?, detection_method=?
-                       WHERE ip=? AND game_id=?""",
-                    (now, indicator, method, client_ip, game["id"]),
-                )
+                latest_blk = db.execute(
+                    "SELECT id FROM game_activity_logs WHERE ip=? AND game_id=? ORDER BY timestamp DESC LIMIT 1",
+                    (client_ip, game["id"]),
+                ).fetchone()
+                if latest_blk is not None:
+                    db.execute(
+                        """UPDATE game_activity_logs
+                           SET is_active=0, is_blocked=1, timestamp=?, matched_indicator=?, detection_method=?
+                           WHERE id=?""",
+                        (now, indicator, method, latest_blk["id"]),
+                    )
             return {
                 "success": True,
                 "blocked": True,
@@ -1145,8 +1182,10 @@ class GameDetectorMixin:
             self.broadcast("new_alert", alert)
 
         activity = self.get_game_activity(60)
-        if changed_signal:
+        if existing_row is None:
             self.broadcast("game_detected", {"detection": entry, "gameActivity": activity})
+        elif changed_signal:
+            self.broadcast("game_detected", {"gameActivity": activity})
         return {"success": True, "detection": entry, "gameActivity": activity}
 
     def expire_stale_game_sessions(self, max_idle_seconds: int | None = None) -> int:
@@ -1202,10 +1241,13 @@ class GameDetectorMixin:
         if not gid:
             raise ValueError("Game id is required")
         with self._connect() as db:
-            db.execute(
+            cur = db.execute(
                 "UPDATE game_activity_logs SET is_active=0 WHERE ip=? AND game_id=? AND is_active=1",
                 (ip, gid),
             )
+            changed = int(cur.rowcount or 0) > 0
+        if not changed:
+            return {"success": True, "changed": False, "gameActivity": self.get_game_activity(100)}
         alert_key = f"game-{ip}-{gid}"
         with self.lock:
             self.active_alerts.pop(alert_key, None)
@@ -2173,7 +2215,7 @@ class GameDetectorMixin:
         # 2. Active outbound / inbound TCP sockets against dedicated game server ports
         try:
             res = subprocess.run(
-                ["netstat", "-ano"],
+                ["netstat", "-ano", "-p", "TCP"],
                 capture_output=True, text=True, timeout=2.5, creationflags=flags,
             )
             if res.returncode == 0:

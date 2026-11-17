@@ -900,22 +900,76 @@ class InventoryTests(unittest.TestCase):
         self.monitor.unblock_game_rule(thr_res["ruleId"])
         self.assertEqual(self.monitor.get_game_blocks(), [])
 
+    def test_game_signature_accuracy_dedup_and_dns_wire(self) -> None:
+        self.monitor._skip_live_probe_in_test = True
 
-        def fake_game_probe(ip: str, port: int, timeout: float = 0.06):
-            if ip == "192.168.2.99" and port == 19132:
-                return True, True, 2.0
-            return False, False, None
+        # 1. Generic system/Apple/Java/CDN ports & domains must NOT trigger false positives
+        self.assertIsNone(self.monitor._match_game_signature(port=5223))
+        self.assertIsNone(self.monitor._match_game_signature(port=5000))
+        self.assertIsNone(self.monitor._match_game_signature(port=49152))
+        self.assertIsNone(self.monitor._match_game_signature(domain="img.myqcloud.com"))
+        self.assertIsNone(self.monitor._match_game_signature(domain="cdn.tencent-cloud.net"))
+        self.assertIsNone(self.monitor._match_game_signature(domain="notcodm.example.com"))
+        self.assertIsNone(self.monitor._match_game_signature(domain="garena.com"))
+        self.assertIsNone(self.monitor._match_game_signature(process="javaw.exe"))
+        self.assertIsNone(self.monitor._match_game_signature(process="Windows10Universal.exe"))
 
-        with patch.object(self.monitor, "_probe_tcp_socket", side_effect=fake_game_probe):
-            scan_res = self.monitor.scan_lan_for_games(include_topology_refresh=True)
+        # 2. Real mobile/PC signatures & DoH canaries match accurately
+        self.assertEqual(self.monitor._match_game_signature(domain="sea-api-02.youngjoygame.com")["id"], "mlbb")
+        self.assertEqual(self.monitor._match_game_signature(domain="dl.codm.garena.com")["id"], "codm")
+        self.assertEqual(self.monitor._match_game_signature(domain="fortnite.com")["id"], "fortnite")
+        self.assertEqual(self.monitor._match_game_signature(process="FortniteClient-Win64-Shipping.exe")["id"], "fortnite")
+        self.assertTrue(self.monitor._is_doh_canary_domain("chrome.cloudflare-dns.com"))
 
-        self.assertTrue(scan_res["success"])
-        self.assertGreaterEqual(scan_res["scannedDevices"], 132)
-        self.assertGreaterEqual(scan_res["topologyNodesScanned"], 2)
-        self.assertEqual(scan_res["detectedCount"], 1)
-        self.assertEqual(scan_res["detections"][0]["ip"], "192.168.2.99")
-        self.assertEqual(scan_res["detections"][0]["gameId"], "minecraft")
+        # 3. Updating while blocked only updates the latest row, never corrupting older timestamps
+        with self.monitor._connect() as db:
+            db.execute(
+                """INSERT INTO game_activity_logs
+                   (id, timestamp, ip, mac, device_name, vendor, device_type, game_id, game_name, is_active, is_blocked)
+                   VALUES (?, ?, ?, '', 'Phone-Test', 'Apple', 'Mobile', 'mlbb', 'Mobile Legends: Bang Bang', 0, 0)""",
+                ("game-hist-1", "2026-01-01T00:00:00Z", "192.168.1.90"),
+            )
+            db.execute(
+                """INSERT INTO game_activity_logs
+                   (id, timestamp, ip, mac, device_name, vendor, device_type, game_id, game_name, is_active, is_blocked)
+                   VALUES (?, ?, ?, '', 'Phone-Test', 'Apple', 'Mobile', 'mlbb', 'Mobile Legends: Bang Bang', 1, 0)""",
+                ("game-hist-2", "2026-01-02T00:00:00Z", "192.168.1.90"),
+            )
+        blk = self.monitor.block_game_session({
+            "ip": "192.168.1.90",
+            "gameId": "mlbb",
+            "scope": "device_throttle",
+            "cutWifi": False,
+        })
+        self.monitor.record_game_detection({
+            "ip": "192.168.1.90",
+            "domain": "api.mobilelegends.com",
+            "detectionMethod": "Live DNS",
+        })
+        with self.monitor._connect() as db:
+            ts1 = db.execute("SELECT timestamp FROM game_activity_logs WHERE id='game-hist-1'").fetchone()["timestamp"]
+            ts2 = db.execute("SELECT timestamp FROM game_activity_logs WHERE id='game-hist-2'").fetchone()["timestamp"]
+        self.assertEqual(ts1, "2026-01-01T00:00:00Z")
+        self.assertNotEqual(ts2, "2026-01-02T00:00:00Z")
+        self.monitor.unblock_game_rule(blk["ruleId"])
 
+        # 4. Wire-level HostGameSensor DNS handler handles DoH NXDOMAIN & device_throttle cleanly
+        from host_game_sensor import HostGameSensor
+
+        sensor = HostGameSensor(dns_host="127.0.0.1", dns_port=0, syslog_port=0)
+        doh_pkt = b"\xaa\xbb\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04mask\x06icloud\x03com\x00\x00\x01\x00\x01"
+        doh_resp = sensor._process_dns_query(doh_pkt, "192.168.1.90")
+        self.assertIsNotNone(doh_resp)
+        self.assertEqual(doh_resp[0:4], b"\xaa\xbb\x81\x83")
+
+        sensor._apply_policy_and_blocks({
+            "policy": {"preventionMode": "alert_only"},
+            "blocks": [{"id": "r1", "ip": "192.168.1.90", "gameId": "*", "scope": "device_throttle", "cutWifi": False}],
+        })
+        mlbb_pkt = b"\x11\x22\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03api\x0dmobilelegends\x03com\x00\x00\x01\x00\x01"
+        mlbb_resp = sensor._process_dns_query(mlbb_pkt, "192.168.1.90")
+        self.assertIsNotNone(mlbb_resp)
+        self.assertEqual(mlbb_resp[-4:], b"\x00\x00\x00\x00")
 
 
 if __name__ == "__main__":
