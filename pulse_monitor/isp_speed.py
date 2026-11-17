@@ -536,9 +536,9 @@ class IspSpeedMixin:
     # -------------------------------------------------- live throughput loop
     def _speedtest_interval_sec(self) -> float:
         try:
-            minutes = float(self.config.get("isp", {}).get("speedTestIntervalMinutes", 60))
+            minutes = float(self.config.get("isp", {}).get("speedTestIntervalMinutes", 0))
         except (TypeError, ValueError):
-            minutes = 60.0
+            minutes = 0.0
         return minutes * 60 if minutes > 0 else 0.0
 
     def _wan_throughput_loop(self) -> None:
@@ -564,8 +564,7 @@ class IspSpeedMixin:
                 ).start()
 
             interval = self._speedtest_interval_sec()
-            if interval:
-                # First automatic test ~90 s after start-up, then every interval.
+            if interval > 0:
                 next_at = (
                     self._last_speedtest + interval
                     if self._last_speedtest
@@ -577,6 +576,8 @@ class IspSpeedMixin:
                     threading.Thread(
                         target=self._auto_speedtest, daemon=True, name="auto-speedtest"
                     ).start()
+            else:
+                self._isp_set(nextAutoTestAt=None)
 
             current = sampler.read_counters()
             if current is None or previous is None:

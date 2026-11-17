@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
         "targetHosts": ["1.1.1.1", "8.8.8.8", "9.9.9.9"],
         "dnsTestDomain": "google.com",
         "pollIntervalSec": 5,
-        "speedTestIntervalMinutes": 60,
+        "speedTestIntervalMinutes": 0,
     },
     "thresholds": {
         "highLatencyMs": 80,

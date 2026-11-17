@@ -292,6 +292,7 @@ class Monitor(
     def _monitor_loop(self) -> None:
         last_scan_attempt: float | None = None
         last_arp_sync: float = 0.0
+        last_game_scan: float = 0.0
         while not self._stop.is_set():
             cycle_started = time.monotonic()
 
@@ -309,7 +310,9 @@ class Monitor(
                     print(f"[monitor] Live ARP sync warning: {exc}", flush=True)
             try:
                 self.expire_stale_game_sessions()
-                self.scan_lan_for_games()
+                if (cycle_started - last_game_scan) >= 60:
+                    last_game_scan = cycle_started
+                    self.scan_lan_for_games()
             except Exception as exc:
                 print(f"[monitor] Automatic LAN game scan warning: {exc}", flush=True)
             try:
@@ -334,7 +337,7 @@ class Monitor(
             full_sweep_due = (
                 self._daily_discovery_due()
                 or last_scan_attempt is None
-                or (cycle_started - last_scan_attempt >= 300)
+                or (cycle_started - last_scan_attempt >= 600)
             )
             if full_sweep_due and (
                 last_scan_attempt is None or cycle_started - last_scan_attempt >= 120

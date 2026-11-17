@@ -351,7 +351,7 @@ class DiscoveryMixin:
                 alive, _ = self._win32_icmp_echo(host, timeout_ms=420)
                 return host if alive else None
 
-            with ThreadPoolExecutor(max_workers=96) as pool:
+            with ThreadPoolExecutor(max_workers=32) as pool:
                 return [h for h in pool.map(ping_win32, hosts) if h is not None]
 
         def ping(host: str) -> str | None:

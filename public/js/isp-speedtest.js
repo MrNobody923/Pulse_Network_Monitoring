@@ -584,7 +584,7 @@ function renderIspIdentity(isp) {
     else if (isp.speedTestError) nextEl.textContent = `Last error: ${isp.speedTestError}`;
     else if (isp.nextAutoTestAt)
       nextEl.textContent = `Next auto test ${new Date(isp.nextAutoTestAt * 1000).toLocaleTimeString()}`;
-    else nextEl.textContent = '';
+    else nextEl.textContent = 'On-demand only (0 idle WAN load)';
   }
 }
 

@@ -1318,6 +1318,11 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(responses[0][0], 200)
         self.assertTrue(responses[0][1]["alreadyDismissed"])
 
+        # Verify zero unscheduled WAN-saturating background speed tests by default
+        from pulse_monitor.config import DEFAULT_CONFIG
+        self.assertEqual(DEFAULT_CONFIG["isp"]["speedTestIntervalMinutes"], 0)
+        self.assertEqual(self.monitor._speedtest_interval_sec(), 0.0)
+
         # Verify frontend browser state binding & top-level action handlers
         repo_root = Path(__file__).resolve().parent.parent
         state_js = (repo_root / "public" / "js" / "state.js").read_text(encoding="utf-8")

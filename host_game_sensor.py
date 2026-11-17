@@ -103,6 +103,7 @@ class HostGameSensor:
         self._last_dns_domain: str = ""
         self._last_dns_at: str | None = None
         self._throttle_seq: dict[str, int] = {}
+        self._throttle_inflight: dict[str, int] = {}
         self._bound_dns_ips: set[str] = set()
         self._forwarded_dns_domains: dict[str, float] = {}
         self._last_rst_burst: dict[str, float] = {}
@@ -592,7 +593,7 @@ class HostGameSensor:
                 self._scan_host_dns_cache()
                 self._scan_host_netstat_ports()
                 now = time.monotonic()
-                if (now - last_lan_sweep) >= 25.0:
+                if (now - last_lan_sweep) >= 45.0:
                     last_lan_sweep = now
                     self._sweep_lan_game_ports()
             except Exception as exc:
@@ -660,14 +661,29 @@ class HostGameSensor:
                     seq = self._throttle_seq.get(client_ip, 0) + 1
                     self._throttle_seq[client_ip] = seq
                     self._dns_blocked_total += 1
+                    inflight = self._throttle_inflight.get(client_ip, 0)
+                    can_delay = inflight < 8
+                    if can_delay:
+                        self._throttle_inflight[client_ip] = inflight + 1
                 if self._should_report(client_ip, "thr-dns", cooldown=15.0):
                     print(
                         f"[host-sensor] THROTTLED DNS {client_ip} -> {qname} (2.4s lag + intermittent drop)",
                         flush=True,
                     )
-                # Inject heavy latency (~2.4s) and drop 2/3 of resolutions to stall throughput to an unplayable rate
-                self._stop.wait(2.4)
-                if (seq % 3) != 0:
+                if can_delay:
+                    try:
+                        # Inject heavy latency (~2.4s) without piling up unbounded sleeping threads
+                        self._stop.wait(2.4)
+                    finally:
+                        with self._lock:
+                            rem = max(0, self._throttle_inflight.get(client_ip, 1) - 1)
+                            if rem:
+                                self._throttle_inflight[client_ip] = rem
+                            else:
+                                self._throttle_inflight.pop(client_ip, None)
+                    if (seq % 3) != 0:
+                        return GameDetectorMixin._build_dns_sinkhole_reply(raw)
+                else:
                     return GameDetectorMixin._build_dns_sinkhole_reply(raw)
 
             if sig:
