@@ -70,9 +70,10 @@ class HostGameSensor:
         upstream_dns: str = "192.168.0.1",
         api_url: str = "http://127.0.0.1:3000/api/gaming/detect",
     ) -> None:
+        self._auto_dns_host = not dns_host or dns_host.strip().lower() == "auto"
         self.dns_host = (
             _detect_local_lan_ip(upstream_dns)
-            if not dns_host or dns_host.strip().lower() == "auto"
+            if self._auto_dns_host
             else dns_host.strip()
         )
         self.hotspot_ip = _detect_hotspot_ip()
@@ -207,8 +208,14 @@ class HostGameSensor:
         while not self._stop.is_set():
             now = time.monotonic()
             if (now - last_heartbeat) >= 1.8:
+                if getattr(self, "_auto_dns_host", False):
+                    latest_ip = _detect_local_lan_ip(self.upstream_dns)
+                    if latest_ip and latest_ip != self.dns_host:
+                        self.dns_host = latest_ip
+                        if "0.0.0.0" not in self._bound_dns_ips:
+                            self._ensure_dns_listeners(self.dns_host)
                 self.hotspot_ip = _detect_hotspot_ip()
-                if self.hotspot_ip:
+                if self.hotspot_ip and "0.0.0.0" not in self._bound_dns_ips:
                     self._ensure_dns_listeners(self.hotspot_ip)
                 self._send_sensor_heartbeat()
                 last_heartbeat = now
@@ -942,9 +949,7 @@ class HostGameSensor:
         threading.Thread(target=self._run_dns_tcp_listener, args=(clean_ip,), daemon=True).start()
 
     def serve_forever(self) -> None:
-        dns_ips = [self.dns_host]
-        if self.hotspot_ip and self.hotspot_ip not in dns_ips:
-            dns_ips.append(self.hotspot_ip)
+        dns_ips = ["0.0.0.0"] if self.dns_host else [self.dns_host]
 
         threads = [
             threading.Thread(target=self._run_syslog_listener, daemon=True),

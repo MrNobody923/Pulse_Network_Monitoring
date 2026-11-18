@@ -49,9 +49,22 @@ GAME_SIGNATURES: list[dict] = [
             "yuanzhanapp.com",
             "yuanzhan.com",
             "akmweb.youngjoygame.com",
+            "viztagame.com",
+            "bytegsdk.com",
+            "orientalgame.com",
+            "joygame.com",
         ),
-        "domainKeywords": ("mobilelegends", "youngjoygame", "moonton", "yuanzhanapp", "mlbb.com", "mlbb.io"),
-        "ports": (5551, 30090, 30091),
+        "domainKeywords": (
+            "mobilelegends",
+            "youngjoygame",
+            "moonton",
+            "yuanzhanapp",
+            "mlbb.com",
+            "mlbb.io",
+            "viztagame",
+            "orientalgame",
+        ),
+        "ports": (5000, 5001, 5500, 5508, 5551, 9000, 30000, 30090, 30091),
         "processes": (),
     },
     {
@@ -350,7 +363,7 @@ _PASSIVE_DNS_CACHE_EXCLUDE = frozenset({
     "api.steampowered.com",
 })
 _NETSTAT_GAME_PORTS = frozenset({
-    5551, 30090, 30091, 7500, 7501, 10012,
+    5000, 5001, 5500, 5508, 5551, 9000, 30000, 30090, 30091, 7500, 7501, 10012,
     17500, 20001, 10010, 10011, 22101, 22102, 39698, 39800,
     9339, 3659, 17502, 8433, 22023, 8393, 8394, 5795, 5800,
     19132, 25565, 27015, 27036,
@@ -1214,6 +1227,7 @@ class GameDetectorMixin:
             or game["domains"][0]
         )[:120]
         method = str(payload.get("detectionMethod") or "Live DNS").strip()[:60]
+        self.expire_stale_game_sessions()
         now = utc_now()
         policy = self.get_gaming_policy()
 

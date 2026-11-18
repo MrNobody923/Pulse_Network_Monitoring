@@ -275,12 +275,12 @@ function initEventStream() {
     try {
       const d = JSON.parse(e.data);
       if (d.gameActivity) appState.gameActivity = d.gameActivity;
-      if (typeof renderGamingSection === 'function') renderGamingSection();
       if (d.detection && typeof showGameDetectedToast === 'function') {
         showGameDetectedToast(d.detection);
       } else if (d.gameActivity && typeof notifyUnseenActiveGames === 'function') {
         notifyUnseenActiveGames(d.gameActivity);
       }
+      if (typeof renderGamingSection === 'function') renderGamingSection();
     } catch (_) {}
   });
   ['new_alert', 'resolved_alert', 'alert_updated', 'alert_dismissed'].forEach(evName => {

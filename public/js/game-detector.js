@@ -486,12 +486,12 @@ function renderGameSensorBanner(data, onlineCount) {
     if (bar) bar.classList.add('warn');
     if (badge) {
       badge.className = 'status-pill warning';
-      badge.textContent = `Sensor Active · External DHCP DNS`;
+      badge.textContent = `Phone DNS Setup Needed · 0 Phones Routed`;
     }
     if (line) {
       line.innerHTML = bypass.length
-        ? `Router (<code>${esc(routerIp)}</code>) DHCP assigns <code>${esc(bypass.join(', '))}</code>. Set DHCP DNS to <code>${esc(hostIp)}</code> for packet-0 mobile inspection.`
-        : `Set Router DHCP DNS to <code>${esc(hostIp)}</code> for instant packet-0 mobile DNS visibility.`;
+        ? `Router (<code>${esc(routerIp)}</code>) DHCP assigns <code>${esc(bypass.join(', '))}</code> so Wi-Fi phones bypass this PC. Set Router DHCP Primary DNS (or your Phone Wi-Fi DNS, with Android Private DNS Off) to <code>${esc(hostIp)}</code> for instant mobile game alerts.`
+        : `Set Router DHCP Primary DNS (or your Phone Wi-Fi DNS, with Android Private DNS Off) to <code>${esc(hostIp)}</code> for instant mobile game alerts.`;
     }
     if (setupBtn) setupBtn.style.display = 'inline-flex';
   }
