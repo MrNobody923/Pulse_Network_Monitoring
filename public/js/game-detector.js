@@ -198,7 +198,7 @@ function renderGamingSection() {
     }
   }
   const blockedTabEntries = [...blockedLogs, ...blockedRuleRows];
-  const blockedLogCount = blockedTabEntries.length;
+  const blockedEntryCount = blockedTabEntries.length;
   const totalCount = summary.totalCount ?? deduped.length;
   const onlineCount =
     summary.onlineDevicesCount ??
@@ -214,7 +214,7 @@ function renderGamingSection() {
   setTxt('gameStatTopZone', summary.topZone || 'No traffic yet');
   setTxt('gameTabAllCount', totalCount);
   setTxt('gameTabActiveCount', activeCount);
-  setTxt('gameTabBlockedCount', blockedLogCount);
+  setTxt('gameTabBlockedCount', blockedEntryCount);
   renderGameSensorBanner(data, onlineCount);
   renderWiresharkStatusBar(data.wiresharkStatus || {});
   renderGamingPolicyControls(data.policy || {});
@@ -320,16 +320,16 @@ function renderGamingSection() {
 
   container.innerHTML = ordered
     .map(item => {
-      const matchingRule = item._ruleRef || findRule(item);
-      const isBlocked = Boolean(item.isBlocked || matchingRule);
+      const activeRuleMatch = item._ruleRef || findRule(item);
+      const isBlocked = Boolean(item.isBlocked || activeRuleMatch);
       const rowCls = isBlocked ? 'is-blocked' : item.isActive ? 'is-live' : '';
       const pillCls = isBlocked ? 'critical' : item.isActive ? 'warning' : 'online';
       const sevLabel = isBlocked ? 'Blocked' : item.isActive ? 'Playing' : 'Ended';
       const ts = formatGameTerminalTime(item.timestamp);
       const devType = item.deviceType ? ` · ${item.deviceType}` : '';
-      const actionsHtml = matchingRule
+      const actionsHtml = activeRuleMatch
         ? `<button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule('${esc(
-            matchingRule.id
+            activeRuleMatch.id
           )}')">Unblock</button>`
         : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameSession('${esc(
             item.id
