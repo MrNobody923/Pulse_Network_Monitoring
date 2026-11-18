@@ -466,6 +466,6 @@ class AlertsMixin:
                 alerts.insert(0, alert)
             else:
                 alerts[existing_index] = alert
-            self.config["alerts"] = self.config["alerts"][:200]
+            self.config["alerts"] = self.config["alerts"][:50]
             self.save_config()
 

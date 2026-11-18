@@ -268,11 +268,28 @@ class StorageMixin:
 
         discovered_ips = {row["ip"] for row in rows}
         db_by_mac = {str(row["mac"] or "").lower(): row for row in rows}
+        newest_by_ip: dict[str, sqlite3.Row] = {}
+        for r_item in sorted(
+            rows,
+            key=lambda r: (int(r["is_online"] or 0), str(r["last_seen"] or "")),
+            reverse=True,
+        ):
+            r_ip = str(r_item["ip"] or "")
+            if r_ip and r_ip not in newest_by_ip:
+                newest_by_ip[r_ip] = r_item
         infra_candidates: list[dict] = []
 
         for row in rows:
             mac = str(row["mac"] or "").lower()
             ip = str(row["ip"] or "")
+            # Skip unplugged/offline devices whose DHCP IP has already been reassigned to another MAC
+            newest_for_ip = newest_by_ip.get(ip)
+            if (
+                not row["is_online"]
+                and newest_for_ip is not None
+                and str(newest_for_ip["mac"] or "").lower() != mac
+            ):
+                continue
             vendor = str(row["vendor"] or "")
             suggested = str(row["suggested_name"] or "")
             oui = mac.replace(":", "")[:6]
@@ -445,8 +462,17 @@ class StorageMixin:
                     removed_ips.add(dev_ip)
                     continue
                 # Prune previously auto-enrolled entries whose MAC/IP is no longer verified infrastructure
+                is_private_wifi_mac = False
+                if len(dev_mac) >= 2 and not dev_mac.startswith("02:00:"):
+                    try:
+                        is_private_wifi_mac = (int(dev_mac[:2], 16) & 2) != 0
+                    except ValueError:
+                        is_private_wifi_mac = False
                 is_auto_enrolled = (
-                    dev_id.startswith(("dev-gateway-", "dev-router-", "dev-ap-", "dev-switch-"))
+                    (
+                        dev_id.startswith(("dev-gateway-", "dev-router-", "dev-ap-", "dev-switch-"))
+                        or (dev_id.startswith("dev-custom-") and is_private_wifi_mac)
+                    )
                     and not dev.get("manual")
                 )
                 if is_auto_enrolled and dev_ip != router_ip:
@@ -456,6 +482,19 @@ class StorageMixin:
                         removed_placeholders += 1
                         removed_ips.add(dev_ip)
                         continue
+                # If a MAC-tracked device moved to a new DHCP IP in discovered_devices, follow its MAC
+                if dev_mac and dev_mac in db_by_mac:
+                    live_row = db_by_mac[dev_mac]
+                    live_ip = str(live_row["ip"] or "").strip()
+                    if (
+                        live_ip
+                        and live_ip != dev_ip
+                        and bool(live_row["is_online"])
+                        and not any(d.get("ip") == live_ip for d in self.config.get("devices", []) if d is not dev)
+                    ):
+                        removed_ips.add(dev_ip)
+                        dev["ip"] = live_ip
+                        updated_count += 1
                 kept_devices.append(dev)
 
             for rem_ip in removed_ips:

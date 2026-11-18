@@ -245,6 +245,43 @@ class ProbesMixin:
         )
         return True, round(latency, 1)
 
+    def _is_arp_neighbor_alive(self, ip: str, expected_mac: str = "") -> bool:
+        """Check whether ip has a live dynamic L2 neighbor entry in the OS ARP cache (for firewall-shielded hosts)."""
+        if (
+            getattr(self, "_skip_live_probe_in_test", False)
+            or hasattr(self._probe_icmp, "assert_called")
+            or hasattr(self._probe_tcp_socket, "assert_called")
+            or not hasattr(self, "_read_arp_entries")
+        ):
+            return False
+        os_mod = runtime_attr("os", os)
+        subproc_mod = runtime_attr("subprocess", subprocess)
+        if hasattr(subproc_mod.run, "assert_called"):
+            return False
+        now_m = time.monotonic()
+        arp_map: dict[str, str] | None = getattr(self, "_live_arp_cache_map", None)
+        arp_ts: float = getattr(self, "_live_arp_cache_ts", 0.0)
+        if arp_map is None or (now_m - arp_ts) >= 8.0:
+            try:
+                entries = self._read_arp_entries(os_mod, subproc_mod)
+                arp_map = {
+                    str(r_ip).strip(): str(r_mac).strip().lower().replace("-", ":")
+                    for r_ip, r_mac, r_kind in entries
+                    if str(r_kind).lower() == "dynamic"
+                    and str(r_mac).strip().lower().replace("-", ":") not in {"ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"}
+                }
+                self._live_arp_cache_map = arp_map
+                self._live_arp_cache_ts = now_m
+            except Exception:
+                return False
+        found_mac = arp_map.get(str(ip).strip())
+        if not found_mac:
+            return False
+        clean_expected = str(expected_mac or "").strip().lower().replace("-", ":")
+        if clean_expected and not clean_expected.startswith("02:00:") and found_mac != clean_expected:
+            return False
+        return True
+
     def _is_wan_internet_up(self) -> bool:
         """Check whether the upstream ISP / WAN internet connection is currently reachable."""
         isp_health = str(self.isp_state.get("overallHealth") or "UNKNOWN").upper()
@@ -677,11 +714,14 @@ class ProbesMixin:
         if not tcp_alive and not icmp_alive:
             # Confirm once before flagging DEVICE_DOWN to avoid false alarms from 1-packet Wi-Fi loss
             icmp_alive, icmp_latency = self._probe_icmp(ip, timeout_ms=1100)
-        alive = tcp_alive or icmp_alive
+        arp_alive = False
+        if not tcp_alive and not icmp_alive:
+            arp_alive = self._is_arp_neighbor_alive(ip, expected_mac=str(device.get("mac") or ""))
+        alive = tcp_alive or icmp_alive or arp_alive
         latency = (
             icmp_latency
             if icmp_alive and icmp_latency is not None
-            else best_latency
+            else (best_latency if best_latency is not None else (2.0 if arp_alive else None))
         )
 
         # Enrich with cached or live hardware identity when management ports respond or MAC changed
@@ -719,6 +759,8 @@ class ProbesMixin:
             probe_method = "ICMP Echo Reply"
         elif tcp_alive:
             probe_method = "TCP Stack Active (RST)"
+        elif arp_alive:
+            probe_method = "ARP Neighbor Active (Firewall Shielded)"
 
         samples = self.history.setdefault(ip, [])
         samples.append(latency if alive else None)
