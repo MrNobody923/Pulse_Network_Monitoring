@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "isp": {
         "targetHosts": ["1.1.1.1", "8.8.8.8", "9.9.9.9"],
         "dnsTestDomain": "google.com",
-        "pollIntervalSec": 5,
+        "pollIntervalSec": 10,
         "speedTestIntervalMinutes": 0,
     },
     "thresholds": {

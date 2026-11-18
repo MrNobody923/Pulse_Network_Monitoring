@@ -34,9 +34,9 @@ function renderExecutiveBanner() {
   } else {
     icon.textContent = 'OK';
     title.textContent = 'Network Healthy — All Devices & Internet Working Normally';
-    desc.textContent = `Tracking ${activeRows.length} active devices on your network (${
+    desc.textContent = `Silently watching ${activeRows.length} devices (${
       activeRows.filter(r => r.online).length
-    } online right now) with automatic daily checks.`;
+    } online) in Ghost Passive Mode — 0% impact on office internet speed.`;
   }
 
   const internetBadge = document.getElementById('overviewInternetBadge');

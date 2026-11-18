@@ -222,7 +222,7 @@ function renderGamingSection() {
     'gameTerminalPromptText',
     activeCount > 0
       ? `${activeCount} open session(s) detected across ${onlineCount} devices — use Throttle Speed or Cut Wi-Fi to restrict access.`
-      : `Watching ${onlineCount} company devices in real time — manual control only (never auto-blocks users).`
+      : `Ghost Watcher active across ${onlineCount} company devices — passive DNS, ARP & Npcap listening (0% WAN load).`
   );
 
   const sideBadge = document.getElementById('sideBadgeGaming');
@@ -234,7 +234,7 @@ function renderGamingSection() {
   const headBadge = document.getElementById('gamingStatusBadge');
   if (headBadge) {
     headBadge.textContent =
-      activeCount > 0 ? `${activeCount} Active Session${activeCount > 1 ? 's' : ''}` : 'Watching · Live';
+      activeCount > 0 ? `${activeCount} Active Session${activeCount > 1 ? 's' : ''}` : 'Ghost Watching · Passive';
     headBadge.className = `status-pill ${activeCount > 0 ? 'warning' : 'online'}`;
   }
 
@@ -980,4 +980,4 @@ async function refreshGameActivityAuto() {
   }
 }
 
-setInterval(refreshGameActivityAuto, 2000);
+setInterval(refreshGameActivityAuto, 8000);

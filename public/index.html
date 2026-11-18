@@ -16,8 +16,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 
   <!-- Modular Stylesheets -->
-  <link rel="stylesheet" href="css/base.css?v=20261117f">
-  <link rel="stylesheet" href="css/components.css?v=20261117j">
+  <link rel="stylesheet" href="css/base.css?v=20261118b">
+  <link rel="stylesheet" href="css/components.css?v=20261118b">
   <link rel="stylesheet" href="css/isp-speedtest.css?v=20261117e">
   <link rel="stylesheet" href="css/nmap-scanner.css?v=20261116h">
   <link rel="stylesheet" href="css/topology.css?v=20261116h">
@@ -157,9 +157,9 @@
       <div class="side-foot">
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
           <span class="live-indicator-dot"></span>
-          <span class="mono" style="font-size: 11px; font-weight: 700; color: #e2e8f0;">MONITORING: ONLINE</span>
+          <span class="mono" style="font-size: 11px; font-weight: 700; color: #e2e8f0;">GHOST WATCH: PASSIVE</span>
         </div>
-        <div style="font-size: 10.5px; color: #64748b;">Live ping, port &amp; device checks</div>
+        <div style="font-size: 10.5px; color: #64748b;">Silent ARP, DNS &amp; Npcap · 0% WAN load</div>
       </div>
     </aside>
 
@@ -177,15 +177,15 @@
             <span>Pulse Network Monitor</span>
             <span class="noc-breadcrumb-tag" id="headerActiveBreadcrumb">NETWORK OVERVIEW</span>
           </h1>
-          <p id="headerActiveSub">Live Network Health, Connected Devices &amp; Connection Speed Monitoring</p>
+          <p id="headerActiveSub">Silent Ghost Watcher · Zero-Impact LAN, Router &amp; Game Telemetry</p>
         </div>
       </div>
 
       <div class="header-actions">
         <!-- Live Monitoring Status Badge -->
-        <div class="brand-badge">
+        <div class="brand-badge" title="Passive Ghost Mode — watches ARP, DNS, and Npcap headers silently with 0% impact on company internet speed">
           <span class="live-indicator-dot" id="liveDot"></span>
-          <span id="liveStatusText">LIVE MONITORING ON</span>
+          <span id="liveStatusText">GHOST WATCH · 0% WAN LOAD</span>
         </div>
 
         <!-- Automated Network Health Check -->
@@ -1936,9 +1936,9 @@
           <div>
             <div class="game-title-row">
               <h2>Game Activity Detector</h2>
-              <span class="status-pill online" id="gamingStatusBadge">Watching · Live</span>
+              <span class="status-pill online" id="gamingStatusBadge">Ghost Watching · Passive</span>
             </div>
-            <p class="game-subtitle">Real-time DNS, TLS SNI, socket &amp; Wireshark/Npcap packet inspection across <code>192.168.0.0/22</code>.</p>
+            <p class="game-subtitle">Silent Ghost Watcher — passive DNS, TLS SNI, ARP &amp; Npcap inspection across <code>192.168.0.0/22</code> with 0% internet speed impact.</p>
           </div>
         </div>
 
@@ -2357,15 +2357,15 @@
 
   <!-- Modular Application Scripts -->
   <script src="js/state.js?v=20261117g"></script>
-  <script src="js/overview-lan.js?v=20261117d"></script>
+  <script src="js/overview-lan.js?v=20261118b"></script>
   <script src="js/alerts-router.js?v=20261117e"></script>
   <script src="js/isp-speedtest.js?v=20261117i"></script>
   <script src="js/charts-timeline.js?v=20261117g"></script>
   <script src="js/nmap-scanner.js?v=20261117a"></script>
   <script src="js/topology.js?v=20261117a"></script>
-  <script src="js/game-detector.js?v=20261118a"></script>
+  <script src="js/game-detector.js?v=20261118b"></script>
   <script src="js/modals-tools.js?v=20261117f"></script>
-  <script src="js/app.js?v=20261118a"></script>
+  <script src="js/app.js?v=20261118b"></script>
 </body>
 </html>
 

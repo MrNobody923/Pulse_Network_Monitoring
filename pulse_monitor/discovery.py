@@ -351,7 +351,7 @@ class DiscoveryMixin:
                 alive, _ = self._win32_icmp_echo(host, timeout_ms=420)
                 return host if alive else None
 
-            with ThreadPoolExecutor(max_workers=32) as pool:
+            with ThreadPoolExecutor(max_workers=16) as pool:
                 return [h for h in pool.map(ping_win32, hosts) if h is not None]
 
         def ping(host: str) -> str | None:
@@ -519,20 +519,23 @@ class DiscoveryMixin:
             all_fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
             all_hosts = self._get_cached_hostnames()
 
-            # Actively resolve hostnames (NetBIOS, mDNS, LLMNR, Gateway PTR) & TLS/HTTP/Deco/SNMP fingerprints
+            # Actively resolve hostnames (NetBIOS, mDNS, LLMNR, Gateway PTR) & TLS/HTTP/Deco/SNMP fingerprints for uncached IPs
             if cand_ips and not is_mocked_subproc:
-                resolved_hosts = self._resolve_hostnames_bulk(cand_ips)
-                if resolved_hosts:
-                    all_hosts.update(resolved_hosts)
+                unknown_host_ips = [ip_c for ip_c in cand_ips if ip_c not in all_hosts][:24]
+                if unknown_host_ips:
+                    resolved_hosts = self._resolve_hostnames_bulk(unknown_host_ips)
+                    if resolved_hosts:
+                        all_hosts.update(resolved_hosts)
 
                 mac_by_ip = {item["ip"]: item["mac"] for item in discovered}
-                if hasattr(self, "identify_network_device"):
+                unknown_fp_ips = [ip_c for ip_c in cand_ips if ip_c not in all_fps][:16]
+                if unknown_fp_ips and hasattr(self, "identify_network_device"):
                     fp_updates: dict[str, dict] = {}
 
                     def _fp_scan(target_ip: str) -> tuple[str, dict | None]:
                         open_p: list[int] = []
                         for p in (80, 443, 8080, 20001, 22):
-                            is_open, _, _ = self._probe_tcp_socket(target_ip, p, timeout=0.3)
+                            is_open, _, _ = self._probe_tcp_socket(target_ip, p, timeout=0.25)
                             if is_open:
                                 open_p.append(p)
                         if not open_p:
@@ -542,8 +545,8 @@ class DiscoveryMixin:
                             res_fp["mac"] = mac_by_ip[target_ip]
                         return target_ip, res_fp
 
-                    with ThreadPoolExecutor(max_workers=min(24, len(cand_ips))) as fp_pool:
-                        for ip_key, fp_res in fp_pool.map(_fp_scan, cand_ips):
+                    with ThreadPoolExecutor(max_workers=min(6, len(unknown_fp_ips))) as fp_pool:
+                        for ip_key, fp_res in fp_pool.map(_fp_scan, unknown_fp_ips):
                             if fp_res and (fp_res.get("model") or fp_res.get("vendor") or fp_res.get("role") or fp_res.get("snmp")):
                                 fp_updates[ip_key] = fp_res
                     if fp_updates:

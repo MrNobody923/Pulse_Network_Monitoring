@@ -25,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pulse_monitor.config import DATA_DIR, utc_now
 from pulse_monitor.game_detector import (
     GameDetectorMixin,
-    SCAN_GAME_PORTS,
     _NETSTAT_GAME_PORTS,
     _PASSIVE_DNS_CACHE_EXCLUDE,
 )
@@ -394,13 +393,17 @@ class HostGameSensor:
         ips = [
             str(d.get("ip") or "").strip()
             for d in devices
-            if isinstance(d, dict) and str(d.get("ip") or "").strip()
+            if isinstance(d, dict)
+            and str(d.get("ip") or "").strip()
+            and not bool(d.get("isMobile"))
         ]
         if not ips:
             return
 
         now = time.monotonic()
-        hits = GameDetectorMixin._batch_scan_ports_nonblocking(ips, SCAN_GAME_PORTS, timeout_sec=0.14)
+        # Ghost Mode: only probe local LAN listening game ports (Steam 27036/27015, Minecraft 19132/25565) on PCs
+        lan_listen_ports = (27036, 27015, 19132, 25565)
+        hits = GameDetectorMixin._batch_scan_ports_nonblocking(ips[:80], lan_listen_ports, timeout_sec=0.12)
         seen_now: dict[tuple[str, str], int] = {}
         for ip_key, open_port in hits.items():
             sig = GameDetectorMixin._match_game_signature(port=open_port)
@@ -510,30 +513,36 @@ class HostGameSensor:
             except Exception:
                 pass
 
-        # Concurrent TCP RST burst on blocked/throttled client IPs to degrade or drop active sockets
-        broad_ports = tuple(dict.fromkeys([*SCAN_GAME_PORTS, 80, 443, 8080, 8443, 3074, 3478, 5222, 5228, 9000]))
+        # Ghost Mode: only send TCP RST burst when a blocked client IP had recent game activity (never flood idle IPs)
+        now_rst = time.monotonic()
+        with self._lock:
+            recent_active_ips = {
+                ip_k
+                for (ip_k, _gid), ts in self._recent_dns_game_hits.items()
+                if (now_rst - ts) <= 45.0
+            } | {
+                ip_k
+                for (ip_k, _gid), ts in self._active_lan_port_hits.items()
+                if (now_rst - ts) <= 45.0
+            }
         ports_by_ip: dict[str, tuple[int, ...]] = {}
         for rule in blocks:
             target_ip = str(rule.get("ip") or "").strip()
-            if not target_ip or target_ip in ("*", self.dns_host):
+            if not target_ip or target_ip in ("*", self.dns_host) or target_ip not in recent_active_ips:
                 continue
-            r_scope = str(rule.get("scope") or "").lower()
-            use_broad = r_scope in {"device_throttle", "device_wifi_cut", "device_all_games"}
-            if target_ip not in ports_by_ip or use_broad:
-                ports_by_ip[target_ip] = broad_ports if use_broad else SCAN_GAME_PORTS
+            ports_by_ip[target_ip] = (27036, 27015, 19132, 25565)
         if ports_by_ip:
-            now_rst = time.monotonic()
             for dead_ip in [k for k in self._last_rst_burst if k not in ports_by_ip]:
                 self._last_rst_burst.pop(dead_ip, None)
             due_items = [
                 (ip_k, plist)
                 for ip_k, plist in ports_by_ip.items()
-                if (now_rst - self._last_rst_burst.get(ip_k, 0.0)) >= 4.0
+                if (now_rst - self._last_rst_burst.get(ip_k, 0.0)) >= 15.0
             ]
             if due_items:
                 for ip_k, _ in due_items:
                     self._last_rst_burst[ip_k] = now_rst
-                with ThreadPoolExecutor(max_workers=min(8, len(due_items))) as pool:
+                with ThreadPoolExecutor(max_workers=min(4, len(due_items))) as pool:
                     list(pool.map(self._rst_client_ports, due_items))
 
     def _scan_host_netstat_ports(self) -> None:
@@ -600,7 +609,7 @@ class HostGameSensor:
                 self._scan_host_dns_cache()
                 self._scan_host_netstat_ports()
                 now = time.monotonic()
-                if (now - last_lan_sweep) >= 45.0:
+                if (now - last_lan_sweep) >= 90.0:
                     last_lan_sweep = now
                     self._sweep_lan_game_ports()
             except Exception as exc:

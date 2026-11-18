@@ -658,13 +658,16 @@ class ProbesMixin:
         best_latency: float | None = None
         probe_method = "No Response (TCP + ICMP Timeout)"
 
-        for p in candidate_ports:
-            is_open, is_rst_alive, lat = self._probe_tcp_socket(ip, p, timeout=0.65)
+        for idx, p in enumerate(candidate_ports):
+            is_open, is_rst_alive, lat = self._probe_tcp_socket(ip, p, timeout=0.55)
             if is_open:
                 open_ports.append(p)
                 tcp_alive = True
                 if best_latency is None or (lat is not None and lat < best_latency):
                     best_latency = lat
+                if idx == 0:
+                    # Ghost Mode: primary port responded immediately; skip unnecessary fallback port probes
+                    break
             elif is_rst_alive:
                 tcp_alive = True
                 if best_latency is None and lat is not None:
@@ -686,7 +689,18 @@ class ProbesMixin:
         dev_mac = str(device.get("mac") or "").lower()
         mac_mismatch = bool(dev_mac and cached_fp.get("mac") and cached_fp.get("mac") != dev_mac)
         hw_model = "" if mac_mismatch else (device.get("hardwareModel") or cached_fp.get("model") or "")
-        if alive and open_ports and (not hw_model or mac_mismatch) and dev_type in {"gateway", "router", "ap", "switch"}:
+        fp_attempted: set[str] = getattr(self, "_fp_attempted_ips", set())
+        if not hasattr(self, "_fp_attempted_ips"):
+            self._fp_attempted_ips = fp_attempted
+        in_test = getattr(self, "_skip_live_probe_in_test", False)
+        if (
+            alive
+            and open_ports
+            and (not hw_model or mac_mismatch)
+            and (in_test or mac_mismatch or ip not in fp_attempted)
+            and dev_type in {"gateway", "router", "ap", "switch"}
+        ):
+            fp_attempted.add(ip)
             fp = self.identify_network_device(ip, open_ports=open_ports)
             if dev_mac:
                 fp["mac"] = dev_mac
@@ -933,10 +947,14 @@ class ProbesMixin:
         use_https = bool(cfg.get("useHttps", False))
         scheme = "https" if use_https or port in (443, 8443) else "http"
 
-        _, tcp_alive, tcp_ms = self._probe_tcp_socket(host, port, 1.0)
+        _, tcp_alive, tcp_ms = self._probe_tcp_socket(host, port, 0.85)
         alt_port = 443 if port != 443 else 80
-        alt_open, alt_alive, alt_ms = self._probe_tcp_socket(host, alt_port, 0.8)
-        icmp_alive, icmp_ms = self._probe_icmp(host, timeout_ms=900)
+        prev_open = (previous_state or {}).get("openPorts") or []
+        if not tcp_alive or alt_port in prev_open:
+            alt_open, alt_alive, alt_ms = self._probe_tcp_socket(host, alt_port, 0.65)
+        else:
+            alt_open, alt_alive, alt_ms = False, False, None
+        icmp_alive, icmp_ms = self._probe_icmp(host, timeout_ms=800)
         alive = bool(tcp_alive or alt_alive or icmp_alive)
         latency_ms = (
             icmp_ms
@@ -975,10 +993,30 @@ class ProbesMixin:
         elif not is_primary:
             state["model"] = str(cfg.get("name") or f"Router ({host})")
 
-        # Query public hardware identity endpoint & lightweight SNMP whenever router responds
+        # Ghost Mode: reuse cached hardware identity & SNMP unless stale (>30m) or unprobed
         admin_port = port if tcp_alive else (alt_port if alt_open else port)
         admin_scheme = "https" if use_https or admin_port in (443, 8443) else "http"
-        if alive and open_ports:
+        hw_ts_map: dict[str, float] = getattr(self, "_router_hw_ts", {})
+        if not hasattr(self, "_router_hw_ts"):
+            self._router_hw_ts = hw_ts_map
+        now_m = time.monotonic()
+        prev_model = str((previous_state or {}).get("model") or "")
+        has_prev_hw = bool(
+            previous_state
+            and prev_model
+            and not prev_model.startswith("Router (")
+            and prev_model != "TP-Link Router"
+            and (now_m - hw_ts_map.get(host, 0.0)) < 1800.0
+        )
+        if has_prev_hw and previous_state:
+            state["model"] = prev_model
+            state["vendor"] = str(previous_state.get("vendor") or state["vendor"])
+            state["protocol"] = str(previous_state.get("protocol") or admin_scheme)
+            if previous_state.get("snmp"):
+                state["snmp"] = dict(previous_state["snmp"])
+                state["telemetryAvailable"] = True
+        elif alive and open_ports:
+            hw_ts_map[host] = now_m
             locale_payload = self._luci_post(
                 host, admin_port, admin_scheme, "/cgi-bin/luci/;stok=/locale?form=lang", timeout=1.1
             )
@@ -1006,7 +1044,6 @@ class ProbesMixin:
                     state["model"] = "TP-Link Deco Mesh System"
                     state["vendor"] = "TP-Link"
 
-        if alive and open_ports:
             snmp_data = self._snmp_get_oids(
                 host,
                 {
@@ -1232,11 +1269,12 @@ class ProbesMixin:
             t_host = router_ip if target["id"] == "gateway" else target["host"]
             t_ip = router_ip if target["id"] == "gateway" else target["ip"]
             t_port = router_port if target["id"] == "gateway" else target["port"]
-            with ThreadPoolExecutor(max_workers=2) as pair_pool:
-                icmp_fut = pair_pool.submit(self._probe_icmp, t_host, 900)
-                tcp_fut = pair_pool.submit(self._probe_tcp_socket, t_host, t_port, 1.2)
-                icmp_ok, icmp_ms = icmp_fut.result()
-                _, tcp_alive, tcp_ms = tcp_fut.result()
+            # Ghost Mode: prefer single lightweight ICMP echo; only open TCP socket if ICMP fails
+            icmp_ok, icmp_ms = self._probe_icmp(t_host, 850)
+            if icmp_ok and icmp_ms is not None:
+                tcp_alive, tcp_ms = False, None
+            else:
+                _, tcp_alive, tcp_ms = self._probe_tcp_socket(t_host, t_port, 1.0)
             alive = icmp_ok or tcp_alive
             if icmp_ok and icmp_ms is not None:
                 latency = icmp_ms

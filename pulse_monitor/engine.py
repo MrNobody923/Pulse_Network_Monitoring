@@ -277,14 +277,17 @@ class Monitor(
         while not self._stop.is_set():
             started = time.monotonic()
             try:
-                router = self.probe_router()
                 isp = self.probe_isp()
-                self.broadcast("router_update", {**router, "fleet": self.get_router_fleet()})
+                gw_lat = isp.get("wanGatewayLatencyMs")
+                if gw_lat is not None and self.router_state:
+                    with self.lock:
+                        self.router_state["latencyMs"] = gw_lat
+                        self.router_state["reachable"] = True
                 self.broadcast("isp_update", isp)
             except Exception as exc:
                 print(f"[monitor] Router/ISP probe failed: {exc}", flush=True)
             try:
-                interval = max(5, min(60, int(self.config.get("isp", {}).get("pollIntervalSec", 5))))
+                interval = max(8, min(60, int(self.config.get("isp", {}).get("pollIntervalSec", 10))))
             except (TypeError, ValueError):
                 interval = 10
             self._stop.wait(max(1.0, interval - (time.monotonic() - started)))
@@ -302,7 +305,7 @@ class Monitor(
             except Exception as exc:
                 print(f"[monitor] Multi-router fleet probe warning: {exc}", flush=True)
                 fleet = self.get_router_fleet()
-            if (cycle_started - last_arp_sync) >= 45 and hasattr(self, "refresh_live_arp_and_infra"):
+            if (cycle_started - last_arp_sync) >= 30 and hasattr(self, "refresh_live_arp_and_infra"):
                 last_arp_sync = cycle_started
                 try:
                     self.refresh_live_arp_and_infra()
@@ -310,7 +313,8 @@ class Monitor(
                     print(f"[monitor] Live ARP sync warning: {exc}", flush=True)
             try:
                 self.expire_stale_game_sessions()
-                if (cycle_started - last_game_scan) >= 60:
+                sensor_online = bool(self._get_gaming_sensor_status().get("sensorOnline"))
+                if not sensor_online and (cycle_started - last_game_scan) >= 180:
                     last_game_scan = cycle_started
                     self.scan_lan_for_games()
             except Exception as exc:
@@ -336,11 +340,10 @@ class Monitor(
             )
             full_sweep_due = (
                 self._daily_discovery_due()
-                or last_scan_attempt is None
-                or (cycle_started - last_scan_attempt >= 600)
+                or (last_scan_attempt is None and not self.get_inventory())
             )
             if full_sweep_due and (
-                last_scan_attempt is None or cycle_started - last_scan_attempt >= 120
+                last_scan_attempt is None or cycle_started - last_scan_attempt >= 300
             ):
                 last_scan_attempt = cycle_started
                 try:

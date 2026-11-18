@@ -2,18 +2,18 @@
 
 :root,
 [data-theme="dark"] {
-  --bg-body: #080f1c;
-  --bg-card: #0e1726;
-  --bg-card-hover: #142034;
-  --box-inner-bg: #111c2e;
-  --chip-bg: #182740;
-  --table-head-bg: #121f33;
+  --bg-body: #070d18;
+  --bg-card: #0c1423;
+  --bg-card-hover: #111c30;
+  --box-inner-bg: #0f192b;
+  --chip-bg: #15233b;
+  --table-head-bg: #101b2e;
   --table-head-text: #cbd5e1;
-  --border-subtle: rgba(148, 163, 184, 0.14);
-  --border-highlight: rgba(14, 165, 233, 0.52);
+  --border-subtle: rgba(148, 163, 184, 0.11);
+  --border-highlight: rgba(56, 189, 248, 0.45);
   --text-main: #f1f5f9;
   --text-muted: #cbd5e1;
-  --text-dim: #8a9bb5;
+  --text-dim: #8496b0;
   /* Enterprise Network Monitor Palette (Color-Blind Safe & Eye-Comfortable) */
   --accent-cyan: #00bceb;
   --accent-blue: #049fd9;
@@ -21,24 +21,24 @@
   --accent-amber: #f59e0b;
   --accent-red: #f43f5e;
   --accent-purple: #8b5cf6;
-  --status-up-bg: rgba(20, 184, 166, 0.13);
-  --status-up-border: rgba(20, 184, 166, 0.36);
+  --status-up-bg: rgba(20, 184, 166, 0.11);
+  --status-up-border: rgba(20, 184, 166, 0.3);
   --status-up-text: #2dd4bf;
-  --status-warn-bg: rgba(245, 158, 11, 0.13);
-  --status-warn-border: rgba(245, 158, 11, 0.4);
+  --status-warn-bg: rgba(245, 158, 11, 0.11);
+  --status-warn-border: rgba(245, 158, 11, 0.34);
   --status-warn-text: #fbbf24;
-  --status-down-bg: rgba(244, 63, 94, 0.14);
-  --status-down-border: rgba(244, 63, 94, 0.42);
+  --status-down-bg: rgba(244, 63, 94, 0.12);
+  --status-down-border: rgba(244, 63, 94, 0.36);
   --status-down-text: #fda4af;
-  --status-info-bg: rgba(0, 188, 235, 0.12);
-  --status-info-border: rgba(0, 188, 235, 0.34);
+  --status-info-bg: rgba(0, 188, 235, 0.1);
+  --status-info-border: rgba(0, 188, 235, 0.28);
   --status-info-text: #38bdf8;
-  --row-down-bg: rgba(244, 63, 94, 0.08);
-  --row-warn-bg: rgba(245, 158, 11, 0.07);
+  --row-down-bg: rgba(244, 63, 94, 0.06);
+  --row-warn-bg: rgba(245, 158, 11, 0.05);
   --radius-sm: 8px;
-  --radius-md: 10px;
+  --radius-md: 11px;
   --radius-lg: 14px;
-  --shadow-card: 0 4px 20px rgba(2, 6, 23, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --shadow-card: 0 6px 24px rgba(2, 6, 23, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 [data-theme="light"] {
@@ -680,7 +680,7 @@ code, pre, .mono {
 .status-pill.warning {
   background: var(--status-warn-bg);
   color: var(--status-warn-text);
-  border: 1.5px dashed var(--status-warn-border);
+  border: 1px solid var(--status-warn-border);
 }
 
 .status-pill.new {

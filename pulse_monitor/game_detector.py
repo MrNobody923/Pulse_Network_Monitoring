@@ -64,7 +64,7 @@ GAME_SIGNATURES: list[dict] = [
             "viztagame",
             "orientalgame",
         ),
-        "ports": (5000, 5001, 5500, 5508, 5551, 9000, 30000, 30090, 30091),
+        "ports": (5508, 5551, 30090, 30091),
         "processes": (),
     },
     {
@@ -363,7 +363,7 @@ _PASSIVE_DNS_CACHE_EXCLUDE = frozenset({
     "api.steampowered.com",
 })
 _NETSTAT_GAME_PORTS = frozenset({
-    5000, 5001, 5500, 5508, 5551, 9000, 30000, 30090, 30091, 7500, 7501, 10012,
+    5508, 5551, 30090, 30091, 7500, 7501, 10012,
     17500, 20001, 10010, 10011, 22101, 22102, 39698, 39800,
     9339, 3659, 17502, 8433, 22023, 8393, 8394, 5795, 5800,
     19132, 25565, 27015, 27036,
@@ -518,6 +518,11 @@ class GameDetectorMixin:
 
     @staticmethod
     def _detect_host_lan_ip(fallback: str = "192.168.0.224", gateway_ip: str = "192.168.0.1") -> str:
+        now = time.monotonic()
+        cached = getattr(GameDetectorMixin, "_cached_host_ip_val", None)
+        cached_ts = getattr(GameDetectorMixin, "_cached_host_ip_ts", 0.0)
+        if cached and (now - cached_ts) < 25.0:
+            return cached
         for probe_ip in (gateway_ip or "192.168.0.1", "1.1.1.1"):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -525,6 +530,8 @@ class GameDetectorMixin:
                     s.connect((probe_ip, 80))
                     ip = s.getsockname()[0]
                     if ip and not ip.startswith(("127.", "169.254.")):
+                        GameDetectorMixin._cached_host_ip_val = ip
+                        GameDetectorMixin._cached_host_ip_ts = now
                         return ip
             except OSError:
                 continue
@@ -534,6 +541,11 @@ class GameDetectorMixin:
     def _detect_local_dhcp_dns() -> list[str]:
         if os.name != "nt":
             return []
+        now = time.monotonic()
+        cached = getattr(GameDetectorMixin, "_cached_dhcp_dns_val", None)
+        cached_ts = getattr(GameDetectorMixin, "_cached_dhcp_dns_ts", 0.0)
+        if cached is not None and (now - cached_ts) < 30.0:
+            return list(cached)
         servers: list[str] = []
         seen: set[str] = set()
         key_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
@@ -578,6 +590,8 @@ class GameDetectorMixin:
                                     continue
         except OSError:
             pass
+        GameDetectorMixin._cached_dhcp_dns_val = list(servers)
+        GameDetectorMixin._cached_dhcp_dns_ts = now
         return servers
 
     def record_gaming_sensor_heartbeat(self, payload: dict) -> dict:
@@ -2255,8 +2269,10 @@ class GameDetectorMixin:
         """Connect-scan (ip x ports) rapidly using non-blocking selectors batches (<=256 fds/batch for Windows)."""
         open_by_ip: dict[str, int] = {}
         targets = [(ip, int(p)) for ip in client_ips for p in ports]
-        batch_size = 220
+        batch_size = 24
         for offset in range(0, len(targets), batch_size):
+            if offset > 0:
+                time.sleep(0.012)
             batch = targets[offset : offset + batch_size]
             sel = selectors.DefaultSelector()
             pending: dict[socket.socket, tuple[str, int]] = {}
