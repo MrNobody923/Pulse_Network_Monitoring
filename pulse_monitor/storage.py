@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from typing import TYPE_CHECKING, cast
@@ -104,6 +104,13 @@ class StorageMixin:
                 CREATE TABLE IF NOT EXISTS device_archives (
                     asset_key TEXT PRIMARY KEY,
                     archived_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS device_profiles (
+                    mac TEXT PRIMARY KEY,
+                    custom_name TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS network_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -391,6 +398,7 @@ class StorageMixin:
     def sync_infrastructure_devices(self) -> dict:
         """Auto-enroll real discovered Routers, Access Points, Switches, and Gateways from LAN inventory."""
         self = cast("Monitor", self)
+        self.deduplicate_inventory_ips()
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM discovered_devices ORDER BY ip ASC"
@@ -411,6 +419,7 @@ class StorageMixin:
 
         discovered_ips = {row["ip"] for row in rows}
         db_by_mac = {str(row["mac"] or "").lower(): row for row in rows}
+        device_profiles = self.get_device_profiles()
         newest_by_ip: dict[str, sqlite3.Row] = {}
         for r_item in sorted(
             rows,
@@ -449,6 +458,9 @@ class StorageMixin:
                 fp = {}
                 fp_role = fp_vendor = fp_model = ""
             if fp_role in {"server", "client", "iot"}:
+                continue
+            prof_role = str((device_profiles.get(mac) or {}).get("role") or "").lower()
+            if prof_role in self._NON_INFRA_PROFILE_ROLES:
                 continue
 
             octets = ip.split(".")
@@ -1003,16 +1015,27 @@ class StorageMixin:
         }
         favorites = self._favorite_keys()
         archived = self._archived_keys()
+        profiles = self.get_device_profiles()
+        ap_assoc = self.get_ap_client_associations()
         dt_cls = runtime_attr("datetime", datetime)
         today = dt_cls.now().astimezone().date().isoformat()
-        return [
-            {
+        out = []
+        for row in rows:
+            mac_l = str(row["mac"] or "").lower()
+            prof = profiles.get(mac_l) or {}
+            assoc = ap_assoc.get(mac_l) or None
+            display_name = prof.get("customName") or row["suggested_name"]
+            out.append({
                 "mac": row["mac"],
                 "observedMac": observed_inventory_mac(row["mac"], row["ip"]) if row["arp_type"] != "icmp" else "",
                 "ip": row["ip"],
                 "vendor": row["vendor"],
-                "name": row["suggested_name"],
+                "name": display_name,
                 "suggestedName": row["suggested_name"],
+                "customName": prof.get("customName", ""),
+                "role": prof.get("role", ""),
+                "notes": prof.get("notes", ""),
+                "apAssociation": assoc,
                 "arpType": row["arp_type"],
                 "firstSeen": row["first_seen"],
                 "lastSeen": row["last_seen"],
@@ -1034,9 +1057,390 @@ class StorageMixin:
                     or f"ip:{row['ip']}" in archived
                 ),
                 "isNew": row["first_seen"][:10] == today,
+            })
+        return out
+
+    _ALLOWED_PROFILE_ROLES = frozenset({
+        "", "infrastructure", "router", "ap", "switch", "server",
+        "staff_pc", "mobile", "iot", "guest", "printer", "gateway",
+    })
+    _NON_INFRA_PROFILE_ROLES = frozenset({"staff_pc", "mobile", "iot", "guest", "printer"})
+
+    def get_device_profiles(self) -> dict[str, dict]:
+        try:
+            with self._connect() as db:
+                rows = db.execute("SELECT * FROM device_profiles").fetchall()
+            return {
+                str(r["mac"]).lower(): {
+                    "mac": str(r["mac"]).lower(),
+                    "customName": str(r["custom_name"] or ""),
+                    "role": str(r["role"] or ""),
+                    "notes": str(r["notes"] or ""),
+                    "updatedAt": str(r["updated_at"] or ""),
+                }
+                for r in rows
             }
-            for row in rows
-        ]
+        except Exception:
+            return {}
+
+    def set_device_profile(self, mac: str, payload: dict) -> dict:
+        clean_mac = self._normalize_mac(mac)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid device profile payload")
+        role = str(payload.get("role") or "").strip().lower()
+        if role not in self._ALLOWED_PROFILE_ROLES:
+            raise ValueError(f"Unsupported device role: {role}")
+        custom_name = str(payload.get("customName") or "").strip()[:120]
+        notes = str(payload.get("notes") or "").strip()[:240]
+        now = utc_now()
+        with self._connect() as db:
+            if not role and not custom_name and not notes:
+                db.execute("DELETE FROM device_profiles WHERE mac=?", (clean_mac,))
+            else:
+                db.execute(
+                    """INSERT OR REPLACE INTO device_profiles (mac, custom_name, role, notes, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (clean_mac, custom_name, role, notes, now),
+                )
+        return {
+            "success": True,
+            "profile": {
+                "mac": clean_mac,
+                "customName": custom_name,
+                "role": role,
+                "notes": notes,
+                "updatedAt": now,
+            },
+        }
+
+    def get_ap_client_associations(self) -> dict[str, dict]:
+        try:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT value FROM monitor_metadata WHERE key='ap_client_map'"
+                ).fetchone()
+            if row and row["value"]:
+                parsed = json.loads(row["value"])
+                return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        return {}
+
+    def save_ap_client_associations(self, updates: dict[str, dict]) -> None:
+        if not updates:
+            return
+        try:
+            current = self.get_ap_client_associations()
+            for mac_k, info in updates.items():
+                if mac_k and isinstance(info, dict):
+                    current[str(mac_k).lower()] = info
+            if len(current) > 1024:
+                items = sorted(current.items(), key=lambda kv: str(kv[1].get("updatedAt") or ""), reverse=True)[:1024]
+                current = dict(items)
+            with self._connect() as db:
+                db.execute(
+                    "INSERT OR REPLACE INTO monitor_metadata (key, value) VALUES ('ap_client_map', ?)",
+                    (json.dumps(current),),
+                )
+        except Exception:
+            pass
+
+    def deduplicate_inventory_ips(self) -> dict:
+        """Clean up duplicate online IPs and remove stale 02:00: inferred MAC rows superseded by real MACs."""
+        removed_inferred = 0
+        demoted_stale = 0
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT mac, ip, is_online, last_seen, first_seen, authorized FROM discovered_devices ORDER BY last_seen DESC"
+            ).fetchall()
+            by_ip: dict[str, list] = {}
+            for r in rows:
+                by_ip.setdefault(str(r["ip"]), []).append(r)
+            for ip_s, group in by_ip.items():
+                try:
+                    inferred_key = inferred_inventory_mac(ip_s)
+                except ValueError:
+                    inferred_key = ""
+                real_rows = [r for r in group if str(r["mac"]).lower() != inferred_key]
+                inferred_rows = [r for r in group if str(r["mac"]).lower() == inferred_key]
+                if real_rows and inferred_rows:
+                    keeper_mac = str(real_rows[0]["mac"]).lower()
+                    for inf in inferred_rows:
+                        inf_mac = str(inf["mac"]).lower()
+                        db.execute(
+                            "UPDATE OR IGNORE device_favorites SET asset_key=? WHERE asset_key=?",
+                            (f"mac:{keeper_mac}", f"mac:{inf_mac}"),
+                        )
+                        db.execute("DELETE FROM device_favorites WHERE asset_key=?", (f"mac:{inf_mac}",))
+                        db.execute("DELETE FROM discovered_devices WHERE mac=?", (inf["mac"],))
+                        removed_inferred += 1
+                online_rows = [r for r in real_rows if r["is_online"]]
+                if len(online_rows) > 1:
+                    for stale in online_rows[1:]:
+                        db.execute(
+                            "UPDATE discovered_devices SET is_online=0 WHERE mac=?",
+                            (stale["mac"],),
+                        )
+                        demoted_stale += 1
+        return {"removedInferred": removed_inferred, "demotedStale": demoted_stale}
+
+    @staticmethod
+    def _classify_history_category(event_type: str, source: str = "event") -> str:
+        if source in {"alert", "notification"}:
+            return "alerts"
+        t = str(event_type or "").upper()
+        if t.startswith("GAME_") or "GAMING" in t:
+            return "gaming"
+        if any(tok in t for tok in ("OFFLINE", "DOWN", "OUTAGE", "ALERT", "DUPLEX", "LOSS", "LATENCY", "DEGRADED", "ONLINE", "RECOVER")):
+            return "alerts"
+        if any(tok in t for tok in ("DEVICE_", "NEW_DEVICE", "IP_CHANGED", "ROUTER_", "PORT_SCAN", "AP_", "PROFILE")):
+            return "devices"
+        return "system"
+
+    def get_history_logs(
+        self,
+        *,
+        category: str = "all",
+        severity: str = "all",
+        days: int = 0,
+        search: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Query unified persistent history logs across network_events, alerts, and incident notifications."""
+        cat_filter = str(category or "all").strip().lower()
+        sev_filter = str(severity or "all").strip().upper()
+        q = str(search or "").strip().lower()
+        limit = max(1, min(int(limit or 50), 500))
+        offset = max(0, int(offset or 0))
+        cutoff_iso = ""
+        try:
+            days_i = int(days or 0)
+            if days_i > 0:
+                cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=days_i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            cutoff_iso = ""
+
+        entries: list[dict] = []
+        with self._connect() as db:
+            ev_rows = db.execute(
+                "SELECT id, timestamp, event_type, severity, title, message, mac, ip, device_name FROM network_events ORDER BY timestamp DESC, id DESC LIMIT 1500"
+            ).fetchall()
+            for r in ev_rows:
+                ts = str(r["timestamp"] or "")
+                if cutoff_iso and ts < cutoff_iso:
+                    continue
+                ev_type = str(r["event_type"] or "EVENT")
+                sev = str(r["severity"] or "INFO").upper()
+                entries.append({
+                    "id": f"ev-{r['id']}",
+                    "timestamp": ts,
+                    "source": "event",
+                    "category": self._classify_history_category(ev_type, "event"),
+                    "eventType": ev_type,
+                    "severity": sev,
+                    "title": str(r["title"] or ""),
+                    "message": str(r["message"] or ""),
+                    "ip": str(r["ip"] or ""),
+                    "mac": str(r["mac"] or ""),
+                    "deviceName": str(r["device_name"] or ""),
+                })
+            try:
+                al_rows = db.execute(
+                    "SELECT id, alert_key, type, severity, status, title, message, ip, device_name, first_seen, resolved_at, last_seen FROM alerts ORDER BY last_seen DESC LIMIT 500"
+                ).fetchall()
+                for r in al_rows:
+                    ts = str(r["resolved_at"] or r["first_seen"] or r["last_seen"] or "")
+                    if cutoff_iso and ts < cutoff_iso:
+                        continue
+                    status_s = str(r["status"] or "ACTIVE").upper()
+                    sev = "INFO" if status_s == "RESOLVED" else str(r["severity"] or "WARNING").upper()
+                    entries.append({
+                        "id": f"al-{r['id']}",
+                        "timestamp": ts,
+                        "source": "alert",
+                        "category": "alerts",
+                        "eventType": str(r["type"] or f"ALERT_{status_s}"),
+                        "severity": sev,
+                        "title": f"[{status_s}] {r['title'] or ''}".strip(),
+                        "message": str(r["message"] or ""),
+                        "ip": str(r["ip"] or ""),
+                        "mac": "",
+                        "deviceName": str(r["device_name"] or ""),
+                    })
+            except sqlite3.OperationalError:
+                pass
+            try:
+                nt_rows = db.execute(
+                    "SELECT id, created_at, kind, title, message, ip, delivery FROM incident_notifications ORDER BY created_at DESC LIMIT 300"
+                ).fetchall()
+                for r in nt_rows:
+                    ts = str(r["created_at"] or "")
+                    if cutoff_iso and ts < cutoff_iso:
+                        continue
+                    delivery = str(r["delivery"] or "in_app")
+                    sev = "WARNING" if delivery == "failed" else "INFO"
+                    entries.append({
+                        "id": f"nt-{r['id']}",
+                        "timestamp": ts,
+                        "source": "notification",
+                        "category": "alerts",
+                        "eventType": f"NOTIFY_{str(r['kind'] or 'OUTAGE').upper()}",
+                        "severity": sev,
+                        "title": str(r["title"] or ""),
+                        "message": f"{r['message'] or ''} (Delivery: {delivery})".strip(),
+                        "ip": str(r["ip"] or ""),
+                        "mac": "",
+                        "deviceName": "",
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+            # 4. Detailed detected game activity logs
+            try:
+                gm_rows = db.execute(
+                    """SELECT id, timestamp, ip, player, mac, device_name, vendor, device_type,
+                              game_id, game_name, game_category, game_icon, connected_to,
+                              router_ip, zone_label, matched_indicator, detection_method,
+                              is_active, is_dismissed, is_blocked
+                       FROM game_activity_logs
+                       ORDER BY timestamp DESC LIMIT 500"""
+                ).fetchall()
+                for r in gm_rows:
+                    ts = str(r["timestamp"] or "")
+                    if cutoff_iso and ts < cutoff_iso:
+                        continue
+                    is_blocked = bool(r["is_blocked"])
+                    is_active = bool(r["is_active"])
+                    is_dismissed = bool(r["is_dismissed"])
+                    status_tag = (
+                        "BLOCKED" if is_blocked
+                        else ("ACTIVE" if is_active else ("DISMISSED" if is_dismissed else "ENDED"))
+                    )
+                    sev = "CRITICAL" if is_blocked else ("WARNING" if is_active else "INFO")
+                    icon = str(r["game_icon"] or "🎮")
+                    game_name = str(r["game_name"] or r["game_id"] or "Unknown Game")
+                    game_cat = str(r["game_category"] or "").strip()
+                    method = str(r["detection_method"] or "Live Detection").strip()
+                    indicator = str(r["matched_indicator"] or "").strip()
+                    player = str(r["player"] or "").strip()
+                    vendor = str(r["vendor"] or "").strip()
+                    dev_type = str(r["device_type"] or "").strip()
+                    connected_to = str(r["connected_to"] or "").strip()
+                    router_ip = str(r["router_ip"] or "").strip()
+                    zone = str(r["zone_label"] or "").strip()
+
+                    detail_parts: list[str] = [f"Method: {method}"]
+                    if indicator:
+                        detail_parts.append(f"Indicator: {indicator}")
+                    if player:
+                        detail_parts.append(f"Player: {player}")
+                    if vendor or dev_type:
+                        v_str = " / ".join(x for x in (vendor, dev_type) if x)
+                        detail_parts.append(f"Hardware: {v_str}")
+                    if connected_to or router_ip:
+                        ap_str = connected_to or router_ip
+                        if connected_to and router_ip and router_ip not in connected_to:
+                            ap_str = f"{connected_to} ({router_ip})"
+                        detail_parts.append(f"Connected via: {ap_str}")
+                    if zone:
+                        detail_parts.append(f"Zone: {zone}")
+
+                    title_cat = f" ({game_cat})" if game_cat else ""
+                    entries.append({
+                        "id": f"gm-{r['id']}",
+                        "timestamp": ts,
+                        "source": "game",
+                        "category": "gaming",
+                        "eventType": "GAME_BLOCKED" if is_blocked else "GAME_DETECTED",
+                        "severity": sev,
+                        "title": f"{icon} {game_name}{title_cat} — [{status_tag}]",
+                        "message": " · ".join(detail_parts),
+                        "ip": str(r["ip"] or ""),
+                        "mac": str(r["mac"] or ""),
+                        "deviceName": str(r["device_name"] or ""),
+                        "gameDetails": {
+                            "gameId": str(r["game_id"] or ""),
+                            "gameName": game_name,
+                            "gameCategory": game_cat,
+                            "gameIcon": icon,
+                            "status": status_tag,
+                            "detectionMethod": method,
+                            "matchedIndicator": indicator,
+                            "player": player,
+                            "vendor": vendor,
+                            "deviceType": dev_type,
+                            "connectedTo": connected_to,
+                            "routerIp": router_ip,
+                            "zoneLabel": zone,
+                        },
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+            # 5. Game block / throttle enforcement rules
+            try:
+                gb_rows = db.execute(
+                    """SELECT id, created_at, ip, mac, device_name, game_id, game_name,
+                              scope, cut_wifi, active
+                       FROM game_block_rules
+                       ORDER BY created_at DESC LIMIT 200"""
+                ).fetchall()
+                for r in gb_rows:
+                    ts = str(r["created_at"] or "")
+                    if cutoff_iso and ts < cutoff_iso:
+                        continue
+                    active_s = "ACTIVE" if r["active"] else "LIFTED"
+                    action_s = "Wi-Fi Cut / Blocked" if r["cut_wifi"] else "Bandwidth Throttled"
+                    gname = str(r["game_name"] or r["game_id"] or "All Games")
+                    scope_s = str(r["scope"] or "device_game")
+                    entries.append({
+                        "id": f"gb-{r['id']}",
+                        "timestamp": ts,
+                        "source": "game_rule",
+                        "category": "gaming",
+                        "eventType": "GAME_RULE",
+                        "severity": "WARNING" if r["active"] else "INFO",
+                        "title": f"🛡️ Game Restriction ({action_s}) — {gname} [{active_s}]",
+                        "message": f"Scope: {scope_s} · Target: {r['device_name'] or r['ip'] or '*'}",
+                        "ip": str(r["ip"] or ""),
+                        "mac": str(r["mac"] or ""),
+                        "deviceName": str(r["device_name"] or ""),
+                    })
+            except sqlite3.OperationalError:
+                pass
+
+        filtered: list[dict] = []
+        for item in entries:
+            if cat_filter and cat_filter != "all" and item["category"] != cat_filter:
+                continue
+            if sev_filter and sev_filter != "ALL":
+                if sev_filter == "CRITICAL" and item["severity"] not in {"CRITICAL", "HIGH"}:
+                    continue
+                elif sev_filter != "CRITICAL" and item["severity"] != sev_filter:
+                    continue
+            if q:
+                hay = f"{item['title']} {item['message']} {item['ip']} {item['mac']} {item['deviceName']} {item['eventType']}".lower()
+                if q not in hay:
+                    continue
+            filtered.append(item)
+
+        filtered.sort(key=lambda x: x["timestamp"], reverse=True)
+        stats = {
+            "total": len(filtered),
+            "critical": sum(1 for x in filtered if x["severity"] in {"CRITICAL", "HIGH"}),
+            "warning": sum(1 for x in filtered if x["severity"] == "WARNING"),
+            "info": sum(1 for x in filtered if x["severity"] not in {"CRITICAL", "HIGH", "WARNING"}),
+        }
+        page = filtered[offset : offset + limit]
+        return {
+            "items": page,
+            "total": len(filtered),
+            "limit": limit,
+            "offset": offset,
+            "hasMore": (offset + len(page)) < len(filtered),
+            "stats": stats,
+        }
 
     def _favorite_keys(self) -> set[str]:
         with self._connect() as db:

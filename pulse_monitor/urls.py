@@ -42,6 +42,8 @@ for route in (
     "api/isp/live",
     "api/mobile/summary",
     "api/network/events",
+    "api/network/history",
+    "api/network/history/export",
     "api/network/inventory",
     "api/network/inventory/export",
     "api/network/ping-history",
@@ -68,6 +70,8 @@ for route in (
 for route in (
     "api/devices",
     "api/devices/connection",
+    "api/network/inventory/profile",
+    "api/operations/notifications",
     "api/operations/switch-ports",
 ):
     register(re.escape(route), ["get", "post"])
@@ -109,6 +113,7 @@ for route in (
     "api/network/sync-infrastructure",
     "api/operations/maintenance",
     "api/operations/maintenance/cancel",
+    "api/operations/notifications/test",
     "api/router/access/block",
     "api/router/access/restore",
     "api/router/config",

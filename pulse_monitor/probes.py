@@ -1288,6 +1288,44 @@ class ProbesMixin:
                     if leases is not None:
                         state.update(routerClients=leases, routerClientSource="dhcp", authenticated=True)
 
+            # Harvest wireless client-to-AP associations (TP-Link / Deco / Omada LuCI)
+            if hasattr(self, "save_ap_client_associations"):
+                ap_clients: dict[str, dict] = {}
+                ap_label = str(state.get("model") or cfg.get("name") or host).strip()
+                for form_path in ("/admin/wireless?form=client", "/admin/client?form=client_list"):
+                    wl_payload = self._luci_post(
+                        host, admin_port, admin_scheme,
+                        f"/cgi-bin/luci/;stok={encoded_stok}{form_path}",
+                        timeout=1.5,
+                    )
+                    rows_wl = wl_payload.get("data") if isinstance(wl_payload, dict) else None
+                    if not isinstance(rows_wl, list):
+                        continue
+                    for cl in rows_wl:
+                        if not isinstance(cl, dict):
+                            continue
+                        raw_mac = str(cl.get("mac") or cl.get("macaddr") or "").strip().lower().replace("-", ":")
+                        if len(raw_mac) != 17 or raw_mac.count(":") != 5:
+                            continue
+                        band = str(cl.get("wire_type") or cl.get("band") or cl.get("type") or "").strip()
+                        rssi_raw = cl.get("signal") or cl.get("rssi")
+                        try:
+                            rssi_val = int(rssi_raw) if rssi_raw is not None and str(rssi_raw).lstrip("-").isdigit() else None
+                        except (TypeError, ValueError):
+                            rssi_val = None
+                        ap_clients[raw_mac] = {
+                            "apIp": host,
+                            "apName": ap_label,
+                            "band": band or "Wi-Fi",
+                            "rssi": rssi_val,
+                            "source": "tp-link-stok",
+                            "updatedAt": utc_now(),
+                        }
+                    if ap_clients:
+                        break
+                if ap_clients:
+                    self.save_ap_client_associations(ap_clients)
+
         if previous_state:
             for idx, prev_port in enumerate(previous_state.get("ports", [])):
                 if prev_port.get("simulation") and idx < len(state["ports"]):

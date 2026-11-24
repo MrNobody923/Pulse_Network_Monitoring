@@ -1217,6 +1217,11 @@ function renderTimeline() {
         t === 'NETWORK_SCAN'
       );
     });
+  } else if (currentEventLogFilter === 'gaming') {
+    filtered = combined.filter(ev => {
+      const t = String(ev.eventType || '').toUpperCase();
+      return t.startsWith('GAME_') || t.includes('GAMING');
+    });
   } else if (currentEventLogFilter === 'topology') {
     filtered = combined.filter(ev => {
       const t = String(ev.eventType || '');
@@ -1321,7 +1326,187 @@ async function clearEventLogs() {
     appState.networkEvents = [];
     liveTerminalTicks = [];
     renderTimeline();
+    if (typeof loadHistoryLogs === 'function') loadHistoryLogs(false);
   } catch (err) {
     alert(err.message);
   }
+}
+
+// =========================================================================
+// UNIFIED HISTORY LOGS (AUDIT TABLE + FILTERS + PAGINATION + CSV EXPORT)
+// =========================================================================
+let historyLogState = {
+  viewMode: 'history',
+  category: 'all',
+  search: '',
+  items: [],
+  total: 0,
+  offset: 0,
+  limit: 50,
+  hasMore: false,
+  loading: false,
+  searchTimer: null
+};
+
+function switchEventLogView(mode) {
+  const next = mode === 'live' ? 'live' : 'history';
+  historyLogState.viewMode = next;
+  const histPane = document.getElementById('historyLogsPane');
+  const livePane = document.getElementById('liveConsolePane');
+  if (histPane) histPane.style.display = next === 'history' ? '' : 'none';
+  if (livePane) livePane.style.display = next === 'live' ? '' : 'none';
+  document.querySelectorAll('#eventLogViewSwitcher [data-log-view]').forEach(btn => {
+    const active = btn.getAttribute('data-log-view') === next;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  });
+  if (next === 'history') {
+    loadHistoryLogs(false);
+  } else {
+    setTimeout(() => scrollTerminalToBottom(true), 30);
+  }
+}
+
+function setHistoryCategory(cat) {
+  historyLogState.category = cat || 'all';
+  document.querySelectorAll('#historyCategoryTabs [data-hist-cat]').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-hist-cat') === historyLogState.category);
+  });
+  loadHistoryLogs(false);
+}
+
+function handleHistorySearch(value) {
+  historyLogState.search = String(value || '').trim();
+  if (historyLogState.searchTimer) clearTimeout(historyLogState.searchTimer);
+  historyLogState.searchTimer = setTimeout(() => loadHistoryLogs(false), 180);
+}
+
+function _historyQueryParams(offsetOverride = 0) {
+  const sev = document.getElementById('historySeveritySelect')?.value || 'all';
+  const days = document.getElementById('historyDaysSelect')?.value || '7';
+  const params = new URLSearchParams({
+    category: historyLogState.category || 'all',
+    severity: sev,
+    days,
+    q: historyLogState.search || '',
+    limit: String(historyLogState.limit),
+    offset: String(offsetOverride)
+  });
+  return params;
+}
+
+function updateHistoryExportLink() {
+  const link = document.getElementById('btnExportHistoryCsv');
+  if (!link) return;
+  const params = _historyQueryParams(0);
+  params.delete('limit');
+  params.delete('offset');
+  link.href = `/api/network/history/export?${params.toString()}`;
+}
+
+async function loadHistoryLogs(append = false) {
+  if (historyLogState.loading) return;
+  historyLogState.loading = true;
+  const nextOffset = append ? historyLogState.items.length : 0;
+  updateHistoryExportLink();
+  const tbody = document.getElementById('historyLogsTableBody');
+  if (!append && tbody) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-dim);">Loading history logs…</td></tr>';
+  }
+  try {
+    const data = await apiJson(`/api/network/history?${_historyQueryParams(nextOffset).toString()}`);
+    const incoming = Array.isArray(data.items) ? data.items : [];
+    historyLogState.items = append ? [...historyLogState.items, ...incoming] : incoming;
+    historyLogState.total = Number(data.total || 0);
+    historyLogState.offset = nextOffset;
+    historyLogState.hasMore = Boolean(data.hasMore);
+    const st = data.stats || {};
+    const setTxt = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = Number(v || 0).toLocaleString();
+    };
+    setTxt('histStatTotal', st.total);
+    setTxt('histStatCrit', st.critical);
+    setTxt('histStatWarn', st.warning);
+    setTxt('histStatInfo', st.info);
+    renderHistoryLogsTable();
+  } catch (err) {
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--accent-red);">${esc(err.message)}</td></tr>`;
+    }
+  } finally {
+    historyLogState.loading = false;
+  }
+}
+
+function renderHistoryLogsTable() {
+  const tbody = document.getElementById('historyLogsTableBody');
+  const summary = document.getElementById('historyPaginationSummary');
+  const loadMoreBtn = document.getElementById('btnHistoryLoadMore');
+  if (!tbody) return;
+
+  const items = historyLogState.items;
+  if (summary) {
+    summary.textContent = `Showing ${items.length.toLocaleString()} of ${historyLogState.total.toLocaleString()} history entries`;
+  }
+  if (loadMoreBtn) {
+    loadMoreBtn.style.display = historyLogState.hasMore ? '' : 'none';
+  }
+
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:28px;color:var(--text-dim);">No history log entries match your current filter.</td></tr>';
+    return;
+  }
+
+  const catLabels = {
+    alerts: 'Outage / Alert',
+    devices: 'Device / IP',
+    gaming: 'Game Activity',
+    system: 'System / Scan'
+  };
+
+  tbody.innerHTML = items
+    .map(ev => {
+      const sev = String(ev.severity || 'INFO').toUpperCase();
+      const pillCls =
+        sev === 'CRITICAL' || sev === 'HIGH'
+          ? 'offline'
+          : sev === 'WARNING'
+          ? 'warning'
+          : 'online';
+      const targetLines = [];
+      if (ev.deviceName) targetLines.push(`<div style="font-weight:700;">${esc(ev.deviceName)}</div>`);
+      if (ev.gameDetails?.player) targetLines.push(`<div style="font-size:0.74rem;color:var(--accent-amber);">👤 ${esc(ev.gameDetails.player)}</div>`);
+      if (ev.ip) targetLines.push(`<div class="mono" style="font-size:0.76rem;color:var(--accent-cyan);">${esc(ev.ip)}</div>`);
+      if (ev.mac) targetLines.push(`<div class="mono" style="font-size:0.7rem;color:var(--text-dim);">${esc(ev.mac)}</div>`);
+      const targetHtml = targetLines.length ? targetLines.join('') : '<span style="color:var(--text-dim);">Network</span>';
+      const titleHtml = ev.title ? `<div style="font-weight:700;margin-bottom:2px;">${esc(ev.title)}</div>` : '';
+      let detailsHtml = `<div style="color:var(--text-muted);">${esc(ev.message || '')}</div>`;
+      if (ev.gameDetails) {
+        const gd = ev.gameDetails;
+        const metaChips = [];
+        if (gd.detectionMethod) metaChips.push(`<span class="mono-chip" style="font-size:0.68rem;">🔍 ${esc(gd.detectionMethod)}</span>`);
+        if (gd.matchedIndicator) metaChips.push(`<span class="mono-chip" style="font-size:0.68rem;">🎯 ${esc(gd.matchedIndicator)}</span>`);
+        if (gd.connectedTo || gd.routerIp) metaChips.push(`<span class="mono-chip" style="font-size:0.68rem;">📡 ${esc(gd.connectedTo || gd.routerIp)}</span>`);
+        if (gd.zoneLabel) metaChips.push(`<span class="mono-chip" style="font-size:0.68rem;">📍 ${esc(gd.zoneLabel)}</span>`);
+        if (gd.vendor) metaChips.push(`<span class="mono-chip" style="font-size:0.68rem;">💻 ${esc(gd.vendor)}</span>`);
+        detailsHtml = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:3px;">${metaChips.join('')}</div>`;
+      }
+      return `
+        <tr>
+          <td class="mono" style="font-size:0.74rem;white-space:nowrap;">${esc(formatKumaDateTime(ev.timestamp))}</td>
+          <td><span class="status-pill ${pillCls}" style="font-size:0.66rem;padding:2px 8px;">${esc(sev)}</span></td>
+          <td>
+            <div style="font-size:0.78rem;font-weight:700;">${esc(catLabels[ev.category] || ev.category || 'System')}</div>
+            <div class="mono" style="font-size:0.69rem;color:var(--text-dim);">${esc(ev.eventType || 'EVENT')}</div>
+          </td>
+          <td>${targetHtml}</td>
+          <td style="font-size:0.8rem;">
+            ${titleHtml}
+            ${detailsHtml}
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
 }

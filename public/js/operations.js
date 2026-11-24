@@ -175,13 +175,77 @@ async function refreshOperations() {
       <li><strong>${esc(window.reason)}</strong><p>${esc(devices.get(window.device_id) || (window.device_id ? 'Removed device' : 'All monitored equipment'))}
         · ${esc(fmtTime(window.starts_at))} to ${esc(fmtTime(window.ends_at))}</p>
         <button type="button" class="btn btn-secondary btn-xs" onclick="cancelMaintenanceWindow(${inlineString(window.id)}, this)">Cancel window</button></li>`).join('') || '<li>No windows scheduled.</li>');
-    document.getElementById('notificationMode').textContent = data.emailEnabled
-      ? 'In-app and email delivery enabled.' : 'In-app notifications enabled. Email delivery is configured on the server.';
+    const channels = ['In-app'];
+    if (data.emailEnabled) channels.push('Email');
+    if (data.webhookEnabled) channels.push('Webhook');
+    if (data.telegramEnabled) channels.push('Telegram');
+    document.getElementById('notificationMode').textContent =
+      `Active alert channels: ${channels.join(' · ')}.`;
+    const ns = data.notificationSettings || {};
+    const form = document.getElementById('notificationSettingsForm');
+    if (form && !form.contains(document.activeElement)) {
+      const enabledEl = document.getElementById('notifEnabled');
+      const webhookEl = document.getElementById('notifWebhookUrl');
+      const tokenEl = document.getElementById('notifTelegramToken');
+      const chatEl = document.getElementById('notifTelegramChatId');
+      const confirmEl = document.getElementById('notifOfflineConfirm');
+      if (enabledEl) enabledEl.checked = Boolean(ns.enabled);
+      if (webhookEl) webhookEl.value = ns.webhookUrl || '';
+      if (tokenEl) tokenEl.value = ns.telegramBotToken || '';
+      if (chatEl) chatEl.value = ns.telegramChatId || '';
+      if (confirmEl) confirmEl.value = String(ns.offlineConfirmCount || 1);
+    }
     document.getElementById('incidentNotices').innerHTML = data.notifications.map(notice => `
       <li><time>${esc(fmtTime(notice.created_at))}</time><strong>${esc(notice.title)}</strong>
-        <p>${esc(notice.message)}</p><p>${esc(({in_app: 'In app', pending: 'Email pending', failed: 'Email failed', sent: 'Email sent'})[notice.delivery])}</p></li>`).join('') || '<li>No incident notifications recorded.</li>';
+        <p>${esc(notice.message)}</p><p>${esc(({in_app: 'In app', pending: 'Delivery pending', failed: 'Delivery failed', sent: 'Delivered'})[notice.delivery] || notice.delivery)}</p></li>`).join('') || '<li>No incident notifications recorded.</li>';
   } catch (error) {
     document.getElementById('operationsFeedback').textContent = error.message;
+  }
+}
+
+async function saveNotificationSettings(event) {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  const feedback = document.getElementById('notifSettingsFeedback');
+  if (button) button.disabled = true;
+  if (feedback) feedback.textContent = 'Saving alert settings…';
+  try {
+    await apiJson('/api/operations/notifications', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: Boolean(document.getElementById('notifEnabled')?.checked),
+        webhookUrl: (document.getElementById('notifWebhookUrl')?.value || '').trim(),
+        telegramBotToken: (document.getElementById('notifTelegramToken')?.value || '').trim(),
+        telegramChatId: (document.getElementById('notifTelegramChatId')?.value || '').trim(),
+        offlineConfirmCount: Number(document.getElementById('notifOfflineConfirm')?.value || 1)
+      })
+    });
+    if (feedback) feedback.textContent = 'Alert settings saved.';
+    await refreshOperations();
+  } catch (error) {
+    if (feedback) feedback.textContent = error.message;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function testNotificationChannels(button) {
+  const feedback = document.getElementById('notifSettingsFeedback');
+  if (button) button.disabled = true;
+  if (feedback) feedback.textContent = 'Sending test alert…';
+  try {
+    const res = await apiJson('/api/operations/notifications/test', {
+      method: 'POST',
+      body: '{}'
+    });
+    const summary = Object.entries(res.results || {})
+      .map(([channel, status]) => `${channel}: ${status}`)
+      .join(' · ');
+    if (feedback) feedback.textContent = summary || res.message || 'Test completed.';
+  } catch (error) {
+    if (feedback) feedback.textContent = error.message;
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 

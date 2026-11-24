@@ -305,8 +305,20 @@ function renderOverviewAndLanCardsAndList() {
             row.online ? `Observed via ${esc(row.location)}` : 'Not observed in the latest scan'
           }</div>`;
 
-      let roleBadgeText = 'Office Equipment';
-      if (row.monitored) {
+      const customRoleLabels = {
+        staff_pc: 'Staff PC',
+        mobile: 'Mobile',
+        iot: 'IoT Device',
+        guest: 'Guest',
+        printer: 'Printer',
+        server: 'Server / NAS',
+        ap: 'Access Point',
+        switch: 'Managed Switch',
+        router: 'Router',
+        gateway: 'Core Gateway'
+      };
+      let roleBadgeText = customRoleLabels[row.role] || 'Office Equipment';
+      if (row.monitored && !customRoleLabels[row.role]) {
         const t = String(row.type || '').toLowerCase();
         if (t === 'switch') roleBadgeText = 'Managed Switch';
         else if (t === 'gateway') roleBadgeText = 'Core Gateway';
@@ -315,12 +327,20 @@ function renderOverviewAndLanCardsAndList() {
         else if (t === 'server') roleBadgeText = 'Server / Host';
       }
 
-      const roleLabel = row.monitored
-        ? `<span class="status-pill new" style="font-size:0.65rem; padding:2px 7px;">${roleBadgeText}</span>`
+      const roleLabel = row.monitored || customRoleLabels[row.role]
+        ? `<span class="status-pill new" style="font-size:0.65rem; padding:2px 7px;">${esc(roleBadgeText)}</span>`
         : `<span style="color:var(--text-main); font-size:0.76rem; font-weight:700;">LAN / Wi-Fi Asset</span>`;
       const vendorText = row.hardwareModel && row.hardwareModel !== row.vendor
         ? `${row.vendor || '—'} · ${row.hardwareModel}`
         : (row.vendor || '—');
+      const apAssocSubtext =
+        row.apAssociation && (row.apAssociation.apName || row.apAssociation.apIp)
+          ? `<div style="font-size:0.69rem;color:var(--accent-cyan);margin-top:2px;">📡 Via ${esc(
+              row.apAssociation.apName || row.apAssociation.apIp
+            )}${row.apAssociation.band ? ` · ${esc(row.apAssociation.band)}` : ''}${
+              row.apAssociation.rssi != null ? ` (${esc(row.apAssociation.rssi)} dBm)` : ''
+            }</div>`
+          : '';
 
       const diagSubtext =
         row.monitored &&
@@ -339,6 +359,7 @@ function renderOverviewAndLanCardsAndList() {
           <td>
             <button type="button" class="dev-row-title device-connection-link" aria-haspopup="dialog" onclick="openDeviceConnection(${inlineString(row.ip)})">${esc(row.name)}</button>
             <span class="dev-row-sub">${esc(row.location)}</span>
+            ${apAssocSubtext}
             ${diagSubtext}
           </td>
           <td>
@@ -379,6 +400,15 @@ function renderOverviewAndLanCardsAndList() {
               )}, ${inlineString(row.name)})" title="Run Nmap Port &amp; Risk Audit on ${esc(
         row.ip
       )}">Ports</button>
+              ${
+                row.mac
+                  ? `<button type="button" class="btn btn-secondary btn-xs" onclick="editDeviceProfile(${inlineString(
+                      row.mac
+                    )}, ${inlineString(row.role || '')}, ${inlineString(
+                      row.customName || row.name || ''
+                    )})" title="Set custom name and device role tag">Tag</button>`
+                  : ''
+              }
               ${
                 row.monitored && row.id
                   ? `<button type="button" class="btn btn-secondary btn-xs" onclick="probeMonitoredDevice(${inlineString(
@@ -1180,5 +1210,32 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
       </table>
     </div>
   `;
+}
+
+async function editDeviceProfile(mac, currentRole = '', currentName = '') {
+  if (!mac) return;
+  const customName = prompt(
+    `Custom label for ${mac} (leave blank to keep default):`,
+    currentName || ''
+  );
+  if (customName === null) return;
+  const roleInput = prompt(
+    'Device role tag (staff_pc, mobile, iot, guest, printer, server, ap, switch, router, gateway — leave blank to clear):',
+    currentRole || ''
+  );
+  if (roleInput === null) return;
+  try {
+    await apiJson('/api/network/inventory/profile', {
+      method: 'POST',
+      body: JSON.stringify({
+        mac,
+        customName: customName.trim(),
+        role: roleInput.trim().toLowerCase()
+      })
+    });
+    await loadInitialState();
+  } catch (err) {
+    alert(err.message);
+  }
 }
 

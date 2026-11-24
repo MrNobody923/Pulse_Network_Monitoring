@@ -181,6 +181,36 @@ class RequestHandler(View):
     def _send_error_json(self, message: str, status: int) -> None:
         self._send_json({"error": message}, status)
 
+    def _send_history_csv(self, rows: list[dict]) -> None:
+        output = io.StringIO(newline="")
+        fields = [
+            "timestamp",
+            "severity",
+            "category",
+            "eventType",
+            "deviceName",
+            "ip",
+            "mac",
+            "title",
+            "message",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                field: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value
+                for field, value in row.items()
+            })
+        raw = output.getvalue().encode("utf-8-sig")
+        self.response = HttpResponse(
+            raw,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="vertex-sentry-history-logs.csv"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     def _send_csv(self, rows: list[dict]) -> None:
         output = io.StringIO(newline="")
         fields = [
@@ -282,6 +312,8 @@ class RequestHandler(View):
                 })
             elif path == "/api/operations":
                 self._send_json(mon.get_operations())
+            elif path == "/api/operations/notifications":
+                self._send_json(mon.get_notification_settings())
             elif path == "/api/operations/incident":
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 try:
@@ -300,10 +332,33 @@ class RequestHandler(View):
                     "inventory": mon.get_inventory(),
                     "events": mon.get_events(50),
                 })
+            elif path == "/api/network/inventory/profile":
+                self._send_json({"profiles": mon.get_device_profiles()})
             elif path == "/api/network/events":
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 limit = int(query.get("limit", ["50"])[0])
                 self._send_json(mon.get_events(limit))
+            elif path == "/api/network/history":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                self._send_json(mon.get_history_logs(
+                    category=query.get("category", ["all"])[0],
+                    severity=query.get("severity", ["all"])[0],
+                    days=int(query.get("days", ["0"])[0] or 0),
+                    search=query.get("q", [""])[0],
+                    limit=int(query.get("limit", ["50"])[0] or 50),
+                    offset=int(query.get("offset", ["0"])[0] or 0),
+                ))
+            elif path == "/api/network/history/export":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                data = mon.get_history_logs(
+                    category=query.get("category", ["all"])[0],
+                    severity=query.get("severity", ["all"])[0],
+                    days=int(query.get("days", ["0"])[0] or 0),
+                    search=query.get("q", [""])[0],
+                    limit=500,
+                    offset=0,
+                )
+                self._send_history_csv(data["items"])
             elif path == "/api/network/inventory/export":
                 self._send_csv([{**row, "mac": row["observedMac"]} for row in mon.get_inventory()])
             elif path == "/api/tools/port-scan/catalog":
@@ -397,12 +452,18 @@ class RequestHandler(View):
                     mon.save_alert(alert)
                 self._send_json({"success": True, "active": mon.get_active_alerts()})
             elif path == "/api/speedtest/run":
-                self._send_json(mon.run_speedtest())
+                self._send_json(mon.run_speedtest(target=body if isinstance(body, dict) else None))
             elif path == "/api/operations/maintenance":
                 self._send_json(mon.create_maintenance(body), 201)
             elif path == "/api/operations/maintenance/cancel":
                 mon.cancel_maintenance(str(body.get("id") or ""))
                 self._send_json({"success": True})
+            elif path == "/api/operations/notifications":
+                if self._allow_local_dashboard("Notification settings require the local dashboard"):
+                    self._send_json(mon.save_notification_settings(body))
+            elif path == "/api/operations/notifications/test":
+                if self._allow_local_dashboard("Test notifications require the local dashboard"):
+                    self._send_json(mon.test_notification_channels())
             elif path == "/api/operations/switch-ports":
                 if self._allow_local_dashboard("Run switch SNMP checks from the local dashboard"):
                     self._send_json(mon.sample_switch_ports(str(body.get("deviceId") or ""), body))
@@ -687,6 +748,11 @@ class RequestHandler(View):
                 "inventory": mon.get_inventory(),
                 "devices": mon.get_devices(),
             })
+        elif path == "/api/network/inventory/profile":
+            res = mon.set_device_profile(str(body.get("mac") or ""), body)
+            inventory = mon.get_inventory()
+            mon.broadcast("inventory_update", {"inventory": inventory})
+            self._send_json({**res, "inventory": inventory})
         elif path == "/api/network/events/clear":
             self._send_json(mon.clear_events())
         else:

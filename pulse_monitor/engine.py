@@ -101,9 +101,12 @@ class Monitor(
                 "status": "unknown",
                 **device,
                 **self.latest_devices.get(device["ip"], {}),
-                "favorite": device["favorite"],
-                "favoriteKey": device["favoriteKey"],
-                "archived": device["archived"],
+                "favorite": device.get("favorite", False),
+                "favoriteKey": device.get(
+                    "favoriteKey",
+                    f"mac:{device['mac'].lower()}" if device.get("mac") else f"ip:{device['ip']}",
+                ),
+                "archived": device.get("archived", False),
                 "probeIntervalSec": self.device_probe_interval(device),
             }
             for device in self.get_devices()

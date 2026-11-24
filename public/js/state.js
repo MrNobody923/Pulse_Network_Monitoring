@@ -172,6 +172,10 @@ function buildUnifiedDeviceRows() {
       favoriteKey: (dev.favorite && dev.favoriteKey) || (asset.favorite && asset.favoriteKey) || assetKey,
       authorized: true,
       isNew: false,
+      customName: asset.customName || '',
+      role: asset.role || '',
+      notes: asset.notes || '',
+      apAssociation: asset.apAssociation || null,
       firstSeen: asset.firstSeen || '',
       lastProbeAt: dev.lastChecked || '',
       probeIntervalSec: dev.probeIntervalSec,
@@ -188,7 +192,7 @@ function buildUnifiedDeviceRows() {
       asset.vendor && !asset.vendor.toLowerCase().includes('unknown') ? asset.vendor : 'LAN Client';
     rows.push({
       id: null,
-      name: asset.name || asset.suggestedName || asset.ip,
+      name: asset.customName || asset.name || asset.suggestedName || asset.ip,
       ip: asset.ip,
       mac,
       observedMac: asset.observedMac ?? mac,
@@ -211,6 +215,10 @@ function buildUnifiedDeviceRows() {
       authorized: Boolean(asset.authorized),
       isNew: Boolean(!asset.authorized && !asset.reviewIgnored),
       reviewIgnored: Boolean(!asset.authorized && asset.reviewIgnored),
+      customName: asset.customName || '',
+      role: asset.role || '',
+      notes: asset.notes || '',
+      apAssociation: asset.apAssociation || null,
       firstSeen: asset.firstSeen || '',
       lastSeen: asset.lastSeen || ''
     });

@@ -7,6 +7,94 @@ let currentGaugeMbps = 0;
 let targetGaugeMbps = 0;
 let gaugeAnimFrame = null;
 let lastCompletedSpeedTest = null;
+let selectedSpeedTestTarget = 'isp|cloudflare|Internet (ISP · Cloudflare)';
+
+function getSelectedSpeedTestTarget() {
+  const sel = document.getElementById('speedTestTargetSelect');
+  const raw = (sel && sel.value) || selectedSpeedTestTarget || 'isp|cloudflare|Internet (ISP · Cloudflare)';
+  const [targetType = 'isp', targetIp = 'cloudflare', ...rest] = raw.split('|');
+  return {
+    raw,
+    targetType,
+    targetIp,
+    targetName: rest.join('|') || (targetType === 'isp' ? 'Internet (ISP · Cloudflare)' : targetIp)
+  };
+}
+
+function syncSpeedTestTargets() {
+  const sel = document.getElementById('speedTestTargetSelect');
+  if (!sel) return;
+  const previous = sel.value || selectedSpeedTestTarget;
+  const routers = [];
+  const seenIps = new Set();
+  const addRouter = (ip, name) => {
+    if (!ip || seenIps.has(ip)) return;
+    seenIps.add(ip);
+    routers.push({ ip, name: name || `Router (${ip})` });
+  };
+  if (appState.router?.ip) {
+    addRouter(appState.router.ip, appState.router.model || appState.router.name || `Main Router (${appState.router.ip})`);
+  }
+  for (const r of appState.routers || []) {
+    if (r?.ip) addRouter(r.ip, r.name || r.model || `Router (${r.ip})`);
+  }
+  for (const d of appState.devices || []) {
+    if (d?.ip && !d.archived && ['gateway', 'router', 'ap', 'switch'].includes(String(d.type || '').toLowerCase())) {
+      addRouter(d.ip, d.name || `${String(d.type).toUpperCase()} (${d.ip})`);
+    }
+  }
+
+  const devices = [];
+  for (const d of appState.devices || []) {
+    if (d?.ip && !d.archived && !seenIps.has(d.ip)) {
+      seenIps.add(d.ip);
+      devices.push({ ip: d.ip, name: d.name || d.ip });
+    }
+  }
+  for (const inv of appState.networkInventory || []) {
+    if (inv?.ip && inv.isOnline && !inv.archived && !seenIps.has(inv.ip)) {
+      seenIps.add(inv.ip);
+      devices.push({ ip: inv.ip, name: inv.name || inv.suggestedName || inv.ip });
+    }
+  }
+  devices.sort((a, b) => a.name.localeCompare(b.name));
+
+  const frag = document.createDocumentFragment();
+  const ispGroup = document.createElement('optgroup');
+  ispGroup.label = 'Internet (ISP)';
+  const ispName = appState.isp?.provider?.isp ? `Internet (${appState.isp.provider.isp} · Cloudflare)` : 'Internet (ISP · Cloudflare)';
+  const ispOpt = new Option(`🌐 ${ispName}`, `isp|cloudflare|${ispName}`);
+  ispGroup.appendChild(ispOpt);
+  frag.appendChild(ispGroup);
+
+  if (routers.length) {
+    const rGroup = document.createElement('optgroup');
+    rGroup.label = 'Routers, Gateways & APs';
+    for (const r of routers) {
+      rGroup.appendChild(new Option(`📡 ${r.name} (${r.ip})`, `router|${r.ip}|${r.name}`));
+    }
+    frag.appendChild(rGroup);
+  }
+  if (devices.length) {
+    const dGroup = document.createElement('optgroup');
+    dGroup.label = 'Connected LAN Devices';
+    for (const d of devices.slice(0, 60)) {
+      dGroup.appendChild(new Option(`💻 ${d.name} (${d.ip})`, `device|${d.ip}|${d.name}`));
+    }
+    frag.appendChild(dGroup);
+  }
+
+  sel.replaceChildren(frag);
+  const matching = Array.from(sel.options).find(o => o.value === previous || (previous.startsWith('isp|') && o.value.startsWith('isp|')));
+  sel.value = matching ? matching.value : sel.options[0]?.value || '';
+  selectedSpeedTestTarget = sel.value;
+}
+
+function onSpeedTestTargetChange() {
+  const sel = document.getElementById('speedTestTargetSelect');
+  if (sel) selectedSpeedTestTarget = sel.value;
+  renderIspSection();
+}
 
 // Non-linear scale matching ticks: 0 (0%), 50 (25%), 250 (50%), 500 (75%), 1000+ (100%)
 function speedMbpsToFraction(mbps) {
@@ -207,7 +295,8 @@ function handleSpeedTestProgress(data) {
     if (ulEl && finalUl > 0) ulEl.textContent = `${finalUl.toFixed(1)} Mbps`;
     if (ratingEl && data.rating) ratingEl.textContent = data.rating;
     if (noteEl) {
-      noteEl.textContent = `Completed at ${new Date().toLocaleTimeString()} • Download ${finalDl.toFixed(
+      const targetPrefix = data.targetName ? `Target: ${data.targetName} • ` : '';
+      noteEl.textContent = `${targetPrefix}Completed at ${new Date().toLocaleTimeString()} • Download ${finalDl.toFixed(
         1
       )} Mbps / Upload ${finalUl.toFixed(1)} Mbps`;
     }
@@ -232,17 +321,23 @@ function renderIspSection() {
   const dnsEl = document.getElementById('ispDnsTime');
 
   renderIspIdentity(isp);
+  syncSpeedTestTargets();
+  const target = getSelectedSpeedTestTarget();
   const testing = speedTestInProgress || (speedTestRequestPending && !speedTestFailure) || isp.speedTestRunning === true;
   const failure = testing ? '' : (speedTestFailure || isp.speedTestError || '');
   const speedTestButton = document.getElementById('btnRunSpeedTest');
   if (speedTestButton) {
     speedTestButton.disabled = isp.speedTestsEnabled !== true || testing;
     speedTestButton.title = isp.speedTestsEnabled === true ? '' : 'Active bandwidth tests are disabled in the server settings';
+    const targetDesc =
+      target.targetType === 'isp'
+        ? 'Measures WAN download, upload, ping & jitter from the monitoring PC to Cloudflare.'
+        : `Measures LAN link latency, jitter, packet loss, and local throughput to ${target.targetName} (${target.targetIp}).`;
     document.getElementById('speedTestAvailability').textContent =
-      failure || (testing ? 'Measuring from the monitoring PC…' : isp.speedTestsEnabled === true
-        ? 'Measures the connection from the monitoring PC to Cloudflare.'
+      failure || (testing ? `Measuring speed to ${target.targetName}…` : isp.speedTestsEnabled === true
+        ? targetDesc
         : 'Active speed tests are disabled in the server settings.');
-    document.getElementById('speedTestBrowserLink').hidden = !failure;
+    document.getElementById('speedTestBrowserLink').hidden = !failure || target.targetType !== 'isp';
   }
   renderLiveIspTelemetry();
 
@@ -527,20 +622,26 @@ async function runSpeedTestNow() {
     box.classList.add('testing');
     box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
+  const target = getSelectedSpeedTestTarget();
   setSpeedGaugeTarget(0, true);
   handleSpeedTestProgress({
     phase: 'ping',
     currentMbps: 0,
     progressPct: 2,
-    message: 'Connecting the monitoring PC to Cloudflare…'
+    message: target.targetType === 'isp'
+      ? 'Connecting the monitoring PC to Cloudflare…'
+      : `Connecting to ${target.targetName} (${target.targetIp})…`
   });
 
   // All live gauge frames come from real server measurements streamed over SSE
   // ("speedtest_progress"); nothing is animated or estimated client-side.
   try {
+    const payload = target.targetType === 'isp'
+      ? { targetType: 'isp' }
+      : { targetType: target.targetType, targetIp: target.targetIp, targetName: target.targetName };
     const res = await apiJson('/api/speedtest/run', {
       method: 'POST',
-      body: JSON.stringify({})
+      body: JSON.stringify(payload)
     });
     const st = res.speedTest || res;
     if (st && st.downloadMbps != null) {

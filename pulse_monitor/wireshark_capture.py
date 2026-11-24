@@ -18,6 +18,16 @@ from collections.abc import Iterable
 from pathlib import Path
 
 
+def _is_private_ipv4(ip: str) -> bool:
+    if ip.startswith("192.168.") or ip.startswith("10."):
+        return True
+    if ip.startswith("172."):
+        parts = ip.split(".", 2)
+        if len(parts) >= 2 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            return True
+    return False
+
+
 def find_wireshark_binaries(custom_tshark_path: str = "") -> dict:
     """Locate Wireshark / TShark / Dumpcap binaries and Npcap wpcap.dll on the host."""
     candidates: list[str] = []
@@ -869,19 +879,19 @@ def build_wireshark_bpf_filters(game_ports: Iterable[int]) -> list[str]:
     game_terms = " or ".join(f"port {p}" for p in extra_ports)
     suffix = f" or {game_terms}" if game_terms else ""
     strict = (
-        "(port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
+        "(port 53 or tcp port 853 or udp port 37008 or tcp port 80 or tcp port 8080 "
         "or (ip and (tcp port 443 or tcp port 8443) and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16) "
         "or (ip6 proto 6 and (tcp port 443 or tcp port 8443) and ip6[(40 + ((ip6[52:1] & 0xf0) >> 2)):1] = 0x16)"
         f"{suffix}) and not (ip and tcp and (tcp[13] & 0x12 = 0x02))"
     )
     fallback_syn = (
-        "(port 53 or udp port 37008 or tcp port 80 or tcp port 8080 "
+        "(port 53 or tcp port 853 or udp port 37008 or tcp port 80 or tcp port 8080 "
         "or (ip and (tcp port 443 or tcp port 8443) and tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16) "
         "or (ip6 and (tcp port 443 or tcp port 8443))"
         f"{suffix}) and not (ip and tcp and (tcp[13] & 0x12 = 0x02))"
     )
     fallback = (
-        "port 53 or udp port 37008 or tcp port 80 or tcp port 8080 or tcp port 443 or tcp port 8443"
+        "port 53 or tcp port 853 or udp port 37008 or tcp port 80 or tcp port 8080 or tcp port 443 or tcp port 8443"
         f"{suffix}"
     )
     return [strict, fallback_syn, fallback]
@@ -968,6 +978,111 @@ class WiresharkCaptureEngine:
         self._tshark_procs: list[subprocess.Popen] = []
         self._recent_hit_cooldown: dict[tuple[str, str, str], float] = {}
         self._tzsp_active = False
+        self._traffic_stats: dict[str, dict] = {}
+        self._encrypted_dns_clients: dict[str, dict] = {}
+
+    _DOH_RESOLVER_IPS = frozenset({
+        "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9",
+        "149.112.112.112", "208.67.222.222", "208.67.220.220",
+    })
+    _DOH_HOSTNAMES = (
+        "dns.google", "cloudflare-dns.com", "mozilla.cloudflare-dns.com",
+        "doh.dns.apple.com", "dns.nextdns.io", "dns.quad9.net", "doh.opendns.com",
+    )
+
+    def _record_passive_frame_metrics(self, raw: bytes, dlt: int = 1, ts_epoch: float | None = None) -> None:
+        """Passively track rolling per-IP byte counters (Top Talkers) and DoH/DoT encrypted DNS bypasses."""
+        if not raw or dlt != 1 or len(raw) < 34:
+            return
+        offset = 14
+        eth_type = struct.unpack("!H", raw[12:14])[0]
+        if eth_type == 0x8100 and len(raw) >= 38:
+            eth_type = struct.unpack("!H", raw[16:18])[0]
+            offset = 18
+        if eth_type != 0x0800 or len(raw) < offset + 20:
+            return
+        ihl = (raw[offset] & 0x0F) * 4
+        if ihl < 20 or len(raw) < offset + ihl:
+            return
+        proto = raw[offset + 9]
+        src_ip = socket.inet_ntoa(raw[offset + 12 : offset + 16])
+        dst_ip = socket.inet_ntoa(raw[offset + 16 : offset + 20])
+        src_priv = _is_private_ipv4(src_ip)
+        dst_priv = _is_private_ipv4(dst_ip)
+        if not src_priv and not dst_priv:
+            return
+        l4_off = offset + ihl
+        sport = dport = 0
+        if proto in (6, 17) and len(raw) >= l4_off + 4:
+            sport, dport = struct.unpack("!HH", raw[l4_off : l4_off + 4])
+        now_t = ts_epoch if ts_epoch is not None else time.time()
+        pkt_len = len(raw)
+
+        doh_client = ""
+        doh_proto = ""
+        doh_resolver = ""
+        if proto == 6 and src_priv and not dst_priv:
+            if dport == 853:
+                doh_client, doh_proto, doh_resolver = src_ip, "DoT :853", dst_ip
+            elif dport == 443:
+                if dst_ip in self._DOH_RESOLVER_IPS:
+                    doh_client, doh_proto, doh_resolver = src_ip, "DoH :443", dst_ip
+                elif len(raw) > l4_off + 20:
+                    tcp_hdr_len = ((raw[l4_off + 12] >> 4) & 0x0F) * 4
+                    if tcp_hdr_len >= 20 and len(raw) > l4_off + tcp_hdr_len + 5:
+                        sni = extract_tls_sni(raw[l4_off + tcp_hdr_len :])
+                        if sni and any(sni == h or sni.endswith("." + h) for h in self._DOH_HOSTNAMES):
+                            doh_client, doh_proto, doh_resolver = src_ip, "DoH SNI", sni
+
+        with self._lock:
+            for lan_ip, is_tx in ((src_ip, True), (dst_ip, False)):
+                if not (src_priv if is_tx else dst_priv) or lan_ip in self.infra_ips:
+                    continue
+                slot = self._traffic_stats.get(lan_ip)
+                if slot is None or (now_t - slot["windowStart"]) >= 60.0:
+                    slot = {
+                        "ip": lan_ip,
+                        "windowStart": now_t,
+                        "lastSeen": now_t,
+                        "txBytes": 0,
+                        "rxBytes": 0,
+                        "packets": 0,
+                    }
+                    self._traffic_stats[lan_ip] = slot
+                if is_tx:
+                    slot["txBytes"] += pkt_len
+                else:
+                    slot["rxBytes"] += pkt_len
+                slot["packets"] += 1
+                slot["lastSeen"] = now_t
+            if len(self._traffic_stats) > 256:
+                cutoff = now_t - 90.0
+                self._traffic_stats = {
+                    k: v for k, v in self._traffic_stats.items() if v["lastSeen"] >= cutoff
+                }
+            if doh_client and doh_client not in self.infra_ips:
+                from .config import utc_now
+                rec = self._encrypted_dns_clients.get(doh_client)
+                if rec is None:
+                    self._encrypted_dns_clients[doh_client] = {
+                        "ip": doh_client,
+                        "protocol": doh_proto,
+                        "resolver": doh_resolver,
+                        "count": 1,
+                        "lastSeen": utc_now(),
+                        "_ts": now_t,
+                    }
+                else:
+                    rec["protocol"] = doh_proto
+                    rec["resolver"] = doh_resolver
+                    rec["count"] = int(rec.get("count") or 0) + 1
+                    rec["lastSeen"] = utc_now()
+                    rec["_ts"] = now_t
+                if len(self._encrypted_dns_clients) > 64:
+                    cutoff_d = now_t - 600.0
+                    self._encrypted_dns_clients = {
+                        k: v for k, v in self._encrypted_dns_clients.items() if v.get("_ts", 0.0) >= cutoff_d
+                    }
 
     def _pick_default_interfaces(self) -> list[str]:
         preferred = [x for x in self.interfaces if x.get("preferred")]
@@ -1103,6 +1218,7 @@ class WiresharkCaptureEngine:
                     with self._lock:
                         self._packets_captured += 1
                         self._last_packet_at = time.time()
+                    self._record_passive_frame_metrics(raw, dlt=dlt, ts_epoch=ts_epoch)
                     # Record DNS/TLS ClientHello/HTTP packets cleanly so downloaded .pcap includes all discovery context
                     hit = dissect_raw_packet(
                         raw,
@@ -1407,7 +1523,29 @@ class WiresharkCaptureEngine:
         self._stop_capture_workers()
 
     def status_snapshot(self) -> dict:
+        now_t = time.time()
         with self._lock:
+            talkers = []
+            for ip_k, slot in list(self._traffic_stats.items()):
+                if (now_t - slot["lastSeen"]) > 120.0:
+                    continue
+                total_b = int(slot["txBytes"]) + int(slot["rxBytes"])
+                elapsed = max(1.0, now_t - float(slot["windowStart"]))
+                talkers.append({
+                    "ip": ip_k,
+                    "txBytes": int(slot["txBytes"]),
+                    "rxBytes": int(slot["rxBytes"]),
+                    "totalKB": round(total_b / 1024.0, 1),
+                    "kbps": round((total_b * 8.0) / (elapsed * 1000.0), 1),
+                    "packets": int(slot["packets"]),
+                })
+            talkers.sort(key=lambda x: (x["totalKB"], x["packets"]), reverse=True)
+            doh_clients = [
+                {k: v for k, v in rec.items() if k != "_ts"}
+                for rec in self._encrypted_dns_clients.values()
+                if (now_t - float(rec.get("_ts") or 0.0)) <= 600.0
+            ]
+            doh_clients.sort(key=lambda x: x.get("count", 0), reverse=True)
             return {
                 "enabled": self._enabled,
                 "active": bool(self._active_interfaces or self._tzsp_active),
@@ -1432,5 +1570,7 @@ class WiresharkCaptureEngine:
                 "pcapBytes": self.recorder.file_bytes(),
                 "lastHitAt": self._last_hit_at,
                 "recentHits": list(self._recent_hits),
+                "topTalkers": talkers[:8],
+                "encryptedDnsClients": doh_clients[:12],
                 "displayFilter": build_wireshark_display_filter(),
             }

@@ -984,6 +984,8 @@ class GameDetectorMixin:
             "pcapUrl": "/api/gaming/wireshark/capture.pcap",
             "lastHitAt": live_ws.get("lastHitAt"),
             "recentHits": list(live_ws.get("recentHits") or []),
+            "topTalkers": list(live_ws.get("topTalkers") or []),
+            "encryptedDnsClients": list(live_ws.get("encryptedDnsClients") or []),
             "displayFilter": live_ws.get("displayFilter") or build_wireshark_display_filter(GAME_SIGNATURES),
             "lastAnalyze": last_analyze,
         }

@@ -1016,6 +1016,8 @@ function renderWiresharkStatusBar(ws) {
   sum.textContent = details.join(' · ');
   if (strip) {
     const hits = Array.isArray(s.recentHits) ? s.recentHits.slice(0, 2) : [];
+    const talkers = Array.isArray(s.topTalkers) ? s.topTalkers.slice(0, 4) : [];
+    const encDns = Array.isArray(s.encryptedDnsClients) ? s.encryptedDnsClients.slice(0, 4) : [];
     const lastA = s.lastAnalyze;
     const parts = [];
     if (hits.length) {
@@ -1027,6 +1029,28 @@ function renderWiresharkStatusBar(ws) {
                 `<span class="mono">[${esc(h.protocol || 'DPI')}]</span> ${esc(h.ip)} → <code>${esc(
                   h.matchedIndicator || h.gameName
                 )}</code>${h.frameSourceMac ? ` · Frame source MAC: <code>${esc(h.frameSourceMac)}</code>` : ''}`
+            )
+            .join(' · ')
+      );
+    }
+    if (talkers.length) {
+      parts.push(
+        `<strong>Top Passive Talkers (60s):</strong> ` +
+          talkers
+            .map(
+              t =>
+                `<span class="mono">${esc(t.ip)}</span> (${Number(t.totalKB || 0).toLocaleString()} KB · ${Number(t.kbps || 0)} Kbps)`
+            )
+            .join(' · ')
+      );
+    }
+    if (encDns.length) {
+      parts.push(
+        `<strong style="color:var(--accent-amber);">⚠️ Encrypted DNS Bypass:</strong> ` +
+          encDns
+            .map(
+              c =>
+                `<span class="mono">${esc(c.ip)}</span> via <code>${esc(c.protocol || 'DoH/DoT')}</code> (${esc(c.resolver || 'external')})`
             )
             .join(' · ')
       );

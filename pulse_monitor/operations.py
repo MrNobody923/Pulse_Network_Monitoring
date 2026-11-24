@@ -6,6 +6,9 @@ import json
 import os
 import smtplib
 import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -113,11 +116,165 @@ class OperationsMixin:
             notices = [dict(row) for row in db.execute(
                 "SELECT * FROM incident_notices ORDER BY created_at DESC, rowid DESC LIMIT 40"
             )]
-        return {"maintenance": windows, "notifications": notices, "emailEnabled": self._alert_email_enabled()}
+        return {
+            "maintenance": windows,
+            "notifications": notices,
+            "emailEnabled": self._alert_email_enabled(),
+            "webhookEnabled": self._alert_webhook_enabled(),
+            "telegramEnabled": self._alert_telegram_enabled(),
+            "notificationSettings": self.get_notification_settings(),
+        }
 
     @staticmethod
     def _alert_email_enabled() -> bool:
         return all(os.environ.get(key) for key in ("PULSE_SMTP_HOST", "PULSE_ALERT_EMAIL_FROM", "PULSE_ALERT_EMAIL_TO"))
+
+    def _notification_cfg(self) -> dict:
+        self = cast("Monitor", self)
+        raw = dict((self.config.get("notifications") or {}) if isinstance(self.config.get("notifications"), dict) else {})
+        webhook_url = str(raw.get("webhookUrl") or os.environ.get("PULSE_WEBHOOK_URL") or "").strip()
+        tg_token = str(raw.get("telegramBotToken") or os.environ.get("PULSE_TELEGRAM_BOT_TOKEN") or "").strip()
+        tg_chat = str(raw.get("telegramChatId") or os.environ.get("PULSE_TELEGRAM_CHAT_ID") or "").strip()
+        enabled = bool(raw.get("enabled", bool(webhook_url or (tg_token and tg_chat))))
+        return {
+            "enabled": enabled,
+            "webhookUrl": webhook_url,
+            "telegramBotToken": tg_token,
+            "telegramChatId": tg_chat,
+        }
+
+    def _alert_webhook_enabled(self) -> bool:
+        cfg = self._notification_cfg()
+        return bool(cfg["enabled"] and cfg["webhookUrl"].startswith(("http://", "https://")))
+
+    def _alert_telegram_enabled(self) -> bool:
+        cfg = self._notification_cfg()
+        return bool(cfg["enabled"] and cfg["telegramBotToken"] and cfg["telegramChatId"])
+
+    def _external_notifications_enabled(self) -> bool:
+        return bool(self._alert_email_enabled() or self._alert_webhook_enabled() or self._alert_telegram_enabled())
+
+    def get_notification_settings(self) -> dict:
+        self = cast("Monitor", self)
+        cfg = self._notification_cfg()
+        try:
+            confirm = max(1, min(5, int((self.config.get("thresholds") or {}).get("offlineConfirmCount", 1))))
+        except (TypeError, ValueError):
+            confirm = 1
+        return {
+            "enabled": cfg["enabled"],
+            "webhookUrl": cfg["webhookUrl"],
+            "telegramChatId": cfg["telegramChatId"],
+            "hasTelegramToken": bool(cfg["telegramBotToken"]),
+            "offlineConfirmCount": confirm,
+            "emailEnabled": self._alert_email_enabled(),
+        }
+
+    def save_notification_settings(self, body: dict) -> dict:
+        self = cast("Monitor", self)
+        if not isinstance(body, dict):
+            raise ValueError("Invalid notification settings payload")
+        webhook_url = str(body.get("webhookUrl") or "").strip()
+        if webhook_url and not webhook_url.startswith(("http://", "https://")):
+            raise ValueError("Webhook URL must start with http:// or https://")
+        tg_chat = str(body.get("telegramChatId") or "").strip()[:64]
+        tg_token = str(body.get("telegramBotToken") or "").strip()[:160]
+        with self.lock:
+            existing = dict(self.config.get("notifications") or {})
+            if "enabled" in body:
+                existing["enabled"] = bool(body["enabled"])
+            elif webhook_url or tg_chat:
+                existing["enabled"] = True
+            existing["webhookUrl"] = webhook_url[:500]
+            existing["telegramChatId"] = tg_chat
+            if tg_token:
+                existing["telegramBotToken"] = tg_token
+            elif body.get("clearTelegramToken"):
+                existing["telegramBotToken"] = ""
+            self.config["notifications"] = existing
+            if "offlineConfirmCount" in body:
+                try:
+                    confirm = max(1, min(5, int(body["offlineConfirmCount"])))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Offline confirmation count must be between 1 and 5") from exc
+                self.config.setdefault("thresholds", {})["offlineConfirmCount"] = confirm
+            self.save_config()
+        return {"success": True, "notificationSettings": self.get_notification_settings()}
+
+    def _send_incident_webhook(self, notice: dict) -> None:
+        cfg = self._notification_cfg()
+        url = cfg["webhookUrl"]
+        if not url:
+            return
+        text = f"[Vertex Sentry] {notice['title']}\n{notice['message']}\nDevice: {notice.get('ip') or 'Network'}"
+        payload = json.dumps({
+            "text": text,
+            "content": text,
+            "title": notice["title"],
+            "message": notice["message"],
+            "ip": notice.get("ip") or "",
+            "kind": notice.get("kind") or "outage",
+            "createdAt": notice.get("created_at") or utc_now(),
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "VertexSentry/2.1"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            if resp.status >= 400:
+                raise OSError(f"Webhook HTTP {resp.status}")
+
+    def _send_incident_telegram(self, notice: dict) -> None:
+        cfg = self._notification_cfg()
+        token, chat_id = cfg["telegramBotToken"], cfg["telegramChatId"]
+        if not token or not chat_id:
+            return
+        text = f"Vertex Sentry: {notice['title']}\n{notice['message']}\nDevice: {notice.get('ip') or 'Network'}"
+        url = f"https://api.telegram.org/bot{urllib.parse.quote(token, safe=':')}/sendMessage"
+        payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "VertexSentry/2.1"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            if resp.status >= 400:
+                raise OSError(f"Telegram HTTP {resp.status}")
+
+    def test_notification_channels(self) -> dict:
+        notice = {
+            "incident_id": f"test-{uuid.uuid4().hex[:8]}",
+            "kind": "test",
+            "created_at": utc_now(),
+            "title": "Test Alert from Vertex Sentry",
+            "message": "External alert delivery is configured and reachable.",
+            "ip": str(self.config.get("router", {}).get("ip") or "192.168.0.1"),
+        }
+        results: dict[str, str] = {}
+        if self._alert_webhook_enabled():
+            try:
+                self._send_incident_webhook(notice)
+                results["webhook"] = "sent"
+            except Exception as exc:
+                results["webhook"] = f"error: {exc}"
+        if self._alert_telegram_enabled():
+            try:
+                self._send_incident_telegram(notice)
+                results["telegram"] = "sent"
+            except Exception as exc:
+                results["telegram"] = f"error: {exc}"
+        if self._alert_email_enabled():
+            try:
+                self._send_incident_email(notice)
+                results["email"] = "sent"
+            except Exception as exc:
+                results["email"] = f"error: {exc}"
+        if not results:
+            raise ValueError("Configure and enable a Webhook URL, Telegram bot, or SMTP email first")
+        return {"success": all(v == "sent" for v in results.values()), "results": results}
 
     def _collect_incident_notifications(self) -> None:
         self = cast("Monitor", self)
@@ -128,7 +285,7 @@ class OperationsMixin:
         ]
         devices = {device["ip"]: device["id"] for device in self.get_devices()}
         now = datetime.now(timezone.utc)
-        delivery = "pending" if self._alert_email_enabled() else "in_app"
+        delivery = "pending" if self._external_notifications_enabled() else "in_app"
         with self._connect() as db:
             muted = {row[0] for row in db.execute(
                 "SELECT device_id FROM maintenance_windows WHERE starts_at <= ? AND ends_at > ?",
@@ -179,7 +336,7 @@ class OperationsMixin:
 
     def _deliver_incident_notifications(self) -> None:
         self = cast("Monitor", self)
-        if not self._alert_email_enabled():
+        if not self._external_notifications_enabled():
             return
         with self._connect() as db:
             pending = [dict(row) for row in db.execute(
@@ -187,11 +344,27 @@ class OperationsMixin:
             )]
         for notice in pending:
             attempts = notice["attempts"] + 1
-            try:
-                self._send_incident_email(notice)
-                status = "sent"
-            except (OSError, ValueError, smtplib.SMTPException):
-                status = "failed" if attempts >= 3 else "pending"
+            delivered_any = False
+            failed_any = False
+            if self._alert_email_enabled():
+                try:
+                    self._send_incident_email(notice)
+                    delivered_any = True
+                except (OSError, ValueError, smtplib.SMTPException):
+                    failed_any = True
+            if self._alert_webhook_enabled():
+                try:
+                    self._send_incident_webhook(notice)
+                    delivered_any = True
+                except (OSError, ValueError, urllib.error.URLError):
+                    failed_any = True
+            if self._alert_telegram_enabled():
+                try:
+                    self._send_incident_telegram(notice)
+                    delivered_any = True
+                except (OSError, ValueError, urllib.error.URLError):
+                    failed_any = True
+            status = "sent" if (delivered_any and not failed_any) else ("failed" if attempts >= 3 else "pending")
             with self._connect() as db:
                 db.execute(
                     "UPDATE incident_notices SET attempts=?, delivery=? WHERE incident_id=? AND kind=?",

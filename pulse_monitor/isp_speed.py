@@ -31,7 +31,7 @@ if os.name == "nt":
 
 from typing import TYPE_CHECKING, cast
 
-from .config import manual_speed_tests_enabled, utc_now
+from .config import manual_speed_tests_enabled, utc_now, validate_device_ip
 from .router_wan import ROUTER_SAMPLE_SECONDS, RouterWanSampler
 
 if TYPE_CHECKING:
@@ -547,7 +547,221 @@ class IspSpeedMixin:
             return round(end_bytes * 8 / end_time / 1_000_000, 1)
         return round((end_bytes - ramp_bytes) * 8 / steady_seconds / 1_000_000, 1)
 
-    def run_speedtest(self) -> dict:
+    def _run_lan_target_speedtest(
+        self, target_type: str, target_ip: str, target_name: str
+    ) -> dict:
+        self = cast("Monitor", self)
+        clean_ip = validate_device_ip(target_ip)
+        label = str(target_name or clean_ip).strip()[:80]
+        kind_label = "Router" if target_type == "router" else "Connected Device"
+
+        self.broadcast(
+            "speedtest_progress",
+            {
+                "phase": "ping",
+                "phaseLabel": f"Measuring latency to {label}...",
+                "message": f"Pinging {label} ({clean_ip}) over LAN...",
+                "currentMbps": 0.0,
+                "progressPct": 8,
+                "targetType": target_type,
+                "targetIp": clean_ip,
+                "targetName": label,
+            },
+        )
+
+        # Phase 1: 6 rapid RTT samples (ICMP preferred, TCP fallback)
+        rtts: list[float] = []
+        open_http: tuple[int, str] | None = None
+        for port, scheme in ((80, "http"), (443, "https"), (8080, "http"), (8000, "http"), (8443, "https")):
+            ok_p, _, _ = self._probe_tcp_socket(clean_ip, port, timeout=0.35)
+            if ok_p:
+                open_http = (port, scheme)
+                break
+
+        for idx in range(6):
+            alive, ms = self._probe_icmp(clean_ip, timeout_ms=600)
+            if not alive and open_http:
+                ok_t, _, t_ms = self._probe_tcp_socket(clean_ip, open_http[0], timeout=0.6)
+                if ok_t and t_ms is not None:
+                    alive, ms = True, t_ms
+            if alive and ms is not None:
+                rtts.append(float(ms))
+            self.broadcast(
+                "speedtest_progress",
+                {
+                    "phase": "ping",
+                    "phaseLabel": f"Measuring latency to {label} ({idx + 1}/6)...",
+                    "message": f"Ping sample {idx + 1}/6 to {label} ({clean_ip})",
+                    "currentMbps": 0.0,
+                    "progressPct": 10 + (idx + 1) * 4,
+                    "targetType": target_type,
+                    "targetIp": clean_ip,
+                    "targetName": label,
+                },
+            )
+
+        if not rtts:
+            raise OSError(f"{label} ({clean_ip}) did not respond to ICMP or TCP probes")
+
+        ping_ms = round(statistics.median(rtts), 1)
+        jitter_ms = round(statistics.pstdev(rtts), 1) if len(rtts) > 1 else 0.0
+        loss_pct = round(((6 - len(rtts)) / 6.0) * 100.0, 1)
+
+        # Phase 2: Local HTTP response transfer measurement (when an HTTP/HTTPS port is open)
+        dl_mbps = 0.0
+        ul_mbps = 0.0
+        method = "LAN ICMP/TCP Latency"
+        if open_http:
+            port, scheme = open_http
+            method = f"LAN {scheme.upper()}:{port} Link Test"
+            ctx = ssl._create_unverified_context() if scheme == "https" else None
+            total_dl_bytes = 0
+            dl_started = time.perf_counter()
+            for i in range(20):
+                if (time.perf_counter() - dl_started) >= 2.0:
+                    break
+                conn = None
+                try:
+                    conn = (
+                        http.client.HTTPSConnection(clean_ip, port, timeout=1.2, context=ctx)
+                        if scheme == "https"
+                        else http.client.HTTPConnection(clean_ip, port, timeout=1.2)
+                    )
+                    conn.request("GET", "/", headers={"Connection": "close", "User-Agent": "VertexSentry/2.1"})
+                    resp = conn.getresponse()
+                    body = resp.read(262144)
+                    total_dl_bytes += len(body) + 256
+                except Exception:
+                    break
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                elapsed = max(0.005, time.perf_counter() - dl_started)
+                live_dl = round((total_dl_bytes * 8.0) / (elapsed * 1_000_000.0), 2)
+                dl_mbps = live_dl
+                if i % 3 == 0:
+                    self.broadcast(
+                        "speedtest_progress",
+                        {
+                            "phase": "download",
+                            "phaseLabel": f"Testing link throughput to {label}...",
+                            "message": f"Measured {live_dl} Mbps from {label} ({clean_ip}:{port})",
+                            "currentMbps": live_dl,
+                            "downloadMbps": live_dl,
+                            "pingMs": ping_ms,
+                            "jitterMs": jitter_ms,
+                            "progressPct": min(70, 38 + i * 2),
+                            "targetType": target_type,
+                            "targetIp": clean_ip,
+                            "targetName": label,
+                        },
+                    )
+
+            # Phase 3: Local HTTP write throughput probe (small 16 KB payload, non-intrusive)
+            payload = b"0" * 16384
+            total_ul_bytes = 0
+            ul_started = time.perf_counter()
+            for i in range(12):
+                if (time.perf_counter() - ul_started) >= 1.5:
+                    break
+                conn = None
+                try:
+                    conn = (
+                        http.client.HTTPSConnection(clean_ip, port, timeout=1.0, context=ctx)
+                        if scheme == "https"
+                        else http.client.HTTPConnection(clean_ip, port, timeout=1.0)
+                    )
+                    conn.request("HEAD", "/", body=payload, headers={"Connection": "close", "Content-Length": str(len(payload))})
+                    resp = conn.getresponse()
+                    resp.read(4096)
+                    total_ul_bytes += len(payload)
+                except Exception:
+                    break
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                elapsed = max(0.005, time.perf_counter() - ul_started)
+                ul_mbps = round((total_ul_bytes * 8.0) / (elapsed * 1_000_000.0), 2)
+                if i % 3 == 0:
+                    self.broadcast(
+                        "speedtest_progress",
+                        {
+                            "phase": "upload",
+                            "phaseLabel": f"Testing local write rate to {label}...",
+                            "message": f"Measured {ul_mbps} Mbps to {label} ({clean_ip}:{port})",
+                            "currentMbps": ul_mbps,
+                            "downloadMbps": dl_mbps,
+                            "uploadMbps": ul_mbps,
+                            "pingMs": ping_ms,
+                            "jitterMs": jitter_ms,
+                            "progressPct": min(95, 74 + i * 2),
+                            "targetType": target_type,
+                            "targetIp": clean_ip,
+                            "targetName": label,
+                        },
+                    )
+
+        if open_http:
+            rating = (
+                f"{kind_label} LAN Link · {ping_ms} ms"
+                if loss_pct == 0
+                else f"{kind_label} LAN Link · {loss_pct}% packet loss"
+            )
+        else:
+            rating = f"{kind_label} Latency Only ({ping_ms} ms · no HTTP transfer port)"
+
+        result = {
+            "timestamp": utc_now(),
+            "targetType": target_type,
+            "targetIp": clean_ip,
+            "targetName": label,
+            "downloadMbps": dl_mbps,
+            "uploadMbps": ul_mbps,
+            "pingMs": ping_ms,
+            "jitterMs": jitter_ms,
+            "packetLossPct": loss_pct,
+            "rating": rating,
+            "server": f"{label} ({clean_ip})",
+            "method": method,
+        }
+        with self.lock:
+            self.isp_state["lastSpeedTest"] = result
+            history = self.isp_state.setdefault("speedHistory", [])
+            history.append(result)
+            del history[:-24]
+        self.broadcast(
+            "speedtest_progress",
+            {
+                **result,
+                "phase": "complete",
+                "phaseLabel": f"{kind_label} Speed Test Complete",
+                "message": (
+                    f"{label}: {dl_mbps} Mbps down / {ul_mbps} Mbps up · Ping {ping_ms} ms"
+                    if open_http
+                    else f"{label}: Ping {ping_ms} ms · Jitter {jitter_ms} ms · Loss {loss_pct}%"
+                ),
+                "currentMbps": dl_mbps,
+                "progressPct": 100,
+            },
+        )
+        self._record_event(
+            "SPEED_TEST",
+            "INFO",
+            f"{kind_label} Speed Test Complete",
+            f"Tested {label} ({clean_ip}): {dl_mbps} Mbps down / {ul_mbps} Mbps up · Ping {ping_ms} ms · Jitter {jitter_ms} ms ({method}).",
+            ip=clean_ip,
+            device_name=label,
+        )
+        self.broadcast("speedtest_result", result)
+        return result
+
+    def run_speedtest(self, target: dict | None = None) -> dict:
         self = cast("Monitor", self)
         if not manual_speed_tests_enabled():
             raise RuntimeError("Active speed tests are disabled. Live interface throughput is still available.")
@@ -557,6 +771,12 @@ class IspSpeedMixin:
         self._isp_set(speedTestRunning=True, speedTestError=None)
         phase = "Latency"
         try:
+            if isinstance(target, dict):
+                t_type = str(target.get("targetType") or "isp").strip().lower()
+                t_ip = str(target.get("targetIp") or "").strip()
+                t_name = str(target.get("targetName") or "").strip()
+                if t_type in {"router", "device"} and t_ip:
+                    return self._run_lan_target_speedtest(t_type, t_ip, t_name)
             self.broadcast(
                 "speedtest_progress",
                 {

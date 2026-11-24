@@ -89,7 +89,7 @@
         <a href="#events" data-nav="events" onclick="navigateSidebar('events', event)">
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-            Event Log
+            History &amp; Logs
           </span>
           <span class="side-badge cyan" id="sideBadgeEvents">0</span>
         </a>
@@ -289,6 +289,31 @@
         <ol id="maintenanceWindows" class="device-history-events"></ol>
         <h3>Incident notifications</h3>
         <p id="notificationMode" class="gateway-note"></p>
+        <form class="device-snmp" id="notificationSettingsForm" onsubmit="saveNotificationSettings(event)" autocomplete="off">
+          <label style="display:flex;align-items:center;gap:8px;font-size:0.84rem;cursor:pointer;">
+            <input type="checkbox" id="notifEnabled">
+            <span>Enable external outage &amp; alert delivery (Webhook / Telegram)</span>
+          </label>
+          <label class="device-lookup-label" for="notifWebhookUrl">Webhook URL (Slack / Discord / Teams / JSON)</label>
+          <input class="form-control" type="url" id="notifWebhookUrl" placeholder="https://hooks.slack.com/services/...">
+          <label class="device-lookup-label" for="notifTelegramToken">Telegram Bot Token (optional)</label>
+          <input class="form-control" type="password" id="notifTelegramToken" placeholder="123456:ABC-DEF...">
+          <label class="device-lookup-label" for="notifTelegramChatId">Telegram Chat ID (optional)</label>
+          <input class="form-control" type="text" id="notifTelegramChatId" placeholder="-1001234567890">
+          <label class="device-lookup-label" for="notifOfflineConfirm">Flapping protection (consecutive offline checks before alerting)</label>
+          <select class="form-control" id="notifOfflineConfirm">
+            <option value="1">1 check — Immediate alert</option>
+            <option value="2">2 checks — Balanced (recommended)</option>
+            <option value="3">3 checks — Strict debounce</option>
+            <option value="4">4 checks — Extra strict</option>
+            <option value="5">5 checks — Maximum debounce</option>
+          </select>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <button type="submit" class="btn btn-primary">Save alert settings</button>
+            <button type="button" class="btn btn-secondary" onclick="testNotificationChannels(this)">Send test alert</button>
+          </div>
+          <p id="notifSettingsFeedback" class="device-connection-feedback" role="status"></p>
+        </form>
         <ol id="incidentNotices" class="device-history-events"></ol>
       </dialog>
       <dialog class="device-lookup device-connection" id="switchPortsDialog" aria-labelledby="switchPortsTitle">
@@ -859,8 +884,13 @@
           <button type="button" class="btn btn-secondary" id="btnRecheckIsp" onclick="recheckIspConnectionNow()" style="font-size: 0.82rem; padding: 8px 14px;">
             🔄 Re-Check Internet Now
           </button>
+          <select id="speedTestTargetSelect" class="form-control" style="width: auto; min-width: 210px; max-width: 280px; padding: 7px 10px; font-size: 0.82rem;" onchange="onSpeedTestTargetChange()" aria-label="Select speed test target">
+            <optgroup label="Internet (ISP)">
+              <option value="isp|cloudflare|Internet (ISP · Cloudflare)">🌐 Internet (ISP · Cloudflare)</option>
+            </optgroup>
+          </select>
           <button type="button" class="btn btn-primary" id="btnRunSpeedTest" onclick="runSpeedTestNow()" aria-describedby="speedTestAvailability" disabled>
-            ⚡ Test Internet Speed Now
+            ⚡ Test Speed Now
           </button>
         </div>
       </div>
@@ -1965,7 +1995,7 @@
       </div>
     </section>
 
-    <!-- SECTION 6: LIVE AUTO-REFRESHING NETWORK LOGS -->
+    <!-- SECTION 6: HISTORY LOGS & LIVE AUTO-REFRESHING NETWORK CONSOLE -->
     <section class="glass-card" id="eventsSection" style="display: none;">
       <div class="card-header">
         <div class="card-title-group">
@@ -1980,15 +2010,103 @@
           </div>
           <div>
             <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-              <h2>Live Network Logs</h2>
+              <h2>History Logs &amp; Live Console</h2>
               <span class="status-pill online" id="eventsLiveBadge">● Auto-Refresh ON (5s)</span>
               <span class="mono-chip" id="eventsShowingCount">0 logs</span>
             </div>
-            <p>Shows everything currently happening across your network in real time — device outages, recoveries, IP changes, cable links, and scan activity. <span class="mono" id="eventsLastUpdated" style="font-size:0.74rem; color:var(--accent-cyan);"></span></p>
+            <p>Searchable audit trail of outages, recoveries, device/IP changes, alerts, and notifications — plus a real-time tail console. <span class="mono" id="eventsLastUpdated" style="font-size:0.74rem; color:var(--accent-cyan);"></span></p>
           </div>
         </div>
 
         <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+          <div class="filter-tab-pills" id="eventLogViewSwitcher" role="tablist" aria-label="Log view mode">
+            <button type="button" class="filter-tab active" data-log-view="history" onclick="switchEventLogView('history')" role="tab" aria-selected="true">📋 History Logs</button>
+            <button type="button" class="filter-tab" data-log-view="live" onclick="switchEventLogView('live')" role="tab" aria-selected="false">💻 Live Console</button>
+          </div>
+          <a class="btn btn-secondary" id="btnExportHistoryCsv" href="/api/network/history/export" style="font-size: 0.78rem; text-decoration: none;">
+            📥 Export CSV
+          </a>
+          <button type="button" class="btn btn-secondary" onclick="clearEventLogs()" style="font-size: 0.78rem;">
+            🗑️ Clear Logs
+          </button>
+        </div>
+      </div>
+
+      <!-- TAB 1: STRUCTURED HISTORY LOGS (DEFAULT) -->
+      <div id="historyLogsPane">
+        <div class="alert-ops-ribbon" style="margin-bottom: 14px;">
+          <div class="ops-metric-item">
+            <div class="ops-label">MATCHING LOGS</div>
+            <div class="ops-val" id="histStatTotal">0</div>
+          </div>
+          <div class="ops-metric-item">
+            <div class="ops-label">CRITICAL / OUTAGES</div>
+            <div class="ops-val crit" id="histStatCrit">0</div>
+          </div>
+          <div class="ops-metric-item">
+            <div class="ops-label">WARNINGS</div>
+            <div class="ops-val warn" id="histStatWarn">0</div>
+          </div>
+          <div class="ops-metric-item">
+            <div class="ops-label">INFO / RECOVERIES</div>
+            <div class="ops-val res" id="histStatInfo">0</div>
+          </div>
+        </div>
+
+        <div class="alert-filter-bar" style="margin-bottom: 12px; gap: 8px;">
+          <div class="filter-tab-pills" id="historyCategoryTabs">
+            <button type="button" class="filter-tab active" data-hist-cat="all" onclick="setHistoryCategory('all')">All History</button>
+            <button type="button" class="filter-tab" data-hist-cat="alerts" onclick="setHistoryCategory('alerts')">🚨 Outages &amp; Alerts</button>
+            <button type="button" class="filter-tab" data-hist-cat="devices" onclick="setHistoryCategory('devices')">📡 Devices &amp; IPs</button>
+            <button type="button" class="filter-tab" data-hist-cat="gaming" onclick="setHistoryCategory('gaming')">🎮 Game Activity</button>
+            <button type="button" class="filter-tab" data-hist-cat="system" onclick="setHistoryCategory('system')">⚙️ Scans &amp; System</button>
+          </div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+            <select id="historySeveritySelect" class="form-control" style="width: auto; min-width: 130px; padding: 6px 10px; font-size: 0.8rem;" onchange="loadHistoryLogs(false)" aria-label="Filter by severity">
+              <option value="all">All Severities</option>
+              <option value="CRITICAL">Critical only</option>
+              <option value="WARNING">Warnings only</option>
+              <option value="INFO">Info only</option>
+            </select>
+            <select id="historyDaysSelect" class="form-control" style="width: auto; min-width: 125px; padding: 6px 10px; font-size: 0.8rem;" onchange="loadHistoryLogs(false)" aria-label="Filter by time range">
+              <option value="0">All time</option>
+              <option value="1">Last 24 hours</option>
+              <option value="7" selected>Last 7 days</option>
+              <option value="30">Last 30 days</option>
+            </select>
+            <div class="filter-search-box" style="margin: 0;">
+              <input type="search" id="historySearchInput" placeholder="Search IP, MAC, device, or message..." oninput="handleHistorySearch(this.value)">
+            </div>
+            <button type="button" class="btn btn-secondary" onclick="loadHistoryLogs(false)" style="font-size: 0.78rem;">🔄 Refresh</button>
+          </div>
+        </div>
+
+        <div class="device-list-table-wrap" style="max-height: 520px; overflow-y: auto;">
+          <table class="device-list-table">
+            <thead>
+              <tr>
+                <th style="width: 16%;">Date &amp; Time</th>
+                <th style="width: 10%;">Severity</th>
+                <th style="width: 15%;">Category &amp; Type</th>
+                <th style="width: 20%;">Device / IP / MAC</th>
+                <th style="width: 39%;">Details</th>
+              </tr>
+            </thead>
+            <tbody id="historyLogsTableBody">
+              <tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-dim);">Loading history logs…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; gap: 10px; flex-wrap: wrap;">
+          <span id="historyPaginationSummary" style="font-size: 0.8rem; color: var(--text-dim);">Showing 0 entries</span>
+          <button type="button" class="btn btn-secondary" id="btnHistoryLoadMore" onclick="loadHistoryLogs(true)" style="display: none; font-size: 0.8rem;">Load more logs</button>
+        </div>
+      </div>
+
+      <!-- TAB 2: LIVE POWERSHELL-STYLE CONSOLE (PRESERVED) -->
+      <div id="liveConsolePane" style="display: none;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px;">
           <button type="button" class="btn btn-secondary" id="btnToggleTerminalTicks" onclick="toggleTerminalTicks()" style="font-size: 0.78rem;">
             📡 Live Updates: ON
           </button>
@@ -2001,43 +2119,41 @@
           <button type="button" class="btn btn-secondary" id="btnRefreshEventsNow" onclick="refreshNetworkLogsNow()" style="font-size: 0.78rem;">
             🔄 Refresh Now
           </button>
-          <button type="button" class="btn btn-secondary" onclick="clearEventLogs()" style="font-size: 0.78rem;">
-            🗑️ Clear Terminal
-          </button>
         </div>
-      </div>
 
-      <div class="alert-filter-bar" style="margin-bottom: 12px;">
-        <div class="filter-tab-pills" id="eventLogFilterTabs">
-          <button type="button" class="filter-tab active" data-ev-filter="all" onclick="setEventLogFilter('all')">All Activity</button>
-          <button type="button" class="filter-tab" data-ev-filter="critical" onclick="setEventLogFilter('critical')">🚨 Critical</button>
-          <button type="button" class="filter-tab" data-ev-filter="warning" onclick="setEventLogFilter('warning')">⚠️ Warnings</button>
-          <button type="button" class="filter-tab" data-ev-filter="info" onclick="setEventLogFilter('info')">🟢 Online &amp; Info</button>
-          <button type="button" class="filter-tab" data-ev-filter="device" onclick="setEventLogFilter('device')">📡 Devices, Router &amp; Scans</button>
-          <button type="button" class="filter-tab" data-ev-filter="topology" onclick="setEventLogFilter('topology')">🌐 WAN, Topology &amp; Pings</button>
-        </div>
-        <div class="filter-search-box">
-          <input type="text" id="eventSearchInput" placeholder="Search logs by IP, device name, or message..." oninput="handleEventLogSearch(this.value)">
-        </div>
-      </div>
-
-      <div class="ps-terminal-shell">
-        <div class="ps-terminal-titlebar">
-          <div class="ps-terminal-dots">
-            <span class="dot-red"></span>
-            <span class="dot-amber"></span>
-            <span class="dot-green"></span>
-            <span class="ps-terminal-cmd">Vertex Sentry network events</span>
+        <div class="alert-filter-bar" style="margin-bottom: 12px;">
+          <div class="filter-tab-pills" id="eventLogFilterTabs">
+            <button type="button" class="filter-tab active" data-ev-filter="all" onclick="setEventLogFilter('all')">All Activity</button>
+            <button type="button" class="filter-tab" data-ev-filter="critical" onclick="setEventLogFilter('critical')">🚨 Critical</button>
+            <button type="button" class="filter-tab" data-ev-filter="warning" onclick="setEventLogFilter('warning')">⚠️ Warnings</button>
+            <button type="button" class="filter-tab" data-ev-filter="info" onclick="setEventLogFilter('info')">🟢 Online &amp; Info</button>
+            <button type="button" class="filter-tab" data-ev-filter="device" onclick="setEventLogFilter('device')">📡 Devices, Router &amp; Scans</button>
+            <button type="button" class="filter-tab" data-ev-filter="gaming" onclick="setEventLogFilter('gaming')">🎮 Games</button>
+            <button type="button" class="filter-tab" data-ev-filter="topology" onclick="setEventLogFilter('topology')">🌐 WAN, Topology &amp; Pings</button>
           </div>
-          <span class="ps-terminal-hint">Live Console • Oldest → Newest (tail -f)</span>
+          <div class="filter-search-box">
+            <input type="text" id="eventSearchInput" placeholder="Search logs by IP, device name, or message..." oninput="handleEventLogSearch(this.value)">
+          </div>
         </div>
-        <div class="ps-terminal-body" id="incidentsContainer">
-          <!-- PowerShell-style live log stream rendered here -->
-        </div>
-        <div class="ps-terminal-prompt-bar">
-          <span class="ps-prompt-prefix">Vertex Sentry</span>
-          <span class="ps-prompt-text" id="psTerminalPromptText">Streaming live network telemetry...</span>
-          <span class="ps-cursor"></span>
+
+        <div class="ps-terminal-shell">
+          <div class="ps-terminal-titlebar">
+            <div class="ps-terminal-dots">
+              <span class="dot-red"></span>
+              <span class="dot-amber"></span>
+              <span class="dot-green"></span>
+              <span class="ps-terminal-cmd">Vertex Sentry network events</span>
+            </div>
+            <span class="ps-terminal-hint">Live Console • Oldest → Newest (tail -f)</span>
+          </div>
+          <div class="ps-terminal-body" id="incidentsContainer">
+            <!-- PowerShell-style live log stream rendered here -->
+          </div>
+          <div class="ps-terminal-prompt-bar">
+            <span class="ps-prompt-prefix">Vertex Sentry</span>
+            <span class="ps-prompt-text" id="psTerminalPromptText">Streaming live network telemetry...</span>
+            <span class="ps-cursor"></span>
+          </div>
         </div>
       </div>
     </section>
@@ -2544,17 +2660,17 @@
   </div>
 
   <!-- Modular Application Scripts -->
-  <script src="/js/state.js?v=20261120-operations"></script>
-  <script src="/js/overview-lan.js?v=20261123-audit"></script>
+  <script src="/js/state.js?v=20261124-accuracy"></script>
+  <script src="/js/overview-lan.js?v=20261124-accuracy"></script>
   <script src="/js/alerts-router.js?v=20261123-gateway"></script>
-  <script src="/js/operations.js?v=20261120-incident-list"></script>
-  <script src="/js/isp-speedtest.js?v=20261123-speedtest"></script>
-  <script src="/js/charts-timeline.js?v=20261120-history"></script>
+  <script src="/js/operations.js?v=20261124-accuracy"></script>
+  <script src="/js/isp-speedtest.js?v=20261124-targets"></script>
+  <script src="/js/charts-timeline.js?v=20261124-livegame"></script>
   <script src="/js/nmap-scanner.js?v=20261120b"></script>
   <script src="/js/topology.js?v=20261120-controls"></script>
-  <script src="/js/game-detector.js?v=20261123-android"></script>
+  <script src="/js/game-detector.js?v=20261124-accuracy"></script>
   <script src="/js/modals-tools.js?v=20261120-port-check"></script>
-  <script src="/js/app.js?v=20261123-audit"></script>
+  <script src="/js/app.js?v=20261124-livegame"></script>
 </body>
 </html>
 

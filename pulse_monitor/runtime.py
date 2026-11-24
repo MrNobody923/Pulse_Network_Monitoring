@@ -55,7 +55,7 @@ class DashboardServer(ThreadedWSGIServer):
 
     def handle_error(self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple) -> None:
         _, exc, _ = sys.exc_info()
-        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, TimeoutError, socket.timeout)):
             return
         super().handle_error(request, client_address)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import ipaddress
 import json
 import os
@@ -394,6 +395,94 @@ class DiscoveryMixin:
         with ThreadPoolExecutor(max_workers=64) as pool:
             return [h for h in pool.map(ping, hosts) if h is not None]
 
+    @staticmethod
+    def _is_valid_unicast_mac(mac: str) -> bool:
+        clean = str(mac or "").strip().lower().replace("-", ":")
+        if not re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", clean):
+            return False
+        if clean in {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"}:
+            return False
+        try:
+            # Bit 0 of first octet = 1 means multicast/broadcast
+            if int(clean[:2], 16) & 1:
+                return False
+        except ValueError:
+            return False
+        return True
+
+    @classmethod
+    def _win32_send_arp(cls, ip: str) -> str:
+        """Resolve true L2 hardware MAC for a local IPv4 address using Windows iphlpapi.SendARP."""
+        if os.name != "nt":
+            return ""
+        try:
+            packed = socket.inet_aton(ip)
+            dest_ip = int.from_bytes(packed, byteorder="little")
+            mac_buf = (ctypes.c_ubyte * 6)()
+            mac_len = ctypes.c_ulong(6)
+            ret = ctypes.windll.iphlpapi.SendARP(dest_ip, 0, ctypes.byref(mac_buf), ctypes.byref(mac_len))
+            if ret == 0 and mac_len.value == 6:
+                mac = ":".join(f"{b:02x}" for b in mac_buf)
+                if cls._is_valid_unicast_mac(mac):
+                    return mac
+        except Exception:
+            pass
+        return ""
+
+    @classmethod
+    def _local_host_macs(cls, run: Callable[..., subprocess.CompletedProcess[str]]) -> dict[str, str]:
+        """Return {ipv4: hardware_mac} for this machine's active physical LAN adapters."""
+        if os.name != "nt":
+            return {}
+        excluded = (
+            "virtual", "vmware", "virtualbox", "vethernet", "wsl",
+            "docker", "loopback", "tailscale", "zerotier", "vpn", "local area connection*",
+        )
+        out: dict[str, str] = {}
+        try:
+            res = run(["ipconfig", "/all"], capture_output=True, text=True, timeout=8, check=False)
+            if not res.stdout:
+                return {}
+            cur_name = ""
+            cur_mac = ""
+            cur_ips: list[str] = []
+            disconnected = False
+
+            def flush() -> None:
+                if cur_name and cur_mac and cur_ips and not disconnected:
+                    if not any(tok in cur_name.lower() for tok in excluded):
+                        if cls._is_valid_unicast_mac(cur_mac):
+                            for ip_s in cur_ips:
+                                out[ip_s] = cur_mac
+
+            for raw_line in res.stdout.splitlines():
+                line = raw_line.rstrip()
+                if line and not line.startswith(" ") and line.endswith(":"):
+                    flush()
+                    cur_name = line[:-1].strip()
+                    cur_mac = ""
+                    cur_ips = []
+                    disconnected = False
+                    continue
+                if "Media disconnected" in line:
+                    disconnected = True
+                elif "Physical Address" in line and ":" in line:
+                    m = re.search(r"([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})", line)
+                    if m:
+                        cur_mac = m.group(1).lower().replace("-", ":")
+                elif "IPv4 Address" in line and ":" in line:
+                    val = re.sub(r"\(.*?\)", "", line.split(":", 1)[1]).strip()
+                    try:
+                        addr = ipaddress.IPv4Address(val)
+                        if addr.is_private and not addr.is_link_local:
+                            cur_ips.append(str(addr))
+                    except ValueError:
+                        pass
+            flush()
+        except Exception:
+            return {}
+        return out
+
     def _read_arp_entries(self, platform: str, run: Callable[..., subprocess.CompletedProcess[str]]) -> list[tuple[str, str, str]]:
         """Read IP -> MAC neighbor entries across Windows (`arp -a`) and Linux (`ip neigh` / `/proc/net/arp`)."""
         lines: list[str] = []
@@ -427,8 +516,14 @@ class DiscoveryMixin:
             except OSError:
                 pass
 
-        entries: list[tuple[str, str, str]] = []
+        # Parse per-interface sections so same-subnet dynamic entries beat stale cross-adapter entries.
+        current_iface_ip = ""
+        parsed: list[tuple[str, str, str, str]] = []  # (ip, mac, kind, iface_ip)
         for line in lines:
+            iface_match = re.match(r"^\s*Interface:\s*(\d{1,3}(?:\.\d{1,3}){3})\s+---", line, re.IGNORECASE)
+            if iface_match:
+                current_iface_ip = iface_match.group(1)
+                continue
             match = re.search(
                 r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3}).*?"
                 r"(?P<mac>(?:[0-9a-fA-F]{2}[-:]){5}[0-9a-fA-F]{2})",
@@ -436,17 +531,41 @@ class DiscoveryMixin:
             )
             if not match:
                 continue
+            ip_s = match.group("ip")
+            mac_s = match.group("mac").lower().replace("-", ":")
+            if not self._is_valid_unicast_mac(mac_s):
+                continue
             kind = "dynamic"
             lower_line = line.lower()
             if "static" in lower_line or "permanent" in lower_line:
                 kind = "static"
-            entries.append((match.group("ip"), match.group("mac"), kind))
-        # Conflicting neighbor entries can come from different adapters or stale bindings.
-        macs_by_ip: dict[str, set[str]] = {}
-        for ip, mac, _ in entries:
-            macs_by_ip.setdefault(ip, set()).add(mac.lower().replace("-", ":"))
-        return [(ip, mac, kind) for ip, mac, kind in entries
-                if len(macs_by_ip[ip]) == 1 and not int(mac[:2], 16) & 1]
+            parsed.append((ip_s, mac_s, kind, current_iface_ip))
+
+        # Group by IP; if multiple MACs exist across different interfaces, prefer same-/24 dynamic entry.
+        by_ip: dict[str, list[tuple[str, str, str]]] = {}
+        for ip_s, mac_s, kind, iface_ip in parsed:
+            by_ip.setdefault(ip_s, []).append((mac_s, kind, iface_ip))
+
+        result: list[tuple[str, str, str]] = []
+        for ip_s, candidates in by_ip.items():
+            unique_macs = {c[0] for c in candidates}
+            if len(unique_macs) == 1:
+                best_kind = "dynamic" if any(c[1] == "dynamic" for c in candidates) else candidates[0][1]
+                result.append((ip_s, next(iter(unique_macs)), best_kind))
+                continue
+            # Resolve cross-interface conflict by preferring same /24 interface + dynamic state
+            ip_prefix = ".".join(ip_s.split(".")[:3])
+            same_subnet = [c for c in candidates if c[2] and ".".join(c[2].split(".")[:3]) == ip_prefix]
+            same_sub_macs = {c[0] for c in same_subnet}
+            if len(same_sub_macs) == 1:
+                best_kind = "dynamic" if any(c[1] == "dynamic" for c in same_subnet) else same_subnet[0][1]
+                result.append((ip_s, next(iter(same_sub_macs)), best_kind))
+            else:
+                dyn_same = [c for c in same_subnet if c[1] == "dynamic"]
+                dyn_macs = {c[0] for c in dyn_same}
+                if len(dyn_macs) == 1:
+                    result.append((ip_s, next(iter(dyn_macs)), "dynamic"))
+        return result
 
     def discover_devices(self) -> dict:
         self = cast("Monitor", self)
@@ -502,12 +621,77 @@ class DiscoveryMixin:
                     "observed": True,
                 })
 
-            # In bridged Docker containers, L2 ARP only sees the Docker bridge; record ICMP-alive LAN hosts too
+            # Merge local monitoring PC's own physical NIC IP -> MAC (never in its own ARP cache)
+            is_mocked_subproc = hasattr(subproc_mod.run, "assert_called")
+            if os_mod.name == "nt" and not is_mocked_subproc:
+                for host_ip, host_mac in self._local_host_macs(subproc_mod.run).items():
+                    if host_ip in seen_ips:
+                        continue
+                    try:
+                        addr = ipaddress.ip_address(host_ip)
+                    except ValueError:
+                        continue
+                    if not any(addr in network for network in networks):
+                        continue
+                    seen_ips.add(host_ip)
+                    oui = host_mac.replace(":", "")[:6]
+                    vendor, device_type = self._vendor_for_oui(oui)
+                    discovered.append({
+                        "ip": host_ip,
+                        "mac": host_mac,
+                        "arpType": "static",
+                        "vendor": vendor,
+                        "type": device_type,
+                        "suggestedName": "",
+                        "latencyMs": None,
+                        "observed": True,
+                    })
+
+            # Merge authoritative router DHCP/ARP clients for IPs not yet resolved locally
+            router_clients = (getattr(self, "router_state", None) or {}).get("routerClients") or []
+            for rc in router_clients:
+                if not isinstance(rc, dict):
+                    continue
+                rc_ip = str(rc.get("ip") or "").strip()
+                rc_mac = str(rc.get("mac") or "").strip().lower().replace("-", ":")
+                if not rc_ip or rc_ip in seen_ips or not self._is_valid_unicast_mac(rc_mac):
+                    continue
+                try:
+                    addr = ipaddress.ip_address(rc_ip)
+                except ValueError:
+                    continue
+                if addr.version != 4 or not addr.is_private or not any(addr in network for network in networks):
+                    continue
+                seen_ips.add(rc_ip)
+                oui = rc_mac.replace(":", "")[:6]
+                vendor, device_type = self._vendor_for_oui(oui)
+                if addr in gw_plus_one or rc_ip in known_gateways:
+                    device_type = "gateway"
+                rc_name = str(rc.get("name") or rc.get("hostname") or "").strip()
+                discovered.append({
+                    "ip": rc_ip,
+                    "mac": rc_mac,
+                    "arpType": "dhcp",
+                    "vendor": vendor,
+                    "type": device_type,
+                    "suggestedName": rc_name,
+                    "hostname": rc_name,
+                    "latencyMs": None,
+                    "observed": True,
+                })
+
+            # Resolve ICMP-alive LAN hosts via native Win32 SendARP before falling back to inferred MAC
             for alive_ip in ping_alive_hosts:
                 if alive_ip in seen_ips:
                     continue
                 seen_ips.add(alive_ip)
-                mac = inferred_inventory_mac(alive_ip)
+                resolved_mac = (
+                    self._win32_send_arp(alive_ip)
+                    if (os_mod.name == "nt" and not is_mocked_subproc)
+                    else ""
+                )
+                mac = resolved_mac or inferred_inventory_mac(alive_ip)
+                arp_kind = "dynamic" if resolved_mac else "icmp"
                 oui = mac.replace(":", "")[:6]
                 vendor, device_type = self._vendor_for_oui(oui)
                 addr = ipaddress.ip_address(alive_ip)
@@ -516,7 +700,7 @@ class DiscoveryMixin:
                 discovered.append({
                     "ip": alive_ip,
                     "mac": mac,
-                    "arpType": "icmp",
+                    "arpType": arp_kind,
                     "vendor": vendor,
                     "type": device_type,
                     "suggestedName": "",
@@ -524,7 +708,6 @@ class DiscoveryMixin:
                     "observed": True,
                 })
 
-            is_mocked_subproc = hasattr(subproc_mod.run, "assert_called")
             cand_ips = [item["ip"] for item in discovered]
             all_fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
             mac_by_ip = {item["ip"]: item["mac"] for item in discovered}

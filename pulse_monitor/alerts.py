@@ -42,9 +42,13 @@ class AlertsMixin:
             return
         current = bool(result["alive"])
         previous = self.device_status.get(key)
-        self.device_status[key] = current
         outage_key = f"dev-{key}"
+        pending_map: dict[str, int] = getattr(self, "_pending_offline_counts", {})
+        if not hasattr(self, "_pending_offline_counts"):
+            self._pending_offline_counts = pending_map
         if current:
+            pending_map.pop(key, None)
+            self.device_status[key] = True
             previous_alert = self.active_alerts.pop(outage_key, None)
             if previous_alert:
                 self._resolve_alert(
@@ -55,52 +59,64 @@ class AlertsMixin:
                     result,
                 )
             self._evaluate_performance(result)
-        elif previous is not False or outage_key in self.active_alerts:
-            title = f"{result['name']} ({key}) did not respond"
-            kind = "DEVICE_OFFLINE"
-            severity = "CRITICAL" if result.get("critical") else "WARNING"
-            message = f"TCP and ICMP received no reply from {key}."
-            if outage_key not in self.active_alerts:
-                alert = self._make_alert(
-                    outage_key, severity, title, message, key, result.get("port", 80)
-                )
-                alert.update({
-                    "deviceName": result["name"],
-                    "mac": result.get("mac", ""),
-                    "subnet": result.get("subnet", ""),
-                    "location": result.get("location", ""),
-                    "lastChecked": checked,
-                    "remediation": ["Verify the configured IP and check the device's power and network link."],
-                })
-                self.active_alerts[outage_key] = alert
-                self.save_alert(alert)
-                self._record_event(
-                    kind,
-                    severity,
-                    title,
-                    message,
-                    result.get("mac", ""),
-                    key,
-                    result["name"],
-                    result.get("id", ""),
-                )
-                self.broadcast("new_alert", alert)
-            else:
-                outage = self.active_alerts[outage_key]
-                was_unverified = outage.pop("verificationUnavailable", False)
-                self._update_device_outage(outage, result, checked)
-                if was_unverified:
-                    self.save_alert(outage)
-            performance_alert = self.active_alerts.pop(f"perf-{key}", None)
-            if performance_alert:
-                self._resolve_alert(
-                    f"perf-{key}",
-                    performance_alert,
-                    f"{result['name']} ({key}) is now offline; the outage alert is active.",
-                    "DEVICE_OFFLINE",
-                    result,
-                    event_title="Performance alert replaced by offline outage",
-                )
+        else:
+            try:
+                confirm_needed = max(1, min(5, int((self.config.get("thresholds") or {}).get("offlineConfirmCount", 1))))
+            except (TypeError, ValueError):
+                confirm_needed = 1
+            if outage_key not in self.active_alerts and confirm_needed > 1:
+                fails = pending_map.get(key, 0) + 1
+                pending_map[key] = fails
+                if fails < confirm_needed:
+                    return
+            pending_map.pop(key, None)
+            self.device_status[key] = False
+            if previous is not False or outage_key in self.active_alerts:
+                title = f"{result['name']} ({key}) did not respond"
+                kind = "DEVICE_OFFLINE"
+                severity = "CRITICAL" if result.get("critical") else "WARNING"
+                message = f"TCP and ICMP received no reply from {key}."
+                if outage_key not in self.active_alerts:
+                    alert = self._make_alert(
+                        outage_key, severity, title, message, key, result.get("port", 80)
+                    )
+                    alert.update({
+                        "deviceName": result["name"],
+                        "mac": result.get("mac", ""),
+                        "subnet": result.get("subnet", ""),
+                        "location": result.get("location", ""),
+                        "lastChecked": checked,
+                        "remediation": ["Verify the configured IP and check the device's power and network link."],
+                    })
+                    self.active_alerts[outage_key] = alert
+                    self.save_alert(alert)
+                    self._record_event(
+                        kind,
+                        severity,
+                        title,
+                        message,
+                        result.get("mac", ""),
+                        key,
+                        result["name"],
+                        result.get("id", ""),
+                    )
+                    self.broadcast("new_alert", alert)
+                else:
+                    outage = self.active_alerts[outage_key]
+                    was_unverified = outage.pop("verificationUnavailable", False)
+                    self._update_device_outage(outage, result, checked)
+                    if was_unverified:
+                        self.save_alert(outage)
+                performance_alert = self.active_alerts.pop(f"perf-{key}", None)
+                if performance_alert:
+                    self._resolve_alert(
+                        f"perf-{key}",
+                        performance_alert,
+                        f"{result['name']} ({key}) is now offline; the outage alert is active.",
+                        "DEVICE_OFFLINE",
+                        result,
+                        event_title="Performance alert replaced by offline outage",
+                    )
 
     @staticmethod
     def _update_device_outage(alert: dict, result: dict, checked: str) -> None:

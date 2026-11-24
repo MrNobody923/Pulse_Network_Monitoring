@@ -74,8 +74,8 @@ const WORKSPACE_META_MAP = {
     sub: 'Traceroute, DNS lookup, and TCP checks'
   },
   events: {
-    tag: 'Event Log',
-    sub: 'Network changes, outages, and recoveries'
+    tag: 'History & Logs',
+    sub: 'Searchable audit history, outages, device changes, and live console'
   },
   gaming: {
     tag: 'Game Detector',
@@ -157,7 +157,7 @@ function navigateSidebar(target, event, updateUrl = true) {
   if (subEl) subEl.textContent = meta.sub;
   document.title = `${meta.tag} | Vertex Sentry`;
 
-  window.scrollTo({ top: 0, behavior: 'instant' });
+  window.scrollTo({ top: 0, behavior: 'auto' });
 
   if (
     (target === 'overview' || target === 'internet' || target === 'ping') &&
@@ -177,8 +177,11 @@ function navigateSidebar(target, event, updateUrl = true) {
   if (target === 'nmap' && typeof loadNmapCatalog === 'function') {
     loadNmapCatalog();
   }
-  if (target === 'events' && typeof scrollTerminalToBottom === 'function') {
-    setTimeout(() => scrollTerminalToBottom(false), 30);
+  if (target === 'events') {
+    if (typeof loadHistoryLogs === 'function') loadHistoryLogs(false);
+    if (typeof scrollTerminalToBottom === 'function') {
+      setTimeout(() => scrollTerminalToBottom(false), 30);
+    }
   }
   if (target === 'gaming' && typeof scrollGameTerminalToBottom === 'function') {
     setTimeout(() => scrollGameTerminalToBottom(true), 30);
@@ -273,10 +276,12 @@ function renderTelemetryConnection() {
   const fresh = lastDashboardUpdate > 0 && Date.now() - lastDashboardUpdate < 35000;
   const mode = fresh ? (gameEventStreamConnected ? 'live' : 'polling')
     : (!lastDashboardUpdate && !snapshotFailed ? 'connecting' : 'offline');
-  if (state.dataset.state !== mode) {
+  if (state && state.dataset.state !== mode) {
     state.dataset.state = mode;
-    status.textContent = {live: 'Live updates', polling: 'Polling', offline: 'Connection lost', connecting: 'Connecting'}[mode];
-    document.getElementById('alertLiveTicker').textContent = status.textContent;
+    const label = {live: 'Live updates', polling: 'Polling', offline: 'Connection lost', connecting: 'Connecting'}[mode];
+    if (status) status.textContent = label;
+    const ticker = document.getElementById('alertLiveTicker');
+    if (ticker) ticker.textContent = label;
     renderExecutiveBanner();
   }
   if (lastDashboardSample) {
@@ -446,12 +451,61 @@ function initEventStream() {
   es.addEventListener('game_detected', e => {
     try {
       const d = JSON.parse(e.data);
+      // Capture details of ending sessions before applyEndedGameSessions removes them
+      const endedLookup = [];
+      if (Array.isArray(d.endedSessionIds) && d.endedSessionIds.length) {
+        const activeList = (appState.gameActivity && Array.isArray(appState.gameActivity.activeSessions))
+          ? appState.gameActivity.activeSessions
+          : [];
+        const activeById = new Map(activeList.map(s => [s.id, s]));
+        for (const sid of d.endedSessionIds) {
+          const found = activeById.get(sid);
+          if (found) endedLookup.push(found);
+        }
+      }
       applyGameActivitySnapshot(d.gameActivity);
       applyLiveGameDetection(d.detection, d.updated);
       applyEndedGameSessions(d.endedSessionIds);
       renderGamingSection();
       if (d.gameActivity) renderGatewayClients();
       if (d.detection && !d.updated && !d.gameActivity) refreshGameActivityAuto(true);
+
+      // Stream detected & ended game sessions directly to Live Console (when, where, status)
+      if (typeof pushTerminalTick === 'function') {
+        if (d.detection && (!d.updated || d.detection.isBlocked)) {
+          const det = d.detection;
+          const status = det.isBlocked ? 'BLOCKED' : (det.isActive === false ? 'ENDED' : 'ACTIVE');
+          const whereParts = [det.deviceName || det.ip, det.connectedTo || det.routerIp, det.zoneLabel].filter(Boolean);
+          const whenStr = det.timestamp ? new Date(det.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+          const methodInfo = [det.detectionMethod, det.matchedIndicator].filter(Boolean).join(' · ');
+          pushTerminalTick(
+            det.isBlocked ? 'CRITICAL' : 'WARNING',
+            det.isBlocked ? 'GAME_BLOCKED' : 'GAME_DETECTED',
+            '',
+            `${det.gameIcon || '🎮'} ${det.gameName || det.gameId} | When: ${whenStr} | Where: ${whereParts.join(' → ')} | Status: ${status}${methodInfo ? ` (${methodInfo})` : ''}`,
+            det.ip || ''
+          );
+        }
+        const endedSessions = Array.isArray(d.endedSessions) && d.endedSessions.length ? d.endedSessions : endedLookup;
+        for (const s of endedSessions) {
+          const whereParts = [s.deviceName || s.ip, s.connectedTo || s.routerIp, s.zoneLabel].filter(Boolean);
+          const whenStr = new Date().toLocaleTimeString();
+          pushTerminalTick(
+            'INFO',
+            'GAME_ENDED',
+            '',
+            `${s.gameIcon || '🎮'} ${s.gameName || s.gameId} | When: ${whenStr} | Where: ${whereParts.join(' → ')} | Status: ENDED → Saved to History Logs`,
+            s.ip || ''
+          );
+        }
+      }
+      if (
+        currentWorkspace === 'events' &&
+        typeof loadHistoryLogs === 'function' &&
+        (d.detection || (Array.isArray(d.endedSessionIds) && d.endedSessionIds.length > 0))
+      ) {
+        loadHistoryLogs(false);
+      }
     } catch (_) {}
   });
   ['new_alert', 'resolved_alert', 'alert_updated', 'alert_dismissed'].forEach(evName => {
@@ -475,6 +529,7 @@ function initEventStream() {
       liveTerminalTicks = [];
     }
     if (typeof renderTimeline === 'function') renderTimeline();
+    if (typeof loadHistoryLogs === 'function' && currentWorkspace === 'events') loadHistoryLogs(false);
   });
   es.addEventListener('wan_throughput', e => {
     try {
@@ -695,31 +750,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const sidebarMedia = window.matchMedia('(max-width: 960px)');
   sidebarMedia.addEventListener('change', () => closeMobileSidebar());
-  document.getElementById('deviceLookupInput').addEventListener('input', renderDeviceLookup);
-  document.getElementById('deviceLookupInput').addEventListener('keydown', event => {
-    if (event.key === 'Enter' && deviceLookupRows.length) {
-      event.preventDefault();
-      openLookupDevice(0);
-    }
-  });
-  document.getElementById('deviceLookupResults').addEventListener('click', event => {
-    const entry = event.target.closest('[data-lookup-index]');
-    if (entry) openLookupDevice(Number(entry.dataset.lookupIndex));
-  });
+  const lookupInput = document.getElementById('deviceLookupInput');
+  if (lookupInput) {
+    lookupInput.addEventListener('input', renderDeviceLookup);
+    lookupInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && deviceLookupRows.length) {
+        event.preventDefault();
+        openLookupDevice(0);
+      }
+    });
+  }
+  const lookupResults = document.getElementById('deviceLookupResults');
+  if (lookupResults) {
+    lookupResults.addEventListener('click', event => {
+      const entry = event.target.closest('[data-lookup-index]');
+      if (entry) openLookupDevice(Number(entry.dataset.lookupIndex));
+    });
+  }
   const settings = document.getElementById('headerSettings');
   document.addEventListener('click', event => {
-    if (settings.open && (!settings.contains(event.target) || event.target.closest('#btnRouterConfig'))) settings.open = false;
+    if (settings && settings.open && (!settings.contains(event.target) || event.target.closest('#btnRouterConfig'))) settings.open = false;
   });
   document.addEventListener('keydown', event => {
     if (event.defaultPrevented) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       openDeviceLookup();
-    } else if (event.key === 'Escape' && document.getElementById('appSidebar').classList.contains('open')) {
+    } else if (event.key === 'Escape' && document.getElementById('appSidebar')?.classList.contains('open')) {
       closeMobileSidebar(true);
-    } else if (event.key === 'Escape' && settings.open) {
+    } else if (event.key === 'Escape' && settings && settings.open) {
       settings.open = false;
-      settings.querySelector('summary').focus();
+      settings.querySelector('summary')?.focus();
     }
   });
   window.addEventListener('hashchange', restoreWorkspace);
@@ -734,7 +795,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let livePollInProgress = false;
   setInterval(async () => {
     if (document.hidden) return;
-    const hostAge = Date.now() - Date.parse(appState.isp?.liveThroughput?.timestamp);
+    const hostAge = Date.now() - Date.parse(appState.isp?.liveThroughput?.timestamp || '');
     if (gameEventStreamConnected && hostAge < 4000) return;
     renderLiveIspTelemetry();
     if (livePollInProgress) return;
