@@ -126,8 +126,8 @@ function updateTopoModeBanner(customMsg = '', tone = '') {
       : 'Cable Mode: Click the SOURCE device first, then click a target device to wire them together.';
   } else if (topoToolMode === 'pdu') {
     txt.textContent = topoPduSourceId
-      ? 'Test Ping Mode: Now click the DESTINATION device to check the cable path and test the connection.'
-      : 'Test Ping Mode: Click any starting device (or double-click a target) to send a live test ping.';
+      ? 'Choose the destination to check whether it responds from the monitor.'
+      : 'Choose two nodes to compare the saved map, or double-click a device to check its connection.';
   } else {
     txt.textContent =
       'Move Mode: Drag device icons to organize your map, click any device or cable to view details, or pick a tool above.';
@@ -376,6 +376,8 @@ function renderTopologySection() {
 }
 
 function renderTopologyCanvas() {
+  const viewport = document.getElementById('topoViewport');
+  if (viewport && deferDashboardControlRender(viewport, renderTopologyCanvas)) return;
   const topo = getTopologyData();
   const nodes = topo.nodes || [];
   const links = topo.links || [];
@@ -432,7 +434,7 @@ function renderTopologyCanvas() {
       const portLabel = [ln.sourcePort, ln.targetPort].filter(Boolean).join(' ↔ ');
       return `
         <g>
-          <line class="topo-link-hit" x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" onclick="selectTopologyLink('${esc(ln.id)}')"></line>
+          <line class="topo-link-hit" x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}" onclick="selectTopologyLink(${inlineString(ln.id)})"></line>
           <line class="topo-link-line ${esc(ln.cableType)} state-${esc(cableHealth)} ${dimmed ? 'dimmed' : ''}"
                 style="${isSelected ? 'stroke-width:4.2;' : ''}"
                 x1="${s.x}" y1="${s.y}" x2="${d.x}" y2="${d.y}"></line>
@@ -475,7 +477,7 @@ function renderTopologyCanvas() {
         <div class="topo-node state-${esc(hs)} ${isSelected ? 'selected' : ''} ${isSrc ? 'cable-source' : ''} ${dimmed ? 'dimmed' : ''}"
              data-topo-node-id="${esc(n.id)}"
              style="left: ${n.x}px; top: ${n.y}px;">
-          <button type="button" class="topo-node-cable-btn" title="Connect cable from ${esc(n.name)}" onclick="startQuickCableFromNode(event, '${esc(n.id)}')">⚡</button>
+          <button type="button" class="topo-node-cable-btn" title="Connect cable from ${esc(n.name)}" onclick="startQuickCableFromNode(event, ${inlineString(n.id)})">⚡</button>
           <div class="topo-node-icon">${getTopologyDeviceSvg(n.node_type, hs)}</div>
           <span class="topo-node-badge ${esc(hs)}">${esc(n.statusLabel || hs)}</span>
           <div class="topo-node-name" title="${esc(n.name)}">${esc(n.name)}</div>
@@ -536,26 +538,45 @@ function bindTopoNodeInteractions() {
         }
       };
 
-      const onUp = async ev => {
+      const finishDrag = () => {
         el.removeEventListener('pointermove', onMove);
         el.removeEventListener('pointerup', onUp);
+        el.removeEventListener('pointercancel', onCancel);
         el.style.cursor = 'grab';
+      };
+      const onUp = async () => {
+        finishDrag();
         if (!moved) {
           handleTopoNodeClick(nodeId);
         } else {
           const finalX = parseFloat(el.style.left) || origLeft;
           const finalY = parseFloat(el.style.top) || origTop;
+          const node = (getTopologyData().nodes || []).find(item => item.id === nodeId);
+          if (node) Object.assign(node, {x: finalX, y: finalY});
+          renderTopologyCanvas();
           try {
             await apiJson(`/api/topology/node/${encodeURIComponent(nodeId)}/position`, {
               method: 'POST',
               body: JSON.stringify({ x: finalX, y: finalY })
             });
-          } catch (_) {}
+          } catch (error) {
+            if (node) Object.assign(node, {x: origLeft, y: origTop});
+            await loadInitialState();
+            renderTopologyCanvas();
+            updateTopoModeBanner(`Could not save device position. ${error.message}`, 'warning');
+          }
         }
+      };
+      const onCancel = () => {
+        finishDrag();
+        const node = (getTopologyData().nodes || []).find(item => item.id === nodeId);
+        if (moved && node) Object.assign(node, {x: origLeft, y: origTop});
+        renderTopologyCanvas();
       };
 
       el.addEventListener('pointermove', onMove);
       el.addEventListener('pointerup', onUp);
+      el.addEventListener('pointercancel', onCancel);
     });
   });
 }
@@ -643,6 +664,7 @@ function locateTopologyNode(nodeId) {
 function renderTopologyInspector() {
   const box = document.getElementById('topoInspector');
   if (!box) return;
+  if (deferDashboardControlRender(box, renderTopologyInspector)) return;
   const topo = getTopologyData();
 
   if (topoSelectedLinkId) {
@@ -660,7 +682,7 @@ function renderTopologyInspector() {
           <span>Target</span><strong>${esc(ln.targetName)} ${ln.targetPort ? `(${esc(ln.targetPort)})` : ''}</strong>
           <span>Medium</span><strong class="mono">${esc(String(ln.cableType || 'copper').toUpperCase())}</strong>
         </div>
-        <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red);" onclick="deleteTopologyLink('${esc(ln.id)}')">
+        <button type="button" class="btn btn-secondary btn-xs" style="border-color:var(--accent-red); color:var(--accent-red);" onclick="deleteTopologyLink(${inlineString(ln.id)})">
           ✕ Disconnect / Delete Cable
         </button>
       `;
@@ -686,7 +708,7 @@ function renderTopologyInspector() {
                ${problems
                  .slice(0, 6)
                  .map(
-                   p => `<button type="button" class="btn btn-secondary btn-xs" style="justify-content:space-between;" onclick="locateTopologyNode('${esc(p.id)}')">
+                   p => `<button type="button" class="btn btn-secondary btn-xs" style="justify-content:space-between;" onclick="locateTopologyNode(${inlineString(p.id)})">
                      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(p.name)}</span>
                      <span style="color:var(--accent-red); font-weight:800;">${esc(p.statusLabel)}</span>
                    </button>`
@@ -753,7 +775,7 @@ function renderTopologyInspector() {
                 const peer = ln.sourceId === node.id ? ln.targetName : ln.sourceName;
                 return `<div style="display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:0.74rem; padding:3px 0; border-bottom:1px solid var(--border-subtle);">
                   <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(peer)} (${esc(ln.cableType)})</span>
-                  <button type="button" class="btn btn-secondary btn-xs" onclick="deleteTopologyLink('${esc(ln.id)}')">Unlink</button>
+                  <button type="button" class="btn btn-secondary btn-xs" onclick="deleteTopologyLink(${inlineString(ln.id)})">Unlink</button>
                 </div>`;
               })
               .join('')
@@ -762,15 +784,15 @@ function renderTopologyInspector() {
     </div>
 
     <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:auto;">
-      <button type="button" class="btn btn-primary btn-xs" onclick="sendTopologyPduPing('${esc(node.id)}', '${esc(node.id)}')">⚡ Test Ping</button>
-      <button type="button" class="btn btn-secondary btn-xs" onclick="startQuickCableFromNode(event, '${esc(node.id)}')">🔌 Connect Cable</button>
+      <button type="button" class="btn btn-primary btn-xs" onclick="sendTopologyPduPing(${inlineString(node.id)}, ${inlineString(node.id)})">⚡ Test Ping</button>
+      <button type="button" class="btn btn-secondary btn-xs" onclick="startQuickCableFromNode(event, ${inlineString(node.id)})">🔌 Connect Cable</button>
       ${
         node.ip
-          ? `<button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts('${esc(node.ip)}', '${esc(node.name)}')">🛡️ Nmap</button>`
+          ? `<button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts(${inlineString(node.ip)}, ${inlineString(node.name)})">🛡️ Nmap</button>`
           : ''
       }
-      <button type="button" class="btn btn-secondary btn-xs" onclick="openEditTopologyNodeModal('${esc(node.id)}')">✎ Edit</button>
-      <button type="button" class="btn btn-secondary btn-xs" style="color:var(--accent-red);" onclick="deleteTopologyNode('${esc(node.id)}')">✕ Remove</button>
+      <button type="button" class="btn btn-secondary btn-xs" onclick="openEditTopologyNodeModal(${inlineString(node.id)})">✎ Edit</button>
+      <button type="button" class="btn btn-secondary btn-xs" style="color:var(--accent-red);" onclick="deleteTopologyNode(${inlineString(node.id)})">✕ Remove</button>
     </div>
   `;
 }
@@ -784,6 +806,7 @@ function renderTopologyTables() {
 function renderTopologyDevicesTable(topo) {
   const tbody = document.getElementById('topoDevicesTableBody');
   if (!tbody) return;
+  if (deferDashboardControlRender(tbody, () => renderTopologyDevicesTable(topo))) return;
   const nodes = topo.nodes || [];
   const links = topo.links || [];
 
@@ -855,9 +878,9 @@ function renderTopologyDevicesTable(topo) {
           </td>
           <td style="text-align:right;">
             <div class="row-actions-group">
-              <button type="button" class="btn btn-secondary btn-xs" onclick="locateTopologyNode('${esc(n.id)}')">Map</button>
-              <button type="button" class="btn btn-secondary btn-xs" onclick="sendTopologyPduPing('${esc(n.id)}', '${esc(n.id)}')">Ping</button>
-              <button type="button" class="btn btn-secondary btn-xs" style="color:var(--accent-red);" onclick="deleteTopologyNode('${esc(n.id)}')">Remove</button>
+              <button type="button" class="btn btn-secondary btn-xs" onclick="locateTopologyNode(${inlineString(n.id)})">Map</button>
+              <button type="button" class="btn btn-secondary btn-xs" onclick="sendTopologyPduPing(${inlineString(n.id)}, ${inlineString(n.id)})">Ping</button>
+              <button type="button" class="btn btn-secondary btn-xs" style="color:var(--accent-red);" onclick="deleteTopologyNode(${inlineString(n.id)})">Remove</button>
             </div>
           </td>
         </tr>
@@ -980,7 +1003,7 @@ function renderTopoConnectVisualGrid(editingNodeId = '') {
       return `
         <button type="button"
                 class="topo-connect-card ${isPicked ? 'selected' : ''} ${isLinked ? 'already-linked' : ''}"
-                ${isLinked ? 'disabled' : `onclick="toggleTopoModalConnectNode('${esc(n.id)}')"`}>
+                ${isLinked ? 'disabled' : `onclick="toggleTopoModalConnectNode(${inlineString(n.id)})"`}>
           <span style="display:flex;align-items:center;justify-content:center;width:30px;height:26px;flex-shrink:0;">${getTopologyDeviceSvg(n.node_type, hs)}</span>
           <span class="topo-connect-card-info">
             <div class="topo-connect-card-name" title="${esc(n.name)}">${esc(n.name)}</div>
@@ -1357,30 +1380,8 @@ async function clearAllTopology() {
   }
 }
 
-async function probeTopologyNow() {
-  const btn = document.getElementById('btnTopoProbeAll');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '⏳ Probing...';
-  }
-  try {
-    await apiJson('/api/devices/probe-all', {
-      method: 'POST',
-      body: JSON.stringify({})
-    });
-    await loadInitialState();
-  } catch (err) {
-    alert(err.message);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '⚡ Probe Devices Now';
-    }
-  }
-}
-
 async function sendTopologyPduPing(sourceId, targetId) {
-  updateTopoModeBanner('Sending live test ping...', '');
+  updateTopoModeBanner('Checking reachability from Vertex Sentry…', '');
   try {
     const res = await apiJson('/api/topology/pdu-ping', {
       method: 'POST',
@@ -1388,48 +1389,27 @@ async function sendTopologyPduPing(sourceId, targetId) {
     });
     if (res.topology) appState.topology = res.topology;
     renderTopologySection();
-    animateTopoPduPacket(res.pathNodeIds || [], res.reachable, res.failedAtNodeId);
-    updateTopoModeBanner(res.message, res.reachable ? '' : 'critical');
+    showTopoProbeResult(targetId, res.reachable);
+    const links = Math.max(0, (res.pathNodeIds || []).length - 1);
+    const mapNote = sourceId === targetId ? '' : links
+      ? ` Saved map path has ${links} link(s).` : ' No path is drawn between these devices on the saved map.';
+    updateTopoModeBanner(res.message + mapNote, res.reachable ? '' : 'critical');
   } catch (err) {
     updateTopoModeBanner(`Test Ping Error: ${err.message}`, 'critical');
   }
 }
 
-function animateTopoPduPacket(pathIds, reachable, failedNodeId) {
+function showTopoProbeResult(targetId, reachable) {
   const stage = document.getElementById('topoStage');
-  if (!stage || !Array.isArray(pathIds) || pathIds.length < 1) return;
-  const topo = getTopologyData();
-  const nodeMap = new Map((topo.nodes || []).map(n => [n.id, n]));
-  const coords = pathIds.map(id => nodeMap.get(id)).filter(Boolean);
-  if (!coords.length) return;
+  const target = (getTopologyData().nodes || []).find(node => node.id === targetId);
+  if (!stage || !target) return;
 
   const pkt = document.createElement('div');
-  pkt.className = 'topo-pdu-packet';
-  pkt.textContent = '✉';
-  pkt.style.left = `${coords[0].x}px`;
-  pkt.style.top = `${coords[0].y}px`;
+  pkt.className = `topo-pdu-packet ${reachable ? 'ok' : 'fail'}`;
+  pkt.textContent = reachable ? '✓' : '✕';
+  pkt.style.left = `${target.x}px`;
+  pkt.style.top = `${target.y}px`;
   stage.appendChild(pkt);
-
-  let step = 1;
-  const advance = () => {
-    if (step >= coords.length) {
-      pkt.classList.add(reachable ? 'ok' : 'fail');
-      pkt.textContent = reachable ? '✓' : '✕';
-      setTimeout(() => pkt.remove(), 900);
-      return;
-    }
-    const target = coords[step];
-    pkt.style.left = `${target.x}px`;
-    pkt.style.top = `${target.y}px`;
-    if (failedNodeId && target.id === failedNodeId) {
-      pkt.classList.add('fail');
-      pkt.textContent = '✕';
-      setTimeout(() => pkt.remove(), 1100);
-      return;
-    }
-    step += 1;
-    setTimeout(advance, 440);
-  };
-  setTimeout(advance, 40);
+  setTimeout(() => pkt.remove(), 900);
 }
 

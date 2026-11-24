@@ -8,31 +8,32 @@ game detections to http://127.0.0.1:3000/api/gaming/detect.
 from __future__ import annotations
 
 import argparse
-import csv
+import getpass
 import ipaddress
 import json
 import os
 import re
 import socket
-import struct
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 from pulse_monitor.config import DATA_DIR, utc_now
 from pulse_monitor.game_detector import (
     GameDetectorMixin,
+    MONITOR_ONLY_IDS,
     _NETSTAT_GAME_PORTS,
-    _PASSIVE_DNS_CACHE_EXCLUDE,
+    host_game_processes,
+    list_windows_processes,
 )
 from pulse_monitor.wireshark_capture import WiresharkCaptureEngine
 
 
 def _detect_local_lan_ip(
-    upstream_dns: str = "192.168.0.1", fallback: str = "192.168.0.224"
+    upstream_dns: str = "192.168.0.1", fallback: str = ""
 ) -> str:
     for probe_target in (upstream_dns or "192.168.0.1", "1.1.1.1"):
         try:
@@ -68,6 +69,9 @@ class HostGameSensor:
         syslog_port: int = 514,
         upstream_dns: str = "192.168.0.1",
         api_url: str = "http://127.0.0.1:3000/api/gaming/detect",
+        detect_processes: bool = True,
+        endpoint_player: str = "",
+        endpoint_token: str = "",
     ) -> None:
         self._auto_dns_host = not dns_host or dns_host.strip().lower() == "auto"
         self.dns_host = (
@@ -79,34 +83,38 @@ class HostGameSensor:
         self.dns_port = dns_port
         self.syslog_port = syslog_port
         self.upstream_dns = upstream_dns
-        self.api_url = api_url
-        base_api = api_url.rsplit("/", 1)[0]
+        self.api_url = api_url.rstrip("/")
+        self._endpoint_player = endpoint_player
+        self._endpoint_token = endpoint_token
+        base_api = self.api_url.rsplit("/", 1)[0]
         self.blocks_url = base_api + "/blocks"
         self.activity_url = base_api + "/activity"
         self.dismiss_url = base_api + "/dismiss"
         self.heartbeat_url = base_api + "/sensor-heartbeat"
         self._lock = threading.Lock()
+        self._dns_worker_slots = threading.BoundedSemaphore(32)
+        self._report_slots = threading.BoundedSemaphore(16)
         self._recent_hits: dict[tuple[str, str], float] = {}
         self._active_blocks: list[dict] = []
         self._prevention_mode: str = "alert_only"
         self._flushed_rule_ids: set[str] = set()
-        self._active_host_processes: set[str] = set()
+        self._detect_processes = detect_processes
+        self._dns_forwarding_enabled = os.environ.get("PULSE_ENABLE_DNS_FORWARDING") == "1"
+        self._network_changes_enabled = os.environ.get("PULSE_ALLOW_NETWORK_CHANGES") == "1"
+        self._background_scans_enabled = os.environ.get("PULSE_ENABLE_BACKGROUND_SCANS") == "1"
+        self._last_process_report: dict[tuple[str, str], float] = {}
         self._active_lan_port_hits: dict[tuple[str, str], float] = {}
         self._lan_port_misses: dict[tuple[str, str], int] = {}
-        self._recent_dns_game_hits: dict[tuple[str, str], float] = {}
-        self._seen_dns_cache_domains: set[str] = set()
-        self._dns_cache_initialized = False
         self._dns_queries_total: int = 0
         self._dns_blocked_total: int = 0
+        self._dns_forwarded_total: int = 0
+        self._dns_forward_failures: int = 0
         self._dns_clients: dict[str, str] = {}
         self._last_dns_client_ip: str = ""
         self._last_dns_domain: str = ""
         self._last_dns_at: str | None = None
-        self._throttle_seq: dict[str, int] = {}
-        self._throttle_inflight: dict[str, int] = {}
         self._bound_dns_ips: set[str] = set()
         self._forwarded_dns_domains: dict[str, float] = {}
-        self._last_rst_burst: dict[str, float] = {}
         self._wireshark_engine: WiresharkCaptureEngine | None = None
         self._stop = threading.Event()
 
@@ -114,9 +122,11 @@ class HostGameSensor:
         with self._lock:
             blocks = list(self._active_blocks)
         for rule in blocks:
+            if rule.get("scope") == "device_throttle" or rule.get("cutRouters"):
+                continue
             if rule.get("ip") in (client_ip, "*") and (
                 rule.get("gameId") in (game_id, "*")
-                or rule.get("scope") in {"device_all_games", "device_wifi_cut", "device_throttle"}
+                or rule.get("scope") in {"device_all_games", "device_wifi_cut"}
             ):
                 return rule
         return None
@@ -128,6 +138,7 @@ class HostGameSensor:
             self._wireshark_engine = WiresharkCaptureEngine(
                 on_detection=self._handle_wireshark_detection,
                 pcap_path=DATA_DIR / "wireshark_live.pcap",
+                custom_tshark_path=os.environ.get("PULSE_TSHARK_PATH", ""),
                 is_forwarded_dns_fn=self._is_forwarded_dns_query,
                 infra_ips=infra_set,
                 self_ips=self_set,
@@ -155,22 +166,42 @@ class HostGameSensor:
                 f"{payload.get('matchedIndicator') or game_id}",
                 flush=True,
             )
-            threading.Thread(target=self._post_detection, args=(payload,), daemon=True).start()
+            self._submit_live_detection(payload)
+
+    def _submit_live_detection(self, payload: dict) -> None:
+        if not self._report_slots.acquire(blocking=False):
+            return
+
+        def deliver() -> None:
+            try:
+                for retry_delay in (0.5, 1.5, None):
+                    if self._post_detection(payload):
+                        return
+                    if retry_delay is None or self._stop.wait(retry_delay):
+                        return
+            finally:
+                self._report_slots.release()
+
+        try:
+            threading.Thread(target=deliver, daemon=True).start()
+        except RuntimeError:
+            self._report_slots.release()
 
     def _apply_policy_and_blocks(self, payload: dict) -> None:
         blocks = payload.get("blocks")
         policy = payload.get("policy")
         ws_cfg = payload.get("wireshark")
         with self._lock:
-            if isinstance(blocks, list):
-                self._active_blocks = blocks
-            if isinstance(policy, dict) and policy.get("preventionMode"):
-                self._prevention_mode = str(policy["preventionMode"]).strip().lower()
+            if not self._network_changes_enabled or not (isinstance(policy, dict) and policy.get("restrictionsEnabled") is True):
+                self._active_blocks = []
+                self._prevention_mode = "alert_only"
+            elif isinstance(blocks, list):
+                self._active_blocks = [rule for rule in blocks if isinstance(rule, dict) and not rule.get("controlStatus")]
+                self._prevention_mode = str(policy.get("preventionMode") or "alert_only").strip().lower()
         if isinstance(ws_cfg, dict) and self._wireshark_engine is not None:
             self._wireshark_engine.configure(
                 enabled=ws_cfg.get("enabled"),
                 selected_interfaces=ws_cfg.get("selectedInterfaces"),
-                custom_tshark_path=ws_cfg.get("customTsharkPath"),
             )
 
     def _send_sensor_heartbeat(self) -> None:
@@ -180,9 +211,12 @@ class HostGameSensor:
                 "pid": os.getpid(),
                 "dnsHost": self.dns_host,
                 "dnsPort": self.dns_port,
+                "dnsForwardingEnabled": self._dns_forwarding_enabled,
                 "hotspotIp": self.hotspot_ip,
                 "dnsQueriesTotal": self._dns_queries_total,
                 "dnsBlockedTotal": self._dns_blocked_total,
+                "dnsForwardedTotal": self._dns_forwarded_total,
+                "dnsForwardFailures": self._dns_forward_failures,
                 "dnsClients": dict(self._dns_clients),
                 "lastDnsClientIp": self._last_dns_client_ip,
                 "lastDnsDomain": self._last_dns_domain,
@@ -209,16 +243,16 @@ class HostGameSensor:
             if (now - last_heartbeat) >= 1.8:
                 if getattr(self, "_auto_dns_host", False):
                     latest_ip = _detect_local_lan_ip(self.upstream_dns)
-                    if latest_ip and latest_ip != self.dns_host:
+                    if latest_ip != self.dns_host:
                         self.dns_host = latest_ip
                         if "0.0.0.0" not in self._bound_dns_ips:
                             self._ensure_dns_listeners(self.dns_host)
                 self.hotspot_ip = _detect_hotspot_ip()
-                if self.hotspot_ip and "0.0.0.0" not in self._bound_dns_ips:
+                if self._auto_dns_host and self.hotspot_ip and "0.0.0.0" not in self._bound_dns_ips:
                     self._ensure_dns_listeners(self.hotspot_ip)
                 self._send_sensor_heartbeat()
                 last_heartbeat = now
-            else:
+            elif self._network_changes_enabled:
                 try:
                     with urllib.request.urlopen(self.blocks_url, timeout=1.2) as resp:
                         self._apply_policy_and_blocks(json.loads(resp.read().decode("utf-8")))
@@ -237,7 +271,7 @@ class HostGameSensor:
             self._recent_hits[key] = now
             return True
 
-    def _post_json(self, url: str, payload: dict) -> None:
+    def _post_json(self, url: str, payload: dict) -> bool:
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -245,142 +279,58 @@ class HostGameSensor:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        if self._endpoint_token:
+            req.add_unredirected_header("Authorization", f"Bearer {self._endpoint_token}")
         try:
             with urllib.request.urlopen(req, timeout=3.0):
-                pass
+                return True
         except Exception as exc:
             print(f"[host-sensor] POST {url} warning: {exc}", flush=True)
+            return False
 
-    def _post_detection(self, payload: dict) -> None:
-        self._post_json(self.api_url, payload)
+    def _post_detection(self, payload: dict) -> bool:
+        if self._endpoint_player:
+            payload = {"ip": payload["ip"], "process": payload["process"], "player": self._endpoint_player}
+        else:
+            payload = {**payload, "includeActivity": False}
+        return self._post_json(self.api_url, payload)
 
-    def _post_dismiss(self, client_ip: str, game_id: str) -> None:
-        self._post_json(self.dismiss_url, {"ip": client_ip, "gameId": game_id})
+    def _post_dismiss(self, client_ip: str, game_id: str) -> bool:
+        if self._endpoint_player:
+            return self._post_json(self.api_url, {
+                "ip": client_ip, "gameId": game_id, "player": self._endpoint_player, "ended": True,
+            })
+        return self._post_json(self.dismiss_url, {"ip": client_ip, "gameId": game_id})
 
     @staticmethod
     def _subprocess_flags() -> int:
         return int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)) if sys.platform == "win32" else 0
 
-    def _list_running_processes(self) -> list[str]:
-        if sys.platform != "win32":
-            return []
-        try:
-            res = subprocess.run(
-                ["tasklist", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                creationflags=self._subprocess_flags(),
-            )
-            if res.returncode != 0:
-                return []
-        except Exception:
-            return []
-        names: list[str] = []
-        seen: set[str] = set()
-        for row in csv.reader(res.stdout.splitlines()):
-            if not row:
-                continue
-            proc_name = str(row[0] or "").strip()
-            low = proc_name.lower()
-            if proc_name and low not in seen:
-                seen.add(low)
-                names.append(proc_name)
-        return names
+    def _scan_host_processes(self, running_procs: list[str]) -> None:
+        current = host_game_processes(self.dns_host, running_procs) if self.dns_host else {}
+        last_report = self._last_process_report
+        for key in last_report.keys() - current.keys():
+            if self._post_dismiss(*key):
+                del last_report[key]
+        for key, payload in current.items():
+            now = time.monotonic()
+            if key not in last_report or now - last_report[key] >= 6:
+                if self._post_detection(payload):
+                    last_report[key] = now
 
-    def _scan_host_processes(self, running_procs: list[str] | None = None) -> None:
-        if sys.platform != "win32":
-            return
-        procs = running_procs if running_procs is not None else self._list_running_processes()
-
-        current_games: dict[str, str] = {}
-        for proc_name in procs:
-            sig = GameDetectorMixin._match_game_signature(process=proc_name)
-            if sig and sig["id"] not in current_games:
-                current_games[sig["id"]] = proc_name
-
-        for gid, pname in current_games.items():
-            if self._is_blocked(self.dns_host, gid):
-                continue
-            is_new = gid not in self._active_host_processes
-            if is_new or self._should_report(self.dns_host, gid, cooldown=25.0):
-                if is_new:
-                    print(
-                        f"[host-sensor] Process {self.dns_host} -> {pname} [{gid}]",
-                        flush=True,
-                    )
-                self._post_detection({
-                    "ip": self.dns_host,
-                    "gameId": gid,
-                    "process": pname,
-                    "matchedIndicator": f"Process {pname}",
-                    "detectionMethod": "Auto Process Sensor (Live Open Game)",
-                })
-
-        for ended_gid in sorted(self._active_host_processes - set(current_games.keys())):
-            print(
-                f"[host-sensor] Process ended on {self.dns_host}: {ended_gid}",
-                flush=True,
-            )
-            self._post_dismiss(self.dns_host, ended_gid)
-
-        self._active_host_processes = set(current_games.keys())
-
-    def _scan_host_dns_cache(self) -> None:
-        if sys.platform != "win32":
-            return
-        try:
-            res = subprocess.run(
-                ["ipconfig", "/displaydns"],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                creationflags=self._subprocess_flags(),
-            )
-            if res.returncode != 0:
-                return
-        except Exception:
-            return
-
-        matched_now: dict[str, dict] = {}
-        for line in res.stdout.splitlines():
-            if "record name" not in line.lower() and ":" not in line:
-                continue
-            parts = line.split(":", 1)
-            candidate = (parts[1] if len(parts) == 2 else line).strip().lower().rstrip(".")
-            if not candidate or "." not in candidate:
-                continue
-            sig = GameDetectorMixin._match_game_signature(domain=candidate)
-            if sig:
-                matched_now[candidate] = sig
-
-        current_keys = set(matched_now.keys())
-        if not self._dns_cache_initialized:
-            self._seen_dns_cache_domains = current_keys
-            self._dns_cache_initialized = True
-            target_domains = sorted(
-                dom for dom in current_keys if dom not in _PASSIVE_DNS_CACHE_EXCLUDE
-            )
-        else:
-            new_domains = current_keys - self._seen_dns_cache_domains
-            self._seen_dns_cache_domains = current_keys
-            target_domains = sorted(new_domains)
-
-        for dom in target_domains:
-            sig = matched_now[dom]
-            if self._is_blocked(self.dns_host, sig["id"]):
-                continue
-            if self._should_report(self.dns_host, sig["id"], cooldown=25.0):
-                print(
-                    f"[host-sensor] DNS Cache {self.dns_host} -> {dom} [{sig['name']}]",
-                    flush=True,
-                )
-                self._post_detection({
-                    "ip": self.dns_host,
-                    "gameId": sig["id"],
-                    "domain": dom,
-                    "detectionMethod": "Auto DNS Cache Sensor",
-                })
+    def _host_process_loop(self) -> None:
+        next_heartbeat = 0.0
+        while not self._stop.is_set():
+            processes = list_windows_processes(current_session_only=bool(self._endpoint_player))
+            if processes is not None:
+                now = time.monotonic()
+                if self._endpoint_player and now >= next_heartbeat:
+                    next_heartbeat = now + 30
+                    self._post_json(self.api_url, {
+                        "ip": self.dns_host, "heartbeat": True,
+                    })
+                self._scan_host_processes(processes)
+            self._stop.wait(1)
 
     def _sweep_lan_game_ports(self) -> None:
         try:
@@ -401,7 +351,6 @@ class HostGameSensor:
             return
 
         now = time.monotonic()
-        # Ghost Mode: only probe local LAN listening game ports (Steam 27036/27015, Minecraft 19132/25565) on PCs
         lan_listen_ports = (27036, 27015, 19132, 25565)
         hits = GameDetectorMixin._batch_scan_ports_nonblocking(ips[:80], lan_listen_ports, timeout_sec=0.12)
         seen_now: dict[tuple[str, str], int] = {}
@@ -422,12 +371,6 @@ class HostGameSensor:
                         flush=True,
                     )
                 self._active_lan_port_hits[key] = now
-                self._post_detection({
-                    "ip": ip_key,
-                    "gameId": sig["id"],
-                    "port": open_port,
-                    "detectionMethod": "Auto LAN Game Port Sensor",
-                })
 
         ip_set = set(ips)
         for key in list(self._active_lan_port_hits.keys()):
@@ -438,32 +381,12 @@ class HostGameSensor:
             if misses >= 2:
                 self._lan_port_misses.pop(key, None)
                 self._active_lan_port_hits.pop(key, None)
-                with self._lock:
-                    recent_dns = self._recent_dns_game_hits.get(key, 0.0)
-                if (now - recent_dns) >= 20.0:
-                    print(
-                        f"[host-sensor] Game port closed on {ip_k} [{gid}]",
-                        flush=True,
-                    )
-                    self._post_dismiss(ip_k, gid)
             else:
                 self._lan_port_misses[key] = misses
 
-    def _rst_client_ports(self, item: tuple[str, tuple[int, ...]]) -> None:
-        target_ip, ports = item
-        linger = struct.pack("ii", 1, 0)
-        for port in ports:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rsock:
-                    rsock.settimeout(0.04)
-                    rsock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
-                    rsock.connect((target_ip, int(port)))
-            except OSError:
-                pass
-
-    def _enforce_active_blocks(self, running_procs: list[str] | None = None) -> None:
+    def _enforce_active_blocks(self) -> None:
         with self._lock:
-            blocks = list(self._active_blocks)
+            blocks = [r for r in self._active_blocks if r.get("scope") != "device_throttle" and not r.get("cutRouters")]
         if not blocks:
             self._flushed_rule_ids.clear()
             return
@@ -491,13 +414,13 @@ class HostGameSensor:
                 except Exception:
                     pass
             try:
-                procs = running_procs if running_procs is not None else self._list_running_processes()
+                procs = list_windows_processes() or []
                 killed_procs: set[str] = set()
                 for proc_name in procs:
                     if not proc_name or proc_name.lower() in killed_procs:
                         continue
                     sig = GameDetectorMixin._match_game_signature(process=proc_name)
-                    if sig and self._is_blocked(self.dns_host, sig["id"]):
+                    if sig and sig["id"] not in MONITOR_ONLY_IDS and self._is_blocked(self.dns_host, sig["id"]):
                         killed_procs.add(proc_name.lower())
                         subprocess.run(
                             ["taskkill", "/F", "/IM", proc_name],
@@ -512,38 +435,6 @@ class HostGameSensor:
                         )
             except Exception:
                 pass
-
-        # Ghost Mode: only send TCP RST burst when a blocked client IP had recent game activity (never flood idle IPs)
-        now_rst = time.monotonic()
-        with self._lock:
-            recent_active_ips = {
-                ip_k
-                for (ip_k, _gid), ts in self._recent_dns_game_hits.items()
-                if (now_rst - ts) <= 45.0
-            } | {
-                ip_k
-                for (ip_k, _gid), ts in self._active_lan_port_hits.items()
-                if (now_rst - ts) <= 45.0
-            }
-        ports_by_ip: dict[str, tuple[int, ...]] = {}
-        for rule in blocks:
-            target_ip = str(rule.get("ip") or "").strip()
-            if not target_ip or target_ip in ("*", self.dns_host) or target_ip not in recent_active_ips:
-                continue
-            ports_by_ip[target_ip] = (27036, 27015, 19132, 25565)
-        if ports_by_ip:
-            for dead_ip in [k for k in self._last_rst_burst if k not in ports_by_ip]:
-                self._last_rst_burst.pop(dead_ip, None)
-            due_items = [
-                (ip_k, plist)
-                for ip_k, plist in ports_by_ip.items()
-                if (now_rst - self._last_rst_burst.get(ip_k, 0.0)) >= 15.0
-            ]
-            if due_items:
-                for ip_k, _ in due_items:
-                    self._last_rst_burst[ip_k] = now_rst
-                with ThreadPoolExecutor(max_workers=min(4, len(due_items))) as pool:
-                    list(pool.map(self._rst_client_ports, due_items))
 
     def _scan_host_netstat_ports(self) -> None:
         if sys.platform != "win32":
@@ -600,16 +491,13 @@ class HostGameSensor:
                 })
 
     def _auto_detect_loop(self) -> None:
-        last_lan_sweep = 0.0
+        last_lan_sweep = float("-inf")
         while not self._stop.is_set():
             try:
-                running_procs = self._list_running_processes()
-                self._enforce_active_blocks(running_procs)
-                self._scan_host_processes(running_procs)
-                self._scan_host_dns_cache()
+                self._enforce_active_blocks()
                 self._scan_host_netstat_ports()
                 now = time.monotonic()
-                if (now - last_lan_sweep) >= 90.0:
+                if self._background_scans_enabled and (now - last_lan_sweep) >= 90.0:
                     last_lan_sweep = now
                     self._sweep_lan_game_ports()
             except Exception as exc:
@@ -619,6 +507,8 @@ class HostGameSensor:
 
     def _process_dns_query(self, raw: bytes, client_ip: str) -> bytes | None:
         """Process raw DNS query for both UDP and TCP 53 listeners; return reply bytes or upstream forward."""
+        if len(raw) < 12 or raw[2] & 0x80:
+            return None
         qname = GameDetectorMixin._extract_dns_qname(raw)
         now_iso = utc_now()
         with self._lock:
@@ -636,35 +526,31 @@ class HostGameSensor:
             prev_mode = self._prevention_mode
 
         if qname:
-            if GameDetectorMixin._is_doh_canary_domain(qname):
+            if self._network_changes_enabled and GameDetectorMixin._is_doh_canary_domain(qname):
                 return GameDetectorMixin._build_dns_nxdomain_reply(raw)
 
             sig = GameDetectorMixin._match_game_signature(domain=qname)
-            dns_action, action_rule = GameDetectorMixin._classify_dns_query_action(
+            action_rule = GameDetectorMixin._should_sinkhole_query(
                 client_ip, qname, sig, blocks
             )
-            auto_prevent = sig is not None and prev_mode in {"auto_block_game", "auto_wifi_cut"}
+            auto_prevent = sig is not None and sig["id"] not in MONITOR_ONLY_IDS and prev_mode in {"auto_block_game", "auto_wifi_cut"}
 
-            if dns_action == "sinkhole" or auto_prevent:
+            if action_rule is not None or auto_prevent:
                 with self._lock:
                     self._dns_blocked_total += 1
                 sink = GameDetectorMixin._build_dns_sinkhole_reply(raw)
-                if action_rule is None and sig is not None:
+                if action_rule is None and sig is not None and self._should_report(client_ip, sig["id"]):
                     print(
                         f"[host-sensor] REALTIME AUTO-PREVENT {client_ip} -> {qname} [{sig['name']}]",
                         flush=True,
                     )
-                    threading.Thread(
-                        target=self._post_detection,
-                        args=({
-                            "ip": client_ip,
-                            "gameId": sig["id"],
-                            "domain": qname,
-                            "autoPrevented": True,
-                            "detectionMethod": f"Live DNS Auto-Prevent ({self.dns_host}:{self.dns_port})",
-                        },),
-                        daemon=True,
-                    ).start()
+                    self._submit_live_detection({
+                        "ip": client_ip,
+                        "gameId": sig["id"],
+                        "domain": qname,
+                        "autoPrevented": True,
+                        "detectionMethod": f"Live DNS Auto-Prevent ({self.dns_host}:{self.dns_port})",
+                    })
                 elif self._should_report(client_ip, f"blk-{(sig['id'] if sig else 'wifi')}", cooldown=15.0):
                     print(
                         f"[host-sensor] BLOCKED DNS {client_ip} -> {qname} (0.0.0.0 sinkhole)",
@@ -672,54 +558,18 @@ class HostGameSensor:
                     )
                 return sink
 
-            if dns_action == "throttle":
-                with self._lock:
-                    seq = self._throttle_seq.get(client_ip, 0) + 1
-                    self._throttle_seq[client_ip] = seq
-                    self._dns_blocked_total += 1
-                    inflight = self._throttle_inflight.get(client_ip, 0)
-                    can_delay = inflight < 8
-                    if can_delay:
-                        self._throttle_inflight[client_ip] = inflight + 1
-                if self._should_report(client_ip, "thr-dns", cooldown=15.0):
-                    print(
-                        f"[host-sensor] THROTTLED DNS {client_ip} -> {qname} (2.4s lag + intermittent drop)",
-                        flush=True,
-                    )
-                if can_delay:
-                    try:
-                        # Inject heavy latency (~2.4s) without piling up unbounded sleeping threads
-                        self._stop.wait(2.4)
-                    finally:
-                        with self._lock:
-                            rem = max(0, self._throttle_inflight.get(client_ip, 1) - 1)
-                            if rem:
-                                self._throttle_inflight[client_ip] = rem
-                            else:
-                                self._throttle_inflight.pop(client_ip, None)
-                    if (seq % 3) != 0:
-                        return GameDetectorMixin._build_dns_sinkhole_reply(raw)
-                else:
-                    return GameDetectorMixin._build_dns_sinkhole_reply(raw)
-
             if sig:
-                with self._lock:
-                    self._recent_dns_game_hits[(client_ip, sig["id"])] = time.monotonic()
                 if self._should_report(client_ip, sig["id"], cooldown=4.0):
                     print(
                         f"[host-sensor] DNS {client_ip} -> {qname} [{sig['name']}]",
                         flush=True,
                     )
-                    threading.Thread(
-                        target=self._post_detection,
-                        args=({
-                            "ip": client_ip,
-                            "gameId": sig["id"],
-                            "domain": qname,
-                            "detectionMethod": f"Live DNS ({self.dns_host}:{self.dns_port})",
-                        },),
-                        daemon=True,
-                    ).start()
+                    self._submit_live_detection({
+                        "ip": client_ip,
+                        "gameId": sig["id"],
+                        "domain": qname,
+                        "detectionMethod": f"Live DNS ({self.dns_host}:{self.dns_port})",
+                    })
 
         # Loop-safe upstream forwarding: public domains go directly to 1.1.1.1 / 8.8.8.8 so router DHCP DNS never loops back
         if qname and client_ip not in {self.dns_host, self.hotspot_ip, "127.0.0.1"}:
@@ -739,11 +589,18 @@ class HostGameSensor:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as fwd:
                     fwd.settimeout(1.2)
-                    fwd.sendto(raw, (upstream, 53))
-                    resp, _ = fwd.recvfrom(4096)
+                    fwd.connect((upstream, 53))
+                    fwd.send(raw)
+                    resp = fwd.recv(4096)
+                if len(resp) < 12 or resp[:2] != raw[:2] or not (resp[2] & 0x80):
+                    continue
+                with self._lock:
+                    self._dns_forwarded_total += 1
                 return resp
             except OSError:
                 continue
+        with self._lock:
+            self._dns_forward_failures += 1
         return None
 
     def _handle_dns_udp_packet(self, sock: socket.socket, raw: bytes, client_addr: tuple[str, int]) -> None:
@@ -754,24 +611,44 @@ class HostGameSensor:
             except OSError:
                 pass
 
+    def _start_dns_worker(self, handler, *args) -> bool:
+        if not self._dns_worker_slots.acquire(blocking=False):
+            return False
+
+        def run() -> None:
+            try:
+                handler(*args)
+            finally:
+                self._dns_worker_slots.release()
+
+        try:
+            threading.Thread(target=run, daemon=True).start()
+        except RuntimeError:
+            self._dns_worker_slots.release()
+            return False
+        return True
+
     def _handle_dns_tcp_client(self, conn: socket.socket, client_addr: tuple[str, int]) -> None:
         try:
             conn.settimeout(2.0)
-            hdr = conn.recv(2)
-            if len(hdr) < 2:
-                return
+            hdr = bytearray()
+            while len(hdr) < 2:
+                chunk = conn.recv(2 - len(hdr))
+                if not chunk:
+                    return
+                hdr.extend(chunk)
             msg_len = int.from_bytes(hdr, "big")
             if msg_len <= 0 or msg_len > 4096:
                 return
-            raw = b""
+            raw = bytearray()
             while len(raw) < msg_len:
                 chunk = conn.recv(msg_len - len(raw))
                 if not chunk:
                     break
-                raw += chunk
+                raw.extend(chunk)
             if len(raw) < msg_len:
                 return
-            reply = self._process_dns_query(raw, client_addr[0])
+            reply = self._process_dns_query(bytes(raw), client_addr[0])
             if reply:
                 conn.sendall(len(reply).to_bytes(2, "big") + reply)
         except OSError:
@@ -795,9 +672,7 @@ class HostGameSensor:
             while not self._stop.is_set():
                 try:
                     data, addr = sock.recvfrom(4096)
-                    threading.Thread(
-                        target=self._handle_dns_udp_packet, args=(sock, data, addr), daemon=True
-                    ).start()
+                    self._start_dns_worker(self._handle_dns_udp_packet, sock, data, addr)
                 except socket.timeout:
                     continue
                 except OSError:
@@ -822,9 +697,8 @@ class HostGameSensor:
             while not self._stop.is_set():
                 try:
                     conn, addr = sock.accept()
-                    threading.Thread(
-                        target=self._handle_dns_tcp_client, args=(conn, addr), daemon=True
-                    ).start()
+                    if not self._start_dns_worker(self._handle_dns_tcp_client, conn, addr):
+                        conn.close()
                 except socket.timeout:
                     continue
                 except OSError:
@@ -864,17 +738,13 @@ class HostGameSensor:
                         f"[host-sensor] LAN Broadcast {client_ip}:{port} -> [{label}]",
                         flush=True,
                     )
-                    threading.Thread(
-                        target=self._post_detection,
-                        args=({
-                            "ip": client_ip,
-                            "gameId": game_id,
-                            "port": port,
-                            "matchedIndicator": f"UDP Broadcast :{port} ({label})",
-                            "detectionMethod": "Real-Time LAN Broadcast Listener",
-                        },),
-                        daemon=True,
-                    ).start()
+                    self._submit_live_detection({
+                        "ip": client_ip,
+                        "gameId": game_id,
+                        "port": port,
+                        "matchedIndicator": f"UDP Broadcast :{port} ({label})",
+                        "detectionMethod": "Real-Time LAN Broadcast Listener",
+                    })
         finally:
             sock.close()
 
@@ -917,36 +787,28 @@ class HostGameSensor:
                 if sig is None:
                     continue
 
-                client_ip = sender_ip
-                for cand_ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text):
-                    try:
-                        ip_obj = ipaddress.ip_address(cand_ip)
-                        if isinstance(ip_obj, ipaddress.IPv4Address) and ip_obj.is_private and not ip_obj.is_loopback and cand_ip != sender_ip:
-                            client_ip = cand_ip
-                            break
-                    except ValueError:
-                        continue
+                client_ip = GameDetectorMixin._syslog_game_client_ip(text, sender_ip)
+                if not client_ip:
+                    continue
                 if self._should_report(client_ip, sig["id"], cooldown=4.0):
                     print(
                         f"[host-sensor] Syslog {client_ip} (via {sender_ip}) -> {matched_domain or matched_port} [{sig['name']}]",
                         flush=True,
                     )
-                    threading.Thread(
-                        target=self._post_detection,
-                        args=({
-                            "ip": client_ip,
-                            "reporterIp": sender_ip,
-                            "gameId": sig["id"],
-                            "domain": matched_domain,
-                            "port": matched_port,
-                            "detectionMethod": f"Router Syslog (UDP {self.syslog_port})",
-                        },),
-                        daemon=True,
-                    ).start()
+                    self._submit_live_detection({
+                        "ip": client_ip,
+                        "reporterIp": sender_ip,
+                        "gameId": sig["id"],
+                        "domain": matched_domain,
+                        "port": matched_port,
+                        "detectionMethod": f"Router Syslog (UDP {self.syslog_port})",
+                    })
         finally:
             sock.close()
 
     def _ensure_dns_listeners(self, bind_ip: str) -> None:
+        if not self._dns_forwarding_enabled:
+            return
         clean_ip = str(bind_ip or "").strip()
         if not clean_ip:
             return
@@ -958,7 +820,8 @@ class HostGameSensor:
         threading.Thread(target=self._run_dns_tcp_listener, args=(clean_ip,), daemon=True).start()
 
     def serve_forever(self) -> None:
-        dns_ips = ["0.0.0.0"] if self.dns_host else [self.dns_host]
+        ws_engine = self._ensure_wireshark_engine()
+        ws_engine.start()
 
         threads = [
             threading.Thread(target=self._run_syslog_listener, daemon=True),
@@ -973,20 +836,23 @@ class HostGameSensor:
         ]
         for t in threads:
             t.start()
-        for bind_ip in dns_ips:
-            self._ensure_dns_listeners(bind_ip)
-        ws_engine = self._ensure_wireshark_engine()
-        ws_engine.start()
+        if self._detect_processes and sys.platform == "win32":
+            threading.Thread(target=self._host_process_loop, daemon=True).start()
+        self._ensure_dns_listeners(self.dns_host)
         print(
-            "[host-sensor] Real-time DNS (UDP/TCP 53), Syslog (514), Broadcast, Wireshark DPI, Process & LAN scanner active",
+            f"[host-sensor] Passive capture and syslog enabled. DNS forwarding: {'on' if self._dns_forwarding_enabled else 'off'}.",
             flush=True,
         )
         try:
-            while not self._stop.is_set():
-                time.sleep(1.0)
+            self._stop.wait()
         except KeyboardInterrupt:
-            self._stop.set()
+            pass
+        finally:
+            self.stop()
             ws_engine.stop()
+
+    def stop(self) -> None:
+        self._stop.set()
 
 
 def main() -> int:
@@ -996,7 +862,33 @@ def main() -> int:
     parser.add_argument("--syslog-port", type=int, default=514, help="Host Syslog UDP port (default: 514)")
     parser.add_argument("--upstream-dns", default="192.168.0.1", help="Upstream DNS server (default: 192.168.0.1)")
     parser.add_argument("--api-url", default="http://127.0.0.1:3000/api/gaming/detect", help="Monitor API endpoint")
+    parser.add_argument("--no-process-detection", action="store_true", help="Use when server.py already runs on this Windows host")
+    parser.add_argument("--process-only", action="store_true", help="Report this Windows sign-in session to a central monitor")
     args = parser.parse_args()
+
+    if args.process_only:
+        if sys.platform != "win32" or args.no_process_detection:
+            parser.error("--process-only requires Windows and process detection")
+        token = os.environ.get("PULSE_GAME_ENDPOINT_TOKEN", "")
+        endpoint = urllib.parse.urlsplit(args.api_url)
+        if not token:
+            parser.error("Set PULSE_GAME_ENDPOINT_TOKEN to the central monitor's enrollment token")
+        if endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.path.rstrip("/") != "/api/gaming/endpoint":
+            parser.error("Set --api-url to the central monitor's /api/gaming/endpoint URL")
+        account = getpass.getuser()
+        domain = os.environ.get("USERDOMAIN")
+        sensor = HostGameSensor(
+            dns_host=_detect_local_lan_ip(endpoint.hostname, "127.0.0.1"),
+            api_url=args.api_url,
+            endpoint_player=f"{domain}\\{account}" if domain else account,
+            endpoint_token=token,
+        )
+        print(f"[game-endpoint] Watching this Windows sign-in session; reports go to {endpoint.hostname}", flush=True)
+        try:
+            sensor._host_process_loop()
+        except KeyboardInterrupt:
+            pass
+        return 0
 
     sensor = HostGameSensor(
         dns_host=args.dns_host,
@@ -1004,6 +896,7 @@ def main() -> int:
         syslog_port=args.syslog_port,
         upstream_dns=args.upstream_dns,
         api_url=args.api_url,
+        detect_processes=not args.no_process_detection,
     )
     sensor.serve_forever()
     return 0

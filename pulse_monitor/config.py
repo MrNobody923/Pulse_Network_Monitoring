@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import TypeVar
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,6 +18,11 @@ DATA_DIR = ROOT / "data"
 CONFIG_FILE = DATA_DIR / "config.json"
 DATABASE_FILE = DATA_DIR / "network.db"
 API_VERSION = "2.1.0"
+
+
+def manual_speed_tests_enabled() -> bool:
+    return os.environ.get("PULSE_ALLOW_SPEED_TESTS", "manual") in {"manual", "1"}
+
 
 DEFAULT_CONFIG = {
     "router": {
@@ -277,7 +284,10 @@ PLACEHOLDER_DEFAULT_IPS = {
 }
 
 
-def runtime_attr(name: str, default: object) -> object:
+_RuntimeAttribute = TypeVar("_RuntimeAttribute")
+
+
+def runtime_attr(name: str, default: _RuntimeAttribute) -> _RuntimeAttribute:
     """Resolve attributes via the top-level `monitor` module when present (supports unittest.mock.patch)."""
     mod = sys.modules.get("monitor")
     return getattr(mod, name, default) if mod is not None else default
@@ -285,6 +295,20 @@ def runtime_attr(name: str, default: object) -> object:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def inferred_inventory_mac(ip: str) -> str:
+    """Return the legacy storage key for an IPv4 address found without a MAC."""
+    address = ipaddress.IPv4Address(ip)
+    return "02:00:" + address.packed.hex(":")
+
+
+def observed_inventory_mac(mac: str, ip: str) -> str:
+    """Hide an address-derived inventory key from hardware telemetry."""
+    try:
+        return "" if mac == inferred_inventory_mac(ip) else mac
+    except ipaddress.AddressValueError:
+        return mac
 
 
 def merge_config(saved: dict) -> dict:
@@ -304,10 +328,22 @@ def validate_ip(value: object) -> str:
         raise ValueError("A valid IP address is required") from exc
 
 
+def validate_device_ip(value: object) -> str:
+    ip = validate_ip(value)
+    address = ipaddress.ip_address(ip)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback or address.is_multicast or address.is_unspecified:
+        raise ValueError("Choose an individual network device")
+    return ip
+
+
 def validate_port(value: object) -> int:
+    if not isinstance(value, (str, int, float)):
+        raise ValueError("Port must be an integer from 1 to 65535")
     try:
         port = int(value)
-    except (TypeError, ValueError) as exc:
+    except (ValueError, OverflowError) as exc:
         raise ValueError("Port must be an integer from 1 to 65535") from exc
     if port < 1 or port > 65535:
         raise ValueError("Port must be an integer from 1 to 65535")

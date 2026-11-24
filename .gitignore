@@ -1,6 +1,8 @@
 # Python / Virtualenv / Cache
 .venv/
 __pycache__/
+.ruff_cache/
+.pytest_cache/
 *.pyc
 *.pyo
 *.pyd

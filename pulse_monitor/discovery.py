@@ -12,13 +12,20 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from typing import TYPE_CHECKING, Callable, cast
+
 from .config import (
     CLIENT_OUI_VENDORS,
     KNOWN_OUI_VENDORS,
+    inferred_inventory_mac,
     load_nmap_mac_vendors,
+    observed_inventory_mac,
     runtime_attr,
     utc_now,
 )
+
+if TYPE_CHECKING:
+    from .engine import Monitor
 
 
 class DiscoveryMixin:
@@ -74,12 +81,12 @@ class DiscoveryMixin:
         flush()
         return interfaces
 
-    def _linux_lan_interfaces(self, subproc_mod: object) -> list[dict]:
+    def _linux_lan_interfaces(self, run: Callable[..., subprocess.CompletedProcess[str]]) -> list[dict]:
         """Collect active IPv4 private LAN interfaces and default gateways on Linux/Docker."""
         addresses: list[dict] = []
         default_gw_by_dev: dict[str, str] = {}
         try:
-            route_out = subproc_mod.run(
+            route_out = run(
                 ["ip", "route", "show", "default"],
                 capture_output=True,
                 text=True,
@@ -94,7 +101,7 @@ class DiscoveryMixin:
             pass
 
         try:
-            addr_out = subproc_mod.run(
+            addr_out = run(
                 ["ip", "-o", "-4", "addr", "show", "up", "scope", "global"],
                 capture_output=True,
                 text=True,
@@ -120,6 +127,7 @@ class DiscoveryMixin:
         return addresses
 
     def _local_lan_networks(self) -> list[ipaddress.IPv4Network]:
+        self = cast("Monitor", self)
         os_mod = runtime_attr("os", os)
         subproc_mod = runtime_attr("subprocess", subprocess)
 
@@ -134,34 +142,22 @@ class DiscoveryMixin:
             except ValueError:
                 pass
 
-        env_subnets_raw = str(os_mod.environ.get("PULSE_LAN_SUBNETS") or "").strip()
-        if env_subnets_raw:
-            env_nets: list[ipaddress.IPv4Network] = []
-            for token in env_subnets_raw.split(","):
-                tok = token.strip()
-                if not tok:
-                    continue
-                try:
-                    net = ipaddress.ip_network(tok, strict=False)
-                    if isinstance(net, ipaddress.IPv4Network) and net.is_private and net.num_addresses <= 1024:
-                        env_nets.append(net)
-                except ValueError:
-                    continue
-            if env_nets:
-                self._discovered_networks = sorted(
-                    set(env_nets),
-                    key=lambda n: (int(n.network_address), n.prefixlen),
-                )
-                return self._discovered_networks
+        configured = self._configured_lan_networks(os_mod.environ.get("PULSE_LAN_SUBNETS") or "")
+        if configured:
+            self._discovered_networks = configured
+            return configured
 
         if os_mod.name != "nt":
-            addresses = self._linux_lan_interfaces(subproc_mod)
+            addresses = self._linux_lan_interfaces(subproc_mod.run)
             if not addresses:
                 cached = self._known_local_networks()
                 if cached:
                     return cached
                 router_ip = str(self.config.get("router", {}).get("ip") or "192.168.0.1")
-                fallback_net = ipaddress.ip_network(f"{router_ip}/24", strict=False)
+                try:
+                    fallback_net = ipaddress.IPv4Network(f"{router_ip}/24", strict=False)
+                except ValueError:
+                    return []
                 self._discovered_networks = [fallback_net]
                 return [fallback_net]
         else:
@@ -231,14 +227,13 @@ class DiscoveryMixin:
             if any(token.lower() in interface_name.lower() for token in excluded_interfaces):
                 continue
             try:
-                address = ipaddress.ip_address(item["ip"])
+                address = ipaddress.IPv4Address(item["ip"])
                 prefix = int(item["prefix"])
-                network = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
+                network = ipaddress.IPv4Network((address, prefix), strict=False)
             except (KeyError, TypeError, ValueError):
                 continue
             if (
-                not isinstance(address, ipaddress.IPv4Address)
-                or not address.is_private
+                not address.is_private
                 or address.is_link_local
             ):
                 continue
@@ -284,7 +279,25 @@ class DiscoveryMixin:
             pass
         return sorted_nets
 
+    @staticmethod
+    def _configured_lan_networks(value: str) -> list[ipaddress.IPv4Network]:
+        networks: set[ipaddress.IPv4Network] = set()
+        for token in value.split(","):
+            try:
+                network = ipaddress.ip_network(token.strip(), strict=False)
+            except ValueError:
+                continue
+            if isinstance(network, ipaddress.IPv4Network) and network.is_private and network.num_addresses <= 1024:
+                networks.add(network)
+        return sorted(networks, key=lambda n: (int(n.network_address), n.prefixlen))
+
     def _known_local_networks(self) -> list[ipaddress.IPv4Network]:
+        self = cast("Monitor", self)
+        configured = self._configured_lan_networks(
+            runtime_attr("os", os).environ.get("PULSE_LAN_SUBNETS") or ""
+        )
+        if configured:
+            return configured
         cached = getattr(self, "_discovered_networks", None)
         if cached:
             return list(cached)
@@ -294,10 +307,7 @@ class DiscoveryMixin:
                     "SELECT value FROM monitor_metadata WHERE key='local_subnets'"
                 ).fetchone()
             if row and row["value"]:
-                parsed = [
-                    ipaddress.ip_network(item, strict=False)
-                    for item in json.loads(row["value"])
-                ]
+                parsed = self._configured_lan_networks(",".join(json.loads(row["value"])))
                 if parsed:
                     self._discovered_networks = parsed
                     return parsed
@@ -306,6 +316,7 @@ class DiscoveryMixin:
         return []
 
     def _known_local_gateways(self) -> set[str]:
+        self = cast("Monitor", self)
         gws = set(getattr(self, "_discovered_gateways", set()) or set())
         router_ip = str(self.config.get("router", {}).get("ip") or "").strip()
         if router_ip:
@@ -336,6 +347,7 @@ class DiscoveryMixin:
         return f"{'.'.join(octets[:3])}.0/24" if len(octets) == 4 else "192.168.0.0/24"
 
     def _ping_sweep_hosts(self, networks: list[ipaddress.IPv4Network]) -> list[str]:
+        self = cast("Monitor", self)
         os_mod = runtime_attr("os", os)
         subproc_mod = runtime_attr("subprocess", subprocess)
 
@@ -382,12 +394,12 @@ class DiscoveryMixin:
         with ThreadPoolExecutor(max_workers=64) as pool:
             return [h for h in pool.map(ping, hosts) if h is not None]
 
-    def _read_arp_entries(self, os_mod: object, subproc_mod: object) -> list[tuple[str, str, str]]:
+    def _read_arp_entries(self, platform: str, run: Callable[..., subprocess.CompletedProcess[str]]) -> list[tuple[str, str, str]]:
         """Read IP -> MAC neighbor entries across Windows (`arp -a`) and Linux (`ip neigh` / `/proc/net/arp`)."""
         lines: list[str] = []
-        if os_mod.name == "nt":
+        if platform == "nt":
             try:
-                completed = subproc_mod.run(
+                completed = run(
                     ["arp", "-a"],
                     capture_output=True,
                     text=True,
@@ -404,7 +416,7 @@ class DiscoveryMixin:
         else:
             for cmd in (["ip", "neigh", "show"], ["arp", "-an"]):
                 try:
-                    res = subproc_mod.run(cmd, capture_output=True, text=True, timeout=6, check=False)
+                    res = run(cmd, capture_output=True, text=True, timeout=6, check=False)
                     if res.stdout:
                         lines.extend(res.stdout.splitlines())
                 except (OSError, subprocess.SubprocessError):
@@ -429,31 +441,29 @@ class DiscoveryMixin:
             if "static" in lower_line or "permanent" in lower_line:
                 kind = "static"
             entries.append((match.group("ip"), match.group("mac"), kind))
-        return entries
+        # Conflicting neighbor entries can come from different adapters or stale bindings.
+        macs_by_ip: dict[str, set[str]] = {}
+        for ip, mac, _ in entries:
+            macs_by_ip.setdefault(ip, set()).add(mac.lower().replace("-", ":"))
+        return [(ip, mac, kind) for ip, mac, kind in entries
+                if len(macs_by_ip[ip]) == 1 and not int(mac[:2], 16) & 1]
 
     def discover_devices(self) -> dict:
+        self = cast("Monitor", self)
         os_mod = runtime_attr("os", os)
         subproc_mod = runtime_attr("subprocess", subprocess)
         if not self._scan_lock.acquire(blocking=False):
             raise RuntimeError("A LAN discovery scan is already running")
         try:
             networks = self._local_lan_networks()
+            started_at = utc_now()
             ping_alive_hosts = self._ping_sweep_hosts(networks)
             ping_responses = len(ping_alive_hosts)
             scan_id = uuid.uuid4().hex
-            arp_entries = self._read_arp_entries(os_mod, subproc_mod)
+            arp_entries = self._read_arp_entries(os_mod.name, subproc_mod.run)
 
             discovered: list[dict] = []
             seen_ips: set[str] = set()
-            existing_mac_by_ip: dict[str, str] = {}
-            try:
-                with self._connect() as db:
-                    for row in db.execute("SELECT ip, mac FROM discovered_devices ORDER BY last_seen DESC").fetchall():
-                        if row["ip"] and row["ip"] not in existing_mac_by_ip:
-                            existing_mac_by_ip[row["ip"]] = row["mac"]
-            except Exception:
-                pass
-
             known_gateways = self._known_local_gateways()
             gw_plus_one = {network.network_address + 1 for network in networks}
 
@@ -467,7 +477,8 @@ class DiscoveryMixin:
                     continue
                 address = ipaddress.ip_address(ip)
                 if (
-                    not address.is_private
+                    address.version != 4
+                    or not address.is_private
                     or address.is_multicast
                     or address.is_unspecified
                     or not any(address in network for network in networks)
@@ -496,8 +507,7 @@ class DiscoveryMixin:
                 if alive_ip in seen_ips:
                     continue
                 seen_ips.add(alive_ip)
-                octs = [int(x) for x in alive_ip.split(".")]
-                mac = existing_mac_by_ip.get(alive_ip) or f"02:00:{octs[0]:02x}:{octs[1]:02x}:{octs[2]:02x}:{octs[3]:02x}"
+                mac = inferred_inventory_mac(alive_ip)
                 oui = mac.replace(":", "")[:6]
                 vendor, device_type = self._vendor_for_oui(oui)
                 addr = ipaddress.ip_address(alive_ip)
@@ -517,17 +527,18 @@ class DiscoveryMixin:
             is_mocked_subproc = hasattr(subproc_mod.run, "assert_called")
             cand_ips = [item["ip"] for item in discovered]
             all_fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
-            all_hosts = self._get_cached_hostnames()
+            mac_by_ip = {item["ip"]: item["mac"] for item in discovered}
+            all_hosts = self._get_cached_hostnames(mac_by_ip)
+            all_fps = {item["ip"]: all_fps[item["ip"]] for item in discovered
+                       if all_fps.get(item["ip"], {}).get("mac") == item["mac"]}
 
-            # Actively resolve hostnames (NetBIOS, mDNS, LLMNR, Gateway PTR) & TLS/HTTP/Deco/SNMP fingerprints for uncached IPs
             if cand_ips and not is_mocked_subproc:
                 unknown_host_ips = [ip_c for ip_c in cand_ips if ip_c not in all_hosts][:24]
                 if unknown_host_ips:
-                    resolved_hosts = self._resolve_hostnames_bulk(unknown_host_ips)
+                    resolved_hosts = self._resolve_hostnames_bulk(unknown_host_ips, mac_by_ip)
                     if resolved_hosts:
                         all_hosts.update(resolved_hosts)
 
-                mac_by_ip = {item["ip"]: item["mac"] for item in discovered}
                 unknown_fp_ips = [ip_c for ip_c in cand_ips if ip_c not in all_fps][:16]
                 if unknown_fp_ips and hasattr(self, "identify_network_device"):
                     fp_updates: dict[str, dict] = {}
@@ -567,21 +578,36 @@ class DiscoveryMixin:
                 if all_hosts.get(item["ip"]):
                     item["hostname"] = all_hosts[item["ip"]]
                 self._upsert_inventory(item, scan_id)
+                item["observedMac"] = observed_inventory_mac(item["mac"], item["ip"])
 
-            self._mark_unseen_inventory_offline(networks, scan_id)
+            self._mark_unseen_inventory_offline(networks, scan_id, started_at)
             sync_summary = self.sync_infrastructure_devices()
             self._record_event(
                 "NETWORK_SCAN",
                 "INFO",
                 "LAN Discovery Scan Completed",
-                f"Scanned {', '.join(str(n) for n in networks)} — {len(discovered)} host(s) online ({ping_responses} ICMP reply(s)).",
+                f"Pulse observed {len(discovered)} addresses on {', '.join(str(n) for n in networks)} ({ping_responses} ICMP replies).",
                 device_name="LAN Discovery",
             )
             timestamp = utc_now()
+            echo_addresses = {ipaddress.IPv4Address(ip) for ip in ping_alive_hosts}
+            observed_addresses = {ipaddress.IPv4Address(ip) for ip in seen_ips}
+            coverage = [
+                {
+                    "subnet": str(network),
+                    "addressesProbed": sum(
+                        not address.is_loopback and not address.is_multicast for address in network.hosts()
+                    ),
+                    "icmpReplies": sum(address in network for address in echo_addresses),
+                    "addressesObserved": sum(address in network for address in observed_addresses),
+                }
+                for network in networks
+            ]
             with self._connect() as db:
                 db.execute(
-                    "INSERT OR REPLACE INTO monitor_metadata (key, value) VALUES ('last_discovery_at', ?)",
-                    (timestamp,),
+                    """INSERT OR REPLACE INTO monitor_metadata (key, value)
+                       VALUES ('last_discovery_at', ?), ('last_discovery_coverage', ?)""",
+                    (timestamp, json.dumps(coverage)),
                 )
             self.broadcast(
                 "inventory_update",
@@ -589,6 +615,7 @@ class DiscoveryMixin:
                     "inventory": self.get_inventory(),
                     "events": self.get_events(50),
                     "devices": self._hydrated_devices(),
+                    "lastDiscoveryAt": timestamp,
                     "routers": self.get_router_fleet() if hasattr(self, "get_router_fleet") else [],
                     "activeAlerts": self.get_active_alerts(),
                     "alertStats": self.get_alert_stats(),
@@ -600,6 +627,7 @@ class DiscoveryMixin:
                 "totalDiscovered": len(discovered),
                 "pingResponses": ping_responses,
                 "networks": [str(network) for network in networks],
+                "coverage": coverage,
                 "devices": discovered,
                 "inventory": self.get_inventory(),
                 "events": self.get_events(50),
@@ -611,17 +639,18 @@ class DiscoveryMixin:
 
     def refresh_live_arp_and_infra(self) -> dict:
         """Lightweight real-time ARP neighbor sync + fingerprint check for newly joined routers, Deco mesh & APs."""
+        self = cast("Monitor", self)
         os_mod = runtime_attr("os", os)
         subproc_mod = runtime_attr("subprocess", subprocess)
         if not self._scan_lock.acquire(blocking=False):
             return {"skipped": True}
         try:
             networks = self._known_local_networks() or self._local_lan_networks()
-            arp_entries = self._read_arp_entries(os_mod, subproc_mod)
+            arp_entries = self._read_arp_entries(os_mod.name, subproc_mod.run)
             known_gateways = self._known_local_gateways()
             gw_plus_one = {network.network_address + 1 for network in networks}
             all_fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
-            all_hosts = self._get_cached_hostnames()
+            all_hosts = {}
 
             with self._connect() as db:
                 existing_rows = {
@@ -670,12 +699,12 @@ class DiscoveryMixin:
                 return {"changed": 0}
 
             cand_ips = [x["ip"] for x in new_or_changed]
-            resolved_hosts = self._resolve_hostnames_bulk(cand_ips)
+            mac_by_ip = {item["ip"]: item["mac"] for item in new_or_changed}
+            resolved_hosts = self._resolve_hostnames_bulk(cand_ips, mac_by_ip)
             if resolved_hosts:
                 all_hosts.update(resolved_hosts)
             if hasattr(self, "identify_network_device"):
                 fp_updates: dict[str, dict] = {}
-                mac_by_ip = {x["ip"]: x["mac"] for x in new_or_changed}
 
                 def _fp_fast(target_ip: str) -> tuple[str, dict | None]:
                     open_p = [p for p in (80, 443, 8080, 20001) if self._probe_tcp_socket(target_ip, p, timeout=0.25)[0]]
@@ -731,12 +760,13 @@ class DiscoveryMixin:
             self._scan_lock.release()
 
     def _mark_unseen_inventory_offline(
-        self, networks: list[ipaddress.IPv4Network], scan_id: str
+        self, networks: list[ipaddress.IPv4Network], scan_id: str, started_at: str
     ) -> None:
+        self = cast("Monitor", self)
         events = []
         with self._connect() as db:
             rows = db.execute(
-                "SELECT mac, ip, suggested_name, is_online, last_scan_id FROM discovered_devices"
+                "SELECT mac, ip, suggested_name, is_online, last_scan_id, last_seen FROM discovered_devices"
             ).fetchall()
             for row in rows:
                 address = ipaddress.ip_address(row["ip"])
@@ -744,12 +774,15 @@ class DiscoveryMixin:
                     any(address in network for network in networks)
                     and row["last_scan_id"] != scan_id
                     and row["is_online"]
+                    and row["last_seen"] < started_at
                 ):
-                    db.execute(
-                        "UPDATE discovered_devices SET is_online=0 WHERE mac=?",
-                        (row["mac"],),
-                    )
-                    events.append((row["mac"], row["ip"], row["suggested_name"]))
+                    changed = db.execute(
+                        """UPDATE discovered_devices SET is_online=0
+                           WHERE mac=? AND last_seen < ? AND is_online=1""",
+                        (row["mac"], started_at),
+                    ).rowcount
+                    if changed:
+                        events.append((row["mac"], row["ip"], row["suggested_name"]))
         for mac, ip, name in events:
             self._record_event(
                 "DEVICE_MISSING",
@@ -762,11 +795,29 @@ class DiscoveryMixin:
             )
 
     def last_discovery_at(self) -> str | None:
+        self = cast("Monitor", self)
         with self._connect() as db:
             row = db.execute(
                 "SELECT value FROM monitor_metadata WHERE key='last_discovery_at'"
             ).fetchone()
         return row["value"] if row else None
+
+    def get_discovery_coverage(self) -> dict:
+        self = cast("Monitor", self)
+        with self._connect() as db:
+            metadata = dict(db.execute(
+                """SELECT key, value FROM monitor_metadata
+                   WHERE key IN ('last_discovery_at', 'last_discovery_coverage')"""
+            ).fetchall())
+        try:
+            last_scan = json.loads(metadata.get("last_discovery_coverage", "[]"))
+        except ValueError:
+            last_scan = []
+        return {
+            "subnets": [str(network) for network in self._known_local_networks()],
+            "lastScanAt": metadata.get("last_discovery_at"),
+            "lastScan": last_scan if isinstance(last_scan, list) else [],
+        }
 
     def _daily_discovery_due(self) -> bool:
         last_scan = self.last_discovery_at()
@@ -912,7 +963,8 @@ class DiscoveryMixin:
                 return name
         return ""
 
-    def _get_cached_hostnames(self) -> dict[str, str]:
+    def _get_cached_hostnames(self, mac_by_ip: dict[str, str] | None = None) -> dict[str, str]:
+        self = cast("Monitor", self)
         try:
             with self._connect() as db:
                 row = db.execute(
@@ -920,18 +972,33 @@ class DiscoveryMixin:
                 ).fetchone()
             if row and row["value"]:
                 data = json.loads(row["value"])
-                return data if isinstance(data, dict) else {}
+                if not isinstance(data, dict):
+                    return {}
+                names = {}
+                for ip, item in data.items():
+                    if isinstance(item, dict):
+                        if mac_by_ip is None or (item.get("mac") and item["mac"] == mac_by_ip.get(ip)):
+                            names[ip] = item["name"]
+                    elif mac_by_ip is None and isinstance(item, str):
+                        names[ip] = item
+                return names
         except Exception:
             pass
         return {}
 
-    def _save_cached_hostnames(self, updates: dict[str, str]) -> None:
+    def _save_cached_hostnames(self, updates: dict[str, str], mac_by_ip: dict[str, str] | None = None) -> None:
+        self = cast("Monitor", self)
         if not updates:
             return
         try:
-            current = self._get_cached_hostnames()
-            current.update({k: v for k, v in updates.items() if v})
             with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT value FROM monitor_metadata WHERE key='device_hostnames'").fetchone()
+                current = json.loads(row["value"]) if row else {}
+                for ip, name in updates.items():
+                    if name:
+                        mac = observed_inventory_mac((mac_by_ip or {}).get(ip, ""), ip)
+                        current[ip] = {"name": name, "mac": mac}
                 db.execute(
                     "INSERT OR REPLACE INTO monitor_metadata (key, value) VALUES ('device_hostnames', ?)",
                     (json.dumps(current),),
@@ -939,7 +1006,7 @@ class DiscoveryMixin:
         except Exception:
             pass
 
-    def _resolve_hostnames_bulk(self, ips: list[str]) -> dict[str, str]:
+    def _resolve_hostnames_bulk(self, ips: list[str], mac_by_ip: dict[str, str] | None = None) -> dict[str, str]:
         """Resolve hostnames concurrently across NetBIOS, mDNS, LLMNR, and local gateway PTR."""
         unique_ips = sorted({ip for ip in ips if ip})
         if not unique_ips:
@@ -960,7 +1027,7 @@ class DiscoveryMixin:
                 if hostname:
                     resolved[ip_key] = hostname
         if resolved:
-            self._save_cached_hostnames(resolved)
+            self._save_cached_hostnames(resolved, mac_by_ip)
         return resolved
 
     @staticmethod
@@ -974,7 +1041,11 @@ class DiscoveryMixin:
     ) -> tuple[str, str]:
         """Build clean human-readable (vendor, device_name) from hostname, fingerprint, and MAC OUI."""
         fp = fp or {}
-        snmp = fp.get("snmp") if isinstance(fp.get("snmp"), dict) else {}
+        if fp.get("mac") and fp["mac"].lower() != mac.lower():
+            fp = {}
+        snmp = fp.get("snmp")
+        if not isinstance(snmp, dict):
+            snmp = {}
         raw_host = str(hostname or snmp.get("sysName") or "").strip()
         fp_model = str(fp.get("model") or "").strip()
         fp_vendor = str(fp.get("vendor") or "").strip()

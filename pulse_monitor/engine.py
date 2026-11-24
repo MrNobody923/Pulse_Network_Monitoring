@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 import queue
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +15,9 @@ from .alerts import AlertsMixin
 from .config import DEFAULT_CONFIG, merge_config, utc_now
 from .diagnostics import DiagnosticsMixin
 from .discovery import DiscoveryMixin
-from .game_detector import GameDetectorMixin
+from .game_detector import GameDetectorMixin, host_game_processes, list_windows_processes
 from .isp_speed import IspSpeedMixin
+from .operations import OperationsMixin
 from .port_scanner import PortScannerMixin
 from .probes import ProbesMixin
 from .storage import StorageMixin
@@ -30,10 +34,12 @@ class Monitor(
     PortScannerMixin,
     TopologyMixin,
     GameDetectorMixin,
+    OperationsMixin,
 ):
     """Central network monitoring engine managing telemetry loops and state snapshots."""
 
     def __init__(self) -> None:
+        self.lock = threading.RLock()
         data_dir = self._data_dir()
         config_file = self._config_file()
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -48,8 +54,9 @@ class Monitor(
             self.config = json.loads(json.dumps(DEFAULT_CONFIG))
             self.save_config()
 
-        self.lock = threading.RLock()
-        self.event_subscribers: set[object] = set()
+        self.event_subscribers: set[queue.Queue[dict | None]] = set()
+        self._discovered_networks: list[ipaddress.IPv4Network] = []
+        self._skip_live_probe_in_test = False
         self.history: dict[str, list[float | None]] = {}
         self.device_status: dict[str, bool] = {}
         self.latest_devices: dict[str, dict] = {}
@@ -62,6 +69,7 @@ class Monitor(
         self._event_store()
         self._topology_store()
         self._game_store()
+        self._operations_store()
         self.router_state = self._initial_router_state()
         self.router_fleet: list[dict] = [self.router_state]
         self.isp_state = self._initial_isp_state()
@@ -69,6 +77,10 @@ class Monitor(
         self._stop = threading.Event()
         self._scan_lock = threading.Lock()
         self._speedtest_lock = threading.Lock()
+        self._device_probe_lock = threading.Lock()
+        self._next_device_probe: dict[str, tuple[str, float]] = {}
+        self._switch_sample_lock = threading.Lock()
+        self._isp_probe_lock = threading.Lock()
         self._last_speedtest = 0.0
         try:
             self.refresh_inventory_identities(resolve_live=False)
@@ -85,20 +97,63 @@ class Monitor(
 
     def _hydrated_devices(self) -> list[dict]:
         return [
-            self.latest_devices.get(device["ip"], {**device, "status": "unknown"})
+            {
+                "status": "unknown",
+                **device,
+                **self.latest_devices.get(device["ip"], {}),
+                "favorite": device["favorite"],
+                "favoriteKey": device["favoriteKey"],
+                "archived": device["archived"],
+                "probeIntervalSec": self.device_probe_interval(device),
+            }
             for device in self.get_devices()
         ]
 
     def probe_all_devices(self) -> list[dict]:
         """Probe all monitored Access Points, Switches, and Gateways concurrently and correlate diagnostics."""
-        devices = self.get_devices()
-        if not devices:
-            return []
-        with ThreadPoolExecutor(max_workers=min(16, len(devices))) as pool:
-            results = list(pool.map(self.probe_device, devices))
-        self.enrich_fleet_diagnostics(results)
-        self.latest_devices = {result["ip"]: result for result in results}
-        return results
+        return self._probe_device_batch(force=True)
+
+    def device_probe_interval(self, device: dict) -> int:
+        try:
+            base = max(5, min(20, int(self.config.get("devicePollIntervalSec", 15))))
+        except (TypeError, ValueError):
+            base = 15
+        role = str(device.get("type") or "").lower()
+        if role in {"gateway", "router", "switch", "firewall"}:
+            return base
+        return max(30 if role in {"ap", "server"} else 60, base)
+
+    def _probe_device_batch(self, *, force: bool = False) -> list[dict]:
+        with self._device_probe_lock:
+            devices = self.get_devices()
+            now = time.monotonic()
+            active_ids = {device["id"] for device in devices}
+            self._next_device_probe = {key: value for key, value in self._next_device_probe.items() if key in active_ids}
+            due = []
+            for device in devices:
+                last_ip, deadline = self._next_device_probe.get(device["id"], ("", 0.0))
+                if force or (not device["archived"] and (last_ip != device["ip"] or now >= deadline)):
+                    due.append(device)
+            if not due:
+                return []
+            before = self.latest_devices.copy()
+            with ThreadPoolExecutor(max_workers=min(16, len(due))) as pool:
+                results = list(pool.map(self.probe_device, due))
+            with self.lock:
+                active = {device["ip"]: device["id"] for device in self.config["devices"]}
+                merged = {ip: result for ip, result in self.latest_devices.items() if active.get(ip) == result.get("id")}
+                for result in results:
+                    ip, device_id = result["ip"], result["id"]
+                    if active.get(ip) != device_id:
+                        continue
+                    previous = before.get(ip, {})
+                    first_failure = result.get("connectivityState") == "DEVICE_DOWN" and previous.get("connectivityState") != "DEVICE_DOWN"
+                    delay = 5 if first_failure else self.device_probe_interval(result)
+                    self._next_device_probe[device_id] = (ip, time.monotonic() + delay)
+                    merged[ip] = result
+                self.enrich_fleet_diagnostics(list(merged.values()))
+                self.latest_devices = merged
+            return results
 
     def get_mobile_summary(self) -> dict:
         """Return a compact, mobile-app-ready status payload for dashboard & push/polling clients."""
@@ -167,13 +222,19 @@ class Monitor(
                 "packetLossPct": isp.get("packetLossPct"),
                 "downloadMbps": last_speed.get("downloadMbps"),
                 "uploadMbps": last_speed.get("uploadMbps"),
+                "speedTestAt": last_speed.get("timestamp"),
+                "monitorWifiSignal": live.get("wifiSignal"),
                 "liveRxMbps": live.get("rxMbps"),
                 "liveTxMbps": live.get("txMbps"),
                 "liveSource": live.get("source"),
+                "routerWanThroughput": isp.get("routerWanThroughput"),
+                "probeFailurePct": isp.get("probeFailurePct"),
+                "probeTimestamp": isp.get("probeTimestamp"),
             },
             "counts": {
                 "devicesTotal": len(devices),
-                "devicesOnline": sum(1 for d in devices if d.get("alive")),
+                "devicesOnline": sum(1 for d in devices if d.get("alive") and d.get("directlyReachable") is not False),
+                "devicesObservedOnly": sum(1 for d in devices if d.get("connectivityState") == "ARP_OBSERVED"),
                 "devicesDown": sum(1 for d in devices if d.get("status") == "offline"),
                 "devicesDegraded": sum(1 for d in devices if d.get("status") == "warning"),
                 "activeAlerts": len(alerts),
@@ -202,6 +263,7 @@ class Monitor(
             "gameActivity": self.get_game_activity(60),
             "lastDiscoveryAt": self.last_discovery_at(),
             "config": {
+                "backgroundScansEnabled": os.environ.get("PULSE_ENABLE_BACKGROUND_SCANS") == "1",
                 "routerConfig": {
                     "ip": self.config["router"].get("ip", "192.168.0.1"),
                     "hasToken": bool(self.config["router"].get("stok")),
@@ -254,19 +316,50 @@ class Monitor(
             target=self._wan_throughput_loop, daemon=True, name="wan-throughput"
         ).start()
         threading.Thread(
+            target=self._router_wan_loop, daemon=True, name="router-wan-throughput"
+        ).start()
+        threading.Thread(
             target=self._game_realtime_loop, daemon=True, name="game-realtime"
         ).start()
+        threading.Thread(
+            target=self._game_control_expiry_loop, daemon=True, name="game-control-expiry"
+        ).start()
+        threading.Thread(target=self._operations_loop, daemon=True, name="incident-notifications").start()
+        threading.Thread(target=self._switch_ports_loop, daemon=True, name="switch-ports").start()
+        if sys.platform == "win32":
+            threading.Thread(
+                target=self._host_game_process_loop, daemon=True, name="game-processes"
+            ).start()
         self.start_game_listeners()
 
     def stop(self) -> None:
         self._stop.set()
 
+    def _host_game_process_loop(self) -> None:
+        last_seen: dict[tuple[str, str], float] = {}
+        while not self._stop.is_set():
+            try:
+                processes = list_windows_processes()
+                if processes is not None:
+                    router_ip = self.config.get("router", {}).get("ip") or ""
+                    host_ip = self._detect_host_lan_ip("127.0.0.1", router_ip)
+                    current = host_game_processes(host_ip, processes)
+                    for key in last_seen.keys() - current.keys():
+                        self.mark_game_session_ended_by_ip_game(*key)
+                        del last_seen[key]
+                    for key, payload in current.items():
+                        now = time.monotonic()
+                        if key not in last_seen or now - last_seen[key] >= 6:
+                            self.record_game_detection(payload)
+                            last_seen[key] = now
+            except Exception as exc:
+                print(f"[monitor] Windows game process scan warning: {exc}", flush=True)
+            self._stop.wait(1)
+
     def _game_realtime_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                expired = self.expire_stale_game_sessions()
-                if expired:
-                    self.broadcast("game_detected", {"gameActivity": self.get_game_activity(60)})
+                self.expire_stale_game_sessions()
                 if hasattr(self, "poll_router_logs_for_games"):
                     self.poll_router_logs_for_games()
             except Exception as exc:
@@ -278,11 +371,6 @@ class Monitor(
             started = time.monotonic()
             try:
                 isp = self.probe_isp()
-                gw_lat = isp.get("wanGatewayLatencyMs")
-                if gw_lat is not None and self.router_state:
-                    with self.lock:
-                        self.router_state["latencyMs"] = gw_lat
-                        self.router_state["reachable"] = True
                 self.broadcast("isp_update", isp)
             except Exception as exc:
                 print(f"[monitor] Router/ISP probe failed: {exc}", flush=True)
@@ -293,52 +381,56 @@ class Monitor(
             self._stop.wait(max(1.0, interval - (time.monotonic() - started)))
 
     def _monitor_loop(self) -> None:
+        background_scans = os.environ.get("PULSE_ENABLE_BACKGROUND_SCANS") == "1"
         last_scan_attempt: float | None = None
         last_arp_sync: float = 0.0
         last_game_scan: float = 0.0
+        next_fleet_check = 0.0
         while not self._stop.is_set():
             cycle_started = time.monotonic()
 
-            results = self.probe_all_devices()
+            probed = self._probe_device_batch()
+            fleet_checked = cycle_started >= next_fleet_check
             try:
-                fleet = self.probe_routers_fleet()
+                if fleet_checked:
+                    next_fleet_check = cycle_started + self.device_probe_interval({"type": "router"})
+                fleet = self.probe_routers_fleet() if fleet_checked else self.get_router_fleet()
             except Exception as exc:
                 print(f"[monitor] Multi-router fleet probe warning: {exc}", flush=True)
                 fleet = self.get_router_fleet()
-            if (cycle_started - last_arp_sync) >= 30 and hasattr(self, "refresh_live_arp_and_infra"):
+            if background_scans and (cycle_started - last_arp_sync) >= 30:
                 last_arp_sync = cycle_started
                 try:
                     self.refresh_live_arp_and_infra()
                 except Exception as exc:
                     print(f"[monitor] Live ARP sync warning: {exc}", flush=True)
-            try:
-                self.expire_stale_game_sessions()
-                sensor_online = bool(self._get_gaming_sensor_status().get("sensorOnline"))
-                if not sensor_online and (cycle_started - last_game_scan) >= 180:
+            if background_scans and (cycle_started - last_game_scan) >= 90:
+                try:
                     last_game_scan = cycle_started
                     self.scan_lan_for_games()
-            except Exception as exc:
-                print(f"[monitor] Automatic LAN game scan warning: {exc}", flush=True)
-            try:
-                game_activity = self.get_game_activity(60)
-            except Exception:
-                game_activity = None
-            self.broadcast(
+                except Exception as exc:
+                    print(f"[monitor] Automatic LAN game scan warning: {exc}", flush=True)
+            if probed or fleet_checked:
+                try:
+                    game_activity = self.get_game_activity(60)
+                except Exception:
+                    game_activity = None
+                self.broadcast(
                 "telemetry",
                 {
                     "timestamp": utc_now(),
                     "router": self.router_state,
                     "routers": fleet,
                     "isp": self.get_isp_state(),
-                    "devices": results if results else self._hydrated_devices(),
+                    "devices": self._hydrated_devices(),
                     "topology": self.get_topology(),
                     "activeAlerts": self.get_active_alerts(),
                     "alertStats": self.get_alert_stats(),
                     "networkEvents": self.get_events(200),
                     **({"gameActivity": game_activity} if game_activity is not None else {}),
                 },
-            )
-            full_sweep_due = (
+                )
+            full_sweep_due = background_scans and (
                 self._daily_discovery_due()
                 or (last_scan_attempt is None and not self.get_inventory())
             )
@@ -348,7 +440,7 @@ class Monitor(
                 last_scan_attempt = cycle_started
                 try:
                     self.discover_devices()
-                    results = self.probe_all_devices()
+                    self.probe_all_devices()
                     fleet = self.probe_routers_fleet()
                     self.broadcast(
                         "telemetry",
@@ -357,7 +449,7 @@ class Monitor(
                             "router": self.router_state,
                             "routers": fleet,
                             "isp": self.get_isp_state(),
-                            "devices": results if results else self._hydrated_devices(),
+                            "devices": self._hydrated_devices(),
                             "topology": self.get_topology(),
                             "networkInventory": self.get_inventory(),
                             "lastDiscoveryAt": self.last_discovery_at(),
@@ -367,11 +459,5 @@ class Monitor(
                     )
                 except (RuntimeError, OSError) as exc:
                     print(f"[monitor] Real-time LAN discovery failed: {exc}", flush=True)
-            try:
-                poll_interval = max(
-                    5, min(20, int(self.config.get("devicePollIntervalSec", 15)))
-                )
-            except (TypeError, ValueError):
-                poll_interval = 15
-            self._stop.wait(max(0.5, poll_interval - (time.monotonic() - cycle_started)))
+            self._stop.wait(max(0.5, 5 - (time.monotonic() - cycle_started)))
 

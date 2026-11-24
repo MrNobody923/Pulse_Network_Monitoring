@@ -1,10 +1,14 @@
 {
-  "name": "Pulse Network Monitor",
-  "short_name": "PulseNet",
+  "name": "Vertex Sentry",
+  "short_name": "Vertex Sentry",
   "description": "Live company network monitoring, device uptime, ISP speed, port security, and topology map.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#091220",
-  "theme_color": "#091220"
+  "theme_color": "#091220",
+  "icons": [
+    {"src": "/vertex-sentry-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/vertex-sentry.png", "sizes": "512x512", "type": "image/png"}
+  ]
 }
 

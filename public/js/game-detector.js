@@ -4,13 +4,32 @@ let gameActivityFilter = 'active';
 let gameActivitySearch = '';
 const gameToastTimers = new Map();
 const shownGameNotificationIds = new Set();
+let gameNotificationBusy = false;
+let gameNotificationMessage = '';
 const seenActiveSessionIds = new Set();
 const displayedToastSessionIds = new Set();
 let gameBaselineSeeded = false;
 let gameAutoPollInFlight = false;
+let gameEventStreamConnected = false;
+let gameActivityRevision = 0;
 let gameTerminalUserScrolledUp = false;
 let gameTerminalHasVisibleRender = false;
 let lastGameTerminalSignature = '';
+const GAME_LAUNCHER_IDS = new Set(['steam_client', 'riot_client']);
+const ANDROID_APP_DETECTION = 'Android foreground app';
+
+function isWebsiteDetection(gameId) {
+  return gameId?.endsWith('_website') === true;
+}
+
+function isMonitorOnlyDetection(gameId) {
+  return GAME_LAUNCHER_IDS.has(gameId) || isWebsiteDetection(gameId);
+}
+
+function isGameOpen(item) {
+  return item.detectionMethod === ANDROID_APP_DETECTION
+    || (item.detectionMethod || '').endsWith('Windows game process');
+}
 
 function getGameActivityData() {
   return (
@@ -18,7 +37,7 @@ function getGameActivityData() {
       logs: [],
       blocks: [],
       onlineDevices: [],
-      autoScanActive: true,
+      autoScanActive: false,
       summary: {
         activeCount: 0,
         blockedCount: 0,
@@ -52,30 +71,101 @@ function handleGameActivitySearch(value) {
   renderGamingSection();
 }
 
+function gameDesktopAlertPermission() {
+  if (!window.isSecureContext) return 'insecure';
+  return typeof Notification === 'undefined' || typeof Notification.requestPermission !== 'function'
+    ? 'unsupported' : Notification.permission;
+}
+
 function updateGameNotifyButton() {
   const btn = document.getElementById('btnGameNotify');
-  if (!btn) return;
-  if (typeof Notification === 'undefined') {
-    btn.textContent = 'In-App Alerts: ON';
-    btn.disabled = true;
-    return;
-  }
-  if (Notification.permission === 'granted') {
-    btn.textContent = 'Desktop Alerts: ON';
-  } else if (Notification.permission === 'denied') {
-    btn.textContent = 'In-App Alerts: ON';
-  } else {
-    btn.textContent = 'Enable Desktop Alerts';
+  const status = document.getElementById('gameNotifyStatus');
+  if (!btn || !status) return;
+  const permission = gameDesktopAlertPermission();
+  const help = {
+    insecure: 'Open Vertex Sentry on localhost or through HTTPS for desktop alerts.',
+    unsupported: 'This browser does not support desktop alerts here. In-app alerts are available.',
+    denied: 'Allow Notifications in this site’s browser settings to receive new game alerts.',
+  };
+  btn.disabled = gameNotificationBusy || permission === 'granted' || Boolean(help[permission]);
+  btn.textContent = gameNotificationBusy ? 'Requesting permission…'
+    : permission === 'granted' ? 'Desktop alerts enabled'
+    : permission === 'denied' ? 'Desktop alerts blocked'
+    : help[permission] ? 'Desktop alerts unavailable' : 'Enable desktop alerts';
+  const message = help[permission] || gameNotificationMessage;
+  if (status.textContent !== message) status.textContent = message;
+}
+
+function sendGameDesktopNotification(title, body, tag) {
+  return new Promise(resolve => {
+    let notification;
+    try {
+      notification = new Notification(title, {body, tag, icon: '/vertex-sentry-192.png'});
+    } catch (_) {
+      resolve('failed');
+      return;
+    }
+    const timer = setTimeout(() => resolve('unconfirmed'), 4500);
+    notification.onshow = () => {
+      clearTimeout(timer);
+      resolve('shown');
+    };
+    notification.onerror = () => {
+      clearTimeout(timer);
+      resolve('failed');
+    };
+    notification.onclick = () => {
+      window.focus();
+      navigateSidebar('gaming');
+      notification.close();
+    };
+  });
+}
+
+async function notifyGameOnDesktop(detection) {
+  if (gameDesktopAlertPermission() !== 'granted' || detection.hintType || detection.portHint || detection.isDismissed
+      || (detection.isActive === false && !detection.autoPrevented)) return;
+  const key = detection.id || `${detection.ip}:${detection.gameId}:${detection.timestamp || ''}`;
+  if (shownGameNotificationIds.has(key)) return;
+  shownGameNotificationIds.add(key);
+  const evidence = GAME_LAUNCHER_IDS.has(detection.gameId) ? 'running'
+    : isWebsiteDetection(detection.gameId) ? 'observed'
+    : isGameOpen(detection) ? 'opened' : 'activity detected';
+  const who = detection.deviceName || detection.ip;
+  const body = [
+    who, detection.ip && detection.ip !== who ? detection.ip : '', detection.connectedTo,
+    detection.timestamp ? fmtTime(detection.timestamp) : '',
+  ].filter(Boolean).join(' · ');
+  const delivery = await sendGameDesktopNotification(`${detection.gameName} ${evidence}`, body, `game-${key}`);
+  if (delivery === 'failed') {
+    shownGameNotificationIds.delete(key);
+    gameNotificationMessage = 'The browser could not show a game alert. Check your browser’s Windows notification settings.';
+    updateGameNotifyButton();
   }
 }
 
 async function requestGameNotificationPermission() {
-  if (typeof Notification === 'undefined') return;
-  try {
-    await Notification.requestPermission();
-  } catch (_) {}
+  const initial = gameDesktopAlertPermission();
+  if (gameNotificationBusy || initial !== 'default') return;
+  gameNotificationBusy = true;
+  gameNotificationMessage = '';
   updateGameNotifyButton();
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission === 'granted') {
+      gameNotificationMessage = 'Keep Vertex Sentry open to receive alerts for new detections.';
+    } else if (permission === 'default') {
+      gameNotificationMessage = 'Notification permission was not granted. Select Enable desktop alerts to try again.';
+    }
+  } catch (_) {
+    gameNotificationMessage = 'The browser could not request notification permission. Check this site’s browser settings.';
+  } finally {
+    gameNotificationBusy = false;
+    updateGameNotifyButton();
+  }
 }
+
+window.addEventListener('focus', updateGameNotifyButton);
 
 function formatGameTerminalTime(isoStr) {
   if (!isoStr) return '--:--:--';
@@ -103,9 +193,19 @@ function scrollGameTerminalToBottom(force = false) {
   }
 }
 
+function gameSessionStatus(item) {
+  const method = item.detectionMethod || '';
+  if (GAME_LAUNCHER_IDS.has(item.gameId)) return 'Client running';
+  if (isWebsiteDetection(item.gameId)) return 'Website signal';
+  if (isGameOpen(item)) return 'App open';
+  if (method.includes('Port Scan') || method === 'Auto LAN Game Port Sensor') return 'Port open';
+  return 'Network activity';
+}
+
 function renderActiveGamesLivePanel(activeLogs) {
   const panel = document.getElementById('activeGamesLivePanel');
   if (!panel) return;
+  if (deferDashboardControlRender(panel, () => renderActiveGamesLivePanel(activeLogs))) return;
   if (!Array.isArray(activeLogs) || !activeLogs.length) {
     panel.style.display = 'none';
     panel.innerHTML = '';
@@ -115,8 +215,7 @@ function renderActiveGamesLivePanel(activeLogs) {
   panel.innerHTML = `
     <div class="game-section-panel amber">
       <div class="game-panel-head">
-        <span class="game-panel-title">Active Open Sessions (${activeLogs.length})</span>
-        <span class="game-panel-sub">Manual enforcement — choose Throttle Speed to degrade a user's connection or Cut Wi-Fi to disconnect</span>
+        <span class="game-panel-title">Current Detections (${activeLogs.length})</span>
       </div>
       <div class="game-panel-rows">
         ${activeLogs
@@ -126,19 +225,22 @@ function renderActiveGamesLivePanel(activeLogs) {
             <div class="game-row-info">
               <div class="game-row-title">
                 <span>${esc(item.gameName)}</span>
-                <span class="status-pill warning">Playing</span>
+                <span class="status-pill warning">${gameSessionStatus(item)}</span>
               </div>
               <div class="game-row-sub">
-                <strong>${esc(item.deviceName)}</strong> (<span class="mono">${esc(item.ip)}</span>${item.deviceType ? ` · ${esc(item.deviceType)}` : ''}) · Via <strong>${esc(item.connectedTo || 'Main Gateway Router')}</strong>
+                <strong>${esc(item.deviceName)}</strong> (<span class="mono">${esc(item.ip)}</span>${item.deviceType ? ` · ${esc(item.deviceType)}` : ''}) · Via <strong>${esc(item.connectedTo || 'Connection unknown')}</strong>
               </div>
+              ${item.player ? `<div class="game-row-sub">Windows account <strong>${esc(item.player)}</strong></div>` : ''}
               <div class="game-row-indicator">
                 Signal: <span class="mono">${esc(item.matchedIndicator || '—')}</span> · ${esc(item.detectionMethod || 'Network Detection')}
               </div>
             </div>
             <div class="game-row-actions">
-              <button type="button" class="btn btn-secondary btn-sm game-btn-danger" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_throttle', false)" title="Drop user's internet rate to an unplayable speed">Throttle Speed</button>
-              <button type="button" class="btn btn-secondary btn-sm game-btn-warn" onclick="shutOffGameSession('${esc(item.id)}', '${esc(item.ip)}', '${esc(item.gameId)}', 'device_wifi_cut', true)" title="Disconnect device from Wi-Fi / LAN">Cut Wi-Fi</button>
-              <button type="button" class="btn btn-secondary btn-sm" onclick="dismissGameSession('${esc(item.id)}')">Dismiss</button>
+              ${isMonitorOnlyDetection(item.gameId) ? '' : `
+                <button type="button" class="btn btn-secondary btn-sm game-btn-danger" onclick="shutOffGameSession(${inlineString(item.id)}, ${inlineString(item.ip)}, ${inlineString(item.gameId)}, 'device_throttle')">Limit Bandwidth</button>
+                <button type="button" class="btn btn-secondary btn-sm game-btn-warn" onclick="shutOffGameSession(${inlineString(item.id)}, ${inlineString(item.ip)}, ${inlineString(item.gameId)}, 'device_wifi_cut')">Block Device Access</button>
+              `}
+              <button type="button" class="btn btn-secondary btn-sm" onclick="dismissGameSession(${inlineString(item.id)})">Dismiss</button>
             </div>
           </div>
         `
@@ -149,6 +251,88 @@ function renderActiveGamesLivePanel(activeLogs) {
   `;
 }
 
+function renderGameCoverage() {
+  const activity = getGameActivityData();
+  const {subnets = [], lastScanAt, lastScan = [], endpointIps = [], recentDnsIps = [], endpointEnrollmentEnabled} = activity.coverage || {};
+  const scope = document.getElementById('gameCoverageScope');
+  if (!scope) return;
+  scope.textContent = [
+    subnets.length ? `Discovery scope: ${subnets.join(', ')}.` : 'Discovery scope is awaiting a LAN scan.',
+    lastScanAt
+      ? `Last LAN scan ${fmtTime(lastScanAt)}.${lastScan.length ? '' : ' Run a new scan to record per-subnet counts.'}`
+      : 'No LAN scan recorded.'
+  ].join(' ');
+  const routerConnected = appState.router?.authenticated === true;
+  document.getElementById('btnGameCoverageRouter').hidden = routerConnected || !activity.sensorStatus?.routerIp;
+  const capture = activity.wiresharkStatus || {};
+  document.getElementById('gameCoverageSignals').textContent = [
+    routerConnected ? 'Router admin connected' : 'Router admin disconnected',
+    capture.active && capture.sensorCaptureEnabled !== false ? 'Packet capture active' : 'Packet capture inactive',
+    endpointEnrollmentEnabled ? `${endpointIps.length} Windows endpoint(s) reporting` : 'Windows endpoint enrollment off',
+    `${recentDnsIps.length} IP(s) with recent sensor DNS queries`
+  ].join(' · ');
+  const catalog = document.getElementById('gameSupportedCatalog');
+  if (catalog.open) {
+    const titles = [...(activity.catalog || [])].sort((a, b) => a.name.localeCompare(b.name));
+    document.getElementById('gameSupportedRows').innerHTML = titles.length
+      ? `<div class="device-list-table-wrap"><table class="device-list-table">
+          <thead><tr><th scope="col">Title</th><th scope="col">Detection signals</th></tr></thead>
+          <tbody>${titles.map(title => {
+            const sources = [];
+            if (title.hasWindowsProcess) {
+              sources.push(GAME_LAUNCHER_IDS.has(title.id) ? 'Windows client process' : 'Windows game process');
+            }
+            if (title.hasAndroidPackage) sources.push('Android foreground app');
+            if (title.domains.length || title.ports.length) sources.push('Network activity');
+            return `<tr><td>${esc(title.name)}</td><td>${esc(sources.join(' · '))}</td></tr>`;
+          }).join('')}</tbody>
+        </table></div>`
+      : '<p class="game-deck-meta">Waiting for the game catalog…</p>';
+  }
+  const networks = document.getElementById('gameCoverageSubnets');
+  networks.innerHTML = lastScan.length ? `
+    <div class="device-list-table-wrap">
+      <table class="device-list-table">
+        <thead><tr><th scope="col">Subnet in last scan</th><th scope="col">Addresses probed</th><th scope="col">ICMP replies</th><th scope="col">Addresses observed</th></tr></thead>
+        <tbody>${lastScan.map(row => `<tr>
+          <td class="mono">${esc(row.subnet)}</td>
+          <td>${esc(row.addressesProbed)}</td><td>${esc(row.icmpReplies)}</td><td>${esc(row.addressesObserved)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>` : '';
+
+  if (!document.getElementById('gameCoverageDevices').open) return;
+  const devices = new Map();
+  const add = (ip, name, evidence) => {
+    if (!ip) return;
+    if (!devices.has(ip)) devices.set(ip, {ip, name: name || ip, signals: new Set()});
+    if (evidence) devices.get(ip).signals.add(evidence);
+  };
+  for (const device of appState.networkInventory || []) {
+    if (device.isOnline && !device.archived) add(device.ip, device.suggestedName || device.name);
+  }
+  for (const device of appState.devices || []) {
+    if (!device.archived && device.alive === true) add(device.ip, device.name);
+  }
+  for (const ip of endpointIps) add(ip, '', 'Managed Windows endpoint');
+  for (const ip of recentDnsIps) add(ip, '', 'Recent DNS query');
+  for (const log of activity.logs || []) {
+    if (log.isActive && !log.hintType && !log.portHint) add(log.ip, log.deviceName, 'Live game signal');
+  }
+  const query = document.getElementById('gameCoverageSearch').value.trim().toLowerCase();
+  const filtered = [...devices.values()]
+    .filter(device => device.ip.includes(query) || device.name.toLowerCase().includes(query))
+    .sort((a, b) => b.signals.size - a.signals.size || a.name.localeCompare(b.name));
+  document.getElementById('gameCoverageDeviceRows').innerHTML = filtered.length ? `
+    <div class="device-list-table-wrap">
+      <table class="device-list-table">
+        <thead><tr><th scope="col">Device</th><th scope="col">IP</th><th scope="col">Detection evidence</th></tr></thead>
+        <tbody>${filtered.map(row => `<tr><td>${esc(row.name)}</td><td class="mono">${esc(row.ip)}</td>
+          <td>${esc([...row.signals].join(' · ') || 'No recent detection evidence')}</td></tr>`).join('')}</tbody>
+      </table>
+    </div>` : '<p class="game-deck-meta">No matching devices.</p>';
+}
+
 function renderGamingSection() {
   const data = getGameActivityData();
   const logs = data.logs || [];
@@ -156,8 +340,8 @@ function renderGamingSection() {
   const summary = data.summary || {};
 
   const findRule = item =>
-    blocks.find(
-      b => (b.ip === item.ip || b.ip === '*') && (b.gameId === item.gameId || b.gameId === '*')
+    isMonitorOnlyDetection(item.gameId) ? null : blocks.find(
+      b => !b.controlStatus && (b.ip === item.ip || b.ip === '*') && (b.gameId === item.gameId || b.gameId === '*')
     ) || null;
   const isBlockedLog = item => Boolean(item.isBlocked || findRule(item));
 
@@ -173,13 +357,14 @@ function renderGamingSection() {
 
   const activeUnblockedLogs = deduped.filter(x => x.isActive && !isBlockedLog(x));
   const activeCount = activeUnblockedLogs.length;
+  const openGames = activeUnblockedLogs.filter(isGameOpen);
   const blockedLogs = deduped.filter(isBlockedLog);
   const blockedRuleRows = [];
   for (const rule of blocks) {
     const hasLog = blockedLogs.some(
       x => (rule.ip === x.ip || rule.ip === '*') && (rule.gameId === x.gameId || rule.gameId === '*')
     );
-    if (!hasLog) {
+    if (rule.controlStatus || !hasLog) {
       blockedRuleRows.push({
         id: `rule-${rule.id}`,
         timestamp: rule.createdAt || new Date().toISOString(),
@@ -189,17 +374,17 @@ function renderGamingSection() {
         gameId: rule.gameId || '*',
         gameName: rule.gameName || 'Blocked Access',
         connectedTo: 'Active Restriction Rule',
-        matchedIndicator: rule.scope === 'device_wifi_cut' ? 'Wi-Fi Cut Off' : rule.scope === 'device_throttle' ? '1 KB/s Throttle + Lag' : 'Game Block',
+        matchedIndicator: rule.controlStatus === 'restore_pending' ? 'Restoration unverified' : rule.scope === 'device_wifi_cut' ? 'Device access block' : rule.scope === 'device_throttle' ? 'Router bandwidth limit' : 'Game Block',
         detectionMethod: 'Manual Restriction Rule',
         isActive: false,
-        isBlocked: true,
+        isBlocked: !rule.controlStatus || rule.controlStatus === 'active',
         _ruleRef: rule
       });
     }
   }
   const blockedTabEntries = [...blockedLogs, ...blockedRuleRows];
   const blockedEntryCount = blockedTabEntries.length;
-  const totalCount = summary.totalCount ?? deduped.length;
+  const totalCount = summary.totalCount ?? deduped.filter(item => !item.hintType && !item.portHint).length;
   const onlineCount =
     summary.onlineDevicesCount ??
     (Array.isArray(data.onlineDevices) ? data.onlineDevices.length : 0);
@@ -212,17 +397,19 @@ function renderGamingSection() {
   setTxt('gameStatTotal', totalCount);
   setTxt('gameStatTopGame', summary.topGame || 'None yet');
   setTxt('gameStatTopZone', summary.topZone || 'No traffic yet');
-  setTxt('gameTabAllCount', totalCount);
+  setTxt('gameTabAllCount', deduped.length);
   setTxt('gameTabActiveCount', activeCount);
+  setTxt('gameTabOpenCount', openGames.length);
   setTxt('gameTabBlockedCount', blockedEntryCount);
   renderGameSensorBanner(data, onlineCount);
   renderWiresharkStatusBar(data.wiresharkStatus || {});
+  renderGameCoverage();
   renderGamingPolicyControls(data.policy || {});
   setTxt(
     'gameTerminalPromptText',
     activeCount > 0
-      ? `${activeCount} open session(s) detected across ${onlineCount} devices — use Throttle Speed or Cut Wi-Fi to restrict access.`
-      : `Ghost Watcher active across ${onlineCount} company devices — passive DNS, ARP & Npcap listening (0% WAN load).`
+      ? `${activeCount} live detections across ${onlineCount} visible devices.`
+      : 'Waiting for recognized game traffic or a Windows game process.'
   );
 
   const sideBadge = document.getElementById('sideBadgeGaming');
@@ -234,43 +421,33 @@ function renderGamingSection() {
   const headBadge = document.getElementById('gamingStatusBadge');
   if (headBadge) {
     headBadge.textContent =
-      activeCount > 0 ? `${activeCount} Active Session${activeCount > 1 ? 's' : ''}` : 'Ghost Watching · Passive';
+      activeCount > 0 ? `${activeCount} Live Detection${activeCount > 1 ? 's' : ''}` : 'No active detections';
     headBadge.className = `status-pill ${activeCount > 0 ? 'warning' : 'online'}`;
   }
 
-  if (!gameBaselineSeeded) {
-    for (const item of logs) {
-      if (item && item.id && item.isActive) seenActiveSessionIds.add(item.id);
-    }
-    gameBaselineSeeded = true;
-  }
-
   updateGameNotifyButton();
-  renderActiveGamesLivePanel(activeUnblockedLogs);
   renderGameBlocksPanel(blocks);
+
+  const matchesSearch = item => !gameActivitySearch || [
+    item.gameName, item.player, item.deviceName, item.ip, item.vendor,
+    item.connectedTo, item.zoneLabel, item.matchedIndicator, item.detectionMethod
+  ].some(value => value && value.toLowerCase().includes(gameActivitySearch));
+  renderActiveGamesLivePanel((gameActivityFilter === 'open' ? openGames : activeUnblockedLogs).filter(matchesSearch));
 
   let filtered = deduped;
   if (gameActivityFilter === 'active') {
     filtered = activeUnblockedLogs;
+  } else if (gameActivityFilter === 'open') {
+    filtered = openGames;
   } else if (gameActivityFilter === 'blocked') {
     filtered = blockedTabEntries;
   }
   if (gameActivitySearch) {
-    filtered = filtered.filter(
-      x =>
-        (x.gameName && x.gameName.toLowerCase().includes(gameActivitySearch)) ||
-        (x.deviceName && x.deviceName.toLowerCase().includes(gameActivitySearch)) ||
-        (x.ip && x.ip.toLowerCase().includes(gameActivitySearch)) ||
-        (x.vendor && x.vendor.toLowerCase().includes(gameActivitySearch)) ||
-        (x.connectedTo && x.connectedTo.toLowerCase().includes(gameActivitySearch)) ||
-        (x.zoneLabel && x.zoneLabel.toLowerCase().includes(gameActivitySearch)) ||
-        (x.matchedIndicator && x.matchedIndicator.toLowerCase().includes(gameActivitySearch)) ||
-        (x.detectionMethod && x.detectionMethod.toLowerCase().includes(gameActivitySearch))
-    );
+    filtered = filtered.filter(matchesSearch);
   }
 
   // Keep only the most recent 80 entries, showing newest activity first for clean scannable review
-  const capped = filtered.slice(0, 80);
+  const capped = gameActivityFilter === 'active' || gameActivityFilter === 'open' ? filtered : filtered.slice(0, 80);
   const ordered = [...capped].sort((a, b) => {
     const ta = new Date(a.timestamp || 0).getTime() || 0;
     const tb = new Date(b.timestamp || 0).getTime() || 0;
@@ -287,10 +464,10 @@ function renderGamingSection() {
   ensureGameTerminalScrollListener(container);
 
   const prevMode = (data.policy && data.policy.preventionMode) || 'alert_only';
-  const ruleSig = blocks.map(b => `${b.id}:${b.ip}:${b.gameId}`).join(',');
+  const ruleSig = blocks.map(b => `${b.id}:${b.ip}:${b.gameId}:${b.controlStatus}:${b.expiresAt}`).join(',');
   const signature =
     `${gameActivityFilter}|${gameActivitySearch}|${onlineCount}|${prevMode}|${ruleSig}|` +
-    ordered.map(x => `${x.id}:${x.timestamp}:${x.isActive}:${x.isBlocked}`).join(',');
+    ordered.map(x => `${x.id}:${x.timestamp}:${x.isActive}:${x.isBlocked}:${x.isDismissed}`).join(',');
   if (signature === lastGameTerminalSignature) {
     return;
   }
@@ -302,12 +479,16 @@ function renderGamingSection() {
     const filterTitle =
       gameActivityFilter === 'blocked'
         ? 'No blocked or throttled devices'
+        : gameActivityFilter === 'open'
+        ? 'No games confirmed open'
         : gameActivityFilter === 'active'
-        ? 'No active game sessions right now'
-        : 'No recorded game detections';
+        ? 'No active detections right now'
+        : 'No recorded detections';
     const modeDesc =
-      prevMode === 'alert_only'
-        ? `Monitoring ${onlineCount} LAN device(s) in real time via DNS, TLS SNI & Wireshark DPI. Switch to All History to inspect past detections.`
+      gameActivityFilter === 'open'
+        ? 'This view requires a Windows process or an Android foreground report.'
+        : prevMode === 'alert_only'
+        ? 'Switch to All History to inspect earlier detections.'
         : 'Auto-prevention policy is currently active.';
     container.innerHTML = `
       <div class="game-empty-state">
@@ -321,31 +502,29 @@ function renderGamingSection() {
   container.innerHTML = ordered
     .map(item => {
       const activeRuleMatch = item._ruleRef || findRule(item);
-      const isBlocked = Boolean(item.isBlocked || activeRuleMatch);
+      const pendingRestore = activeRuleMatch?.controlStatus === 'restore_pending';
+      const isBlocked = !pendingRestore && Boolean(item.isBlocked || activeRuleMatch);
       const rowCls = isBlocked ? 'is-blocked' : item.isActive ? 'is-live' : '';
-      const pillCls = isBlocked ? 'critical' : item.isActive ? 'warning' : 'online';
-      const sevLabel = isBlocked ? 'Blocked' : item.isActive ? 'Playing' : 'Ended';
+      const hint = {lan_discovery: 'LAN discovery', port: 'Port hint', dns_cache: 'Cached DNS', capture_file: 'Imported capture'}[item.hintType]
+        || (item.portHint ? 'Port hint' : '');
+      const pillCls = isBlocked ? 'critical' : item.isActive || pendingRestore ? 'warning' : hint ? 'new' : 'online';
+      const sevLabel = pendingRestore ? 'Restore Pending' : isBlocked ? 'Restricted' : hint || (item.isActive ? gameSessionStatus(item) : item.isDismissed ? 'Dismissed' : 'Ended');
       const ts = formatGameTerminalTime(item.timestamp);
       const devType = item.deviceType ? ` · ${item.deviceType}` : '';
       const actionsHtml = activeRuleMatch
-        ? `<button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule('${esc(
+        ? `<button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule(${inlineString(
             activeRuleMatch.id
-          )}')">Unblock</button>`
-        : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameSession('${esc(
+          )})">Restore Access</button>`
+        : item.isActive ? `${isMonitorOnlyDetection(item.gameId) ? '' : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameSession(${inlineString(
             item.id
-          )}', '${esc(item.ip)}', '${esc(
+          )}, ${inlineString(item.ip)}, ${inlineString(
             item.gameId
-          )}', 'device_throttle', false)" title="Drop user's internet speed to an unplayable rate (Router QoS 1 KB/s + DNS lag + socket reset)">Throttle</button><button type="button" class="btn btn-secondary btn-xs game-btn-warn" onclick="shutOffGameSession('${esc(
+          )}, 'device_throttle')">Limit Bandwidth</button><button type="button" class="btn btn-secondary btn-xs game-btn-warn" onclick="shutOffGameSession(${inlineString(
             item.id
-          )}', '${esc(item.ip)}', '${esc(
+          )}, ${inlineString(item.ip)}, ${inlineString(
             item.gameId
-          )}', 'device_wifi_cut', true)" title="Cut Wi-Fi connectivity completely for this device">Cut Wi-Fi</button>${
-            item.isActive
-              ? `<button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameSession('${esc(
-                  item.id
-                )}')">Dismiss</button>`
-              : ''
-          }`;
+          )}, 'device_wifi_cut')">Block Device Access</button>`}
+          <button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameSession(${inlineString(item.id)})">Dismiss</button>` : '';
 
       return `
         <div class="game-activity-row ${rowCls}">
@@ -359,7 +538,8 @@ function renderGamingSection() {
           </div>
           <div class="game-col-device">
             <div class="game-device-main">${esc(item.deviceName)} <span class="mono" style="font-weight:500;">(${esc(item.ip)}${esc(devType)})</span></div>
-            <div class="game-device-sub">${esc(item.connectedTo || 'Main Gateway Router')} · Signal: <code>${esc(item.matchedIndicator || '—')}</code></div>
+            ${item.player ? `<div class="game-device-sub">Windows account ${esc(item.player)}</div>` : ''}
+            <div class="game-device-sub">${esc(item.connectedTo || 'Connection unknown')} · Signal: <code>${esc(item.matchedIndicator || '—')}</code></div>
           </div>
           <div class="game-row-actions">${actionsHtml}</div>
         </div>
@@ -373,6 +553,7 @@ function renderGamingSection() {
 function renderGameBlocksPanel(blocks) {
   const panel = document.getElementById('gameBlocksPanel');
   if (!panel) return;
+  if (deferDashboardControlRender(panel, () => renderGameBlocksPanel(blocks))) return;
   if (!Array.isArray(blocks) || !blocks.length) {
     panel.style.display = 'none';
     panel.innerHTML = '';
@@ -382,8 +563,7 @@ function renderGameBlocksPanel(blocks) {
   panel.innerHTML = `
     <div class="game-section-panel danger">
       <div class="game-panel-head">
-        <span class="game-panel-title">Active Restrictions (${blocks.length})</span>
-        <span class="game-panel-sub">Throttled or disconnected devices remain restricted until manually unblocked</span>
+        <span class="game-panel-title">Device Restrictions (${blocks.length})</span>
       </div>
       <div class="game-panel-rows">
         ${blocks
@@ -393,30 +573,20 @@ function renderGameBlocksPanel(blocks) {
             <div class="game-row-info">
               <div class="game-row-title">
                 <span>${esc(b.deviceName || b.ip)}</span>
-                <span class="status-pill critical">${b.scope === 'device_wifi_cut' ? 'Wi-Fi Cut Off' : b.scope === 'device_throttle' ? 'Throttled · Unplayable' : 'Blocked'}</span>
+                <span class="status-pill ${b.controlStatus && b.controlStatus !== 'active' ? 'warning' : 'critical'}">${
+                  b.controlStatus === 'restore_pending' ? 'Restore Pending'
+                  : b.controlStatus === 'applying' ? 'Awaiting Verification'
+                  : b.scope === 'device_throttle' ? 'Bandwidth Limited' : 'Access Blocked'
+                }</span>
               </div>
               <div class="game-row-sub">
-                IP: <span class="mono">${esc(b.ip)}</span>${b.mac ? ` · MAC: <span class="mono">${esc(b.mac)}</span>` : ''} · Rule: ${esc(b.gameName)}
+                IP: <span class="mono">${esc(b.ip)}</span>${b.mac ? ` · MAC: <span class="mono">${esc(b.mac)}</span>` : ''} · ${esc(b.gameName)}${b.expiresAt ? ` · Restore due ${esc(new Date(b.expiresAt).toLocaleString())}` : ''}
               </div>
             </div>
             <div class="game-row-actions">
-              ${
-                b.ip && b.ip !== '*' && b.scope !== 'device_throttle' && b.scope !== 'device_wifi_cut'
-                  ? `<button type="button" class="btn btn-secondary btn-xs game-btn-warn" onclick="shutOffGameSession('', '${esc(
-                      b.ip
-                    )}', '${esc(b.gameId || '*')}', 'device_throttle', false)">Throttle Speed</button>`
-                  : ''
-              }
-              ${
-                b.ip && b.ip !== '*' && b.scope !== 'device_wifi_cut'
-                  ? `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameSession('', '${esc(
-                      b.ip
-                    )}', '${esc(b.gameId || '*')}', 'device_wifi_cut', true)">Cut Wi-Fi</button>`
-                  : ''
-              }
-              <button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule('${esc(
+              <button type="button" class="btn btn-secondary btn-xs game-btn-restore" onclick="unblockGameRule(${inlineString(
                 b.id
-              )}')">Unblock</button>
+              )})">Restore Access</button>
             </div>
           </div>
         `
@@ -449,10 +619,12 @@ function renderGameSensorBanner(data, onlineCount) {
   const line = document.getElementById('gameSensorTelemetryLine');
   const setupBtn = document.getElementById('btnSetupRouterDns');
   const s = data.sensorStatus || {};
+  const canChangeDns = data.policy?.restrictionsEnabled === true && s.dnsForwardingEnabled === true && s.sensorOnline;
   const hostIp = s.dnsHost || (data.summary && data.summary.hostDnsServerIp) || '192.168.0.224';
-  const routerIp = s.routerIp || '192.168.0.1';
+  const dnsPort = s.dnsPort || 53;
   const qTotal = Number(s.dnsQueriesTotal || 0);
   const bTotal = Number(s.dnsBlockedTotal || 0);
+  const failed = Number(s.dnsForwardFailures || 0);
   const cCount = Number(s.dnsClientsCount || 0);
   const bypass = Array.isArray(s.bypassingExternalDns) ? s.bypassingExternalDns : [];
 
@@ -463,9 +635,20 @@ function renderGameSensorBanner(data, onlineCount) {
       badge.textContent = `Sensor Standby · ${onlineCount} Devices`;
     }
     if (line) {
-      line.innerHTML = `Host DNS sensor offline — run <code>host_game_sensor.py</code> for live UDP/TCP 53 capture on <code>${esc(hostIp)}</code>.`;
+      line.textContent = 'Host capture sensor offline. Managed Windows endpoint reports can still arrive.';
     }
-    if (setupBtn) setupBtn.style.display = 'inline-flex';
+    if (setupBtn) setupBtn.style.display = 'none';
+    return;
+  }
+
+  if (s.dnsForwardingEnabled !== true) {
+    if (bar) bar.classList.remove('warn');
+    if (badge) {
+      badge.className = 'status-pill online';
+      badge.textContent = 'Passive sensor online';
+    }
+    if (line) line.textContent = 'Game signals come from visible packet capture, router logs, and managed endpoints.';
+    if (setupBtn) setupBtn.style.display = 'none';
     return;
   }
 
@@ -479,21 +662,21 @@ function renderGameSensorBanner(data, onlineCount) {
       const lastDom = s.lastDnsDomain
         ? ` · Latest: <code>${esc(s.lastDnsClientIp || '')}</code> → <code>${esc(s.lastDnsDomain)}</code>`
         : '';
-      line.innerHTML = `Host <code>${esc(hostIp)}:53</code>${s.hotspotIp ? ` + <code>${esc(s.hotspotIp)}:53</code>` : ''} · Syslog <code>514</code> · ${qTotal.toLocaleString()} queries · ${bTotal} blocked${lastDom}`;
+      line.innerHTML = `DNS <code>${esc(hostIp)}:${dnsPort}</code> · ${qTotal.toLocaleString()} queries · ${bTotal} blocked · ${failed} upstream failures${lastDom}`;
     }
     if (setupBtn) setupBtn.style.display = 'none';
   } else {
     if (bar) bar.classList.add('warn');
     if (badge) {
       badge.className = 'status-pill warning';
-      badge.textContent = `Phone DNS Setup Needed · 0 Phones Routed`;
+      badge.textContent = 'No client DNS traffic';
     }
     if (line) {
-      line.innerHTML = bypass.length
-        ? `Router (<code>${esc(routerIp)}</code>) DHCP assigns <code>${esc(bypass.join(', '))}</code> so Wi-Fi phones bypass this PC. Set Router DHCP Primary DNS (or your Phone Wi-Fi DNS, with Android Private DNS Off) to <code>${esc(hostIp)}</code> for instant mobile game alerts.`
-        : `Set Router DHCP Primary DNS (or your Phone Wi-Fi DNS, with Android Private DNS Off) to <code>${esc(hostIp)}</code> for instant mobile game alerts.`;
+      const hostDns = bypass.length ? ` Windows lists <code>${esc(bypass.join(', '))}</code> as other DNS servers.` : '';
+      const dnsAddress = s.hotspotIp || hostIp;
+      line.innerHTML = `Vertex Sentry has received no client DNS. On a phone connected to this Wi-Fi, set DNS to <code>${esc(dnsAddress)}</code>, load a page, then open a supported game.${hostDns}`;
     }
-    if (setupBtn) setupBtn.style.display = 'inline-flex';
+    if (setupBtn) setupBtn.style.display = canChangeDns ? 'inline-flex' : 'none';
   }
 }
 
@@ -503,27 +686,36 @@ function renderGamingPolicyControls(policy) {
   const resetBtn = document.getElementById('btnForceManualMode');
   const hint = document.getElementById('gamePolicyHint');
   const isManual = mode === 'alert_only';
+  const restrictionsEnabled = policy?.restrictionsEnabled === true;
+  const deviceControlsEnabled = policy?.deviceControlsEnabled === true || restrictionsEnabled;
+  document.documentElement.classList.toggle('game-restrictions-enabled', deviceControlsEnabled);
   if (badge) {
     badge.className = `status-pill ${isManual ? 'online' : 'warning'}`;
-    badge.textContent = isManual ? 'Manual Block Only' : 'Auto-Block Active';
+    badge.textContent = mode !== 'alert_only' ? 'Auto-Block Active' : deviceControlsEnabled ? 'Manual Device Controls' : 'Monitoring Only';
   }
   if (resetBtn) {
     resetBtn.style.display = isManual ? 'none' : 'inline-flex';
   }
   if (!hint) return;
-  hint.innerHTML = isManual
+  hint.innerHTML = !restrictionsEnabled
+    ? 'Alerts monitor game activity. Manual controls require a current detection, confirmed MAC, and router verification.'
+    : isManual
     ? 'Manual enforcement mode — scans never auto-block users.'
     : '<strong style="color:var(--accent-amber);">Auto-block is active via policy config.</strong> Click Revert to Manual to restore prompt-only enforcement.';
 }
 
 function showGameDetectedToast(detection) {
-  if (!detection || !detection.gameName) return;
+  if (!detection?.gameName || detection.hintType || detection.portHint || detection.isDismissed
+      || (detection.isActive === false && !detection.autoPrevented)) return;
+  void notifyGameOnDesktop(detection);
   if (detection.id) {
     seenActiveSessionIds.add(detection.id);
     if (displayedToastSessionIds.has(detection.id)) return;
     displayedToastSessionIds.add(detection.id);
   }
   const isAuto = Boolean(detection.autoPrevented);
+  const launcher = GAME_LAUNCHER_IDS.has(detection.gameId);
+  const website = isWebsiteDetection(detection.gameId);
   const container = document.getElementById('gameToastContainer');
   const toastId = `game-toast-${detection.id || Date.now()}`;
   if (container) {
@@ -534,23 +726,26 @@ function showGameDetectedToast(detection) {
     card.className = 'game-toast-card';
     card.innerHTML = `
       <div class="game-toast-head">
-        <span class="game-toast-badge">${isAuto ? 'Auto-Prevented' : 'Game Detected'}</span>
-        <button type="button" class="game-toast-close" onclick="dismissGameToast('${esc(toastId)}')" aria-label="Close">✕</button>
+        <span class="game-toast-badge">${launcher ? 'Client running' : website ? 'Website activity' : isAuto ? 'Auto-Prevented' : isGameOpen(detection) ? 'App open' : 'Network activity'}</span>
+        <button type="button" class="game-toast-close" onclick="dismissGameToast(${inlineString(toastId)})" aria-label="Close">✕</button>
       </div>
       <div class="game-toast-title">${esc(detection.gameName)}</div>
       <div class="game-toast-meta">
         <div><strong>Device:</strong> ${esc(detection.deviceName)} <span class="mono">(${esc(detection.ip)})</span></div>
+        ${detection.player ? `<div><strong>Windows account</strong> ${esc(detection.player)}</div>` : ''}
         <div><strong>Via:</strong> ${esc(detection.connectedTo)}</div>
         <div class="dev-row-sub">${esc(detection.matchedIndicator || '')} · ${esc(detection.detectionMethod || '')}</div>
       </div>
       <div class="game-toast-actions">
         ${
-          isAuto
+          isAuto || isMonitorOnlyDetection(detection.gameId)
             ? ''
-            : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameFromToast('${esc(toastId)}', '${esc(detection.id || '')}', '${esc(detection.ip || '')}', '${esc(detection.gameId || '')}')">Throttle Speed</button>`
+            : `<button type="button" class="btn btn-secondary btn-xs game-btn-danger" onclick="shutOffGameFromToast(${inlineString(toastId)}, ${inlineString(detection.id || '')}, ${inlineString(detection.ip || '')}, ${inlineString(detection.gameId || '')})">Limit Bandwidth</button>`
         }
-        <button type="button" class="btn btn-primary btn-xs" onclick="jumpToGamingWorkspace('${esc(toastId)}')">Inspect</button>
-        <button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameToast('${esc(toastId)}')">Dismiss</button>
+        <button type="button" class="btn btn-primary btn-xs" onclick="jumpToGamingWorkspace(${inlineString(toastId)})">Inspect</button>
+        ${!isAuto && detection.id
+          ? `<button type="button" class="btn btn-secondary btn-xs" onclick="dismissGameSession(${inlineString(detection.id)})">Dismiss session</button>`
+          : ''}
       </div>
     `;
     container.prepend(card);
@@ -561,19 +756,6 @@ function showGameDetectedToast(detection) {
     gameToastTimers.set(toastId, timer);
   }
 
-  const notifKey = `${detection.id || detection.gameId}:${detection.timestamp || ''}`;
-  if (
-    !shownGameNotificationIds.has(notifKey) &&
-    typeof Notification !== 'undefined' &&
-    Notification.permission === 'granted'
-  ) {
-    shownGameNotificationIds.add(notifKey);
-    try {
-      new Notification(`${detection.gameIcon || '🎮'} ${detection.gameName} opened`, {
-        body: `Device: ${detection.deviceName} (${detection.ip})\nConnected To: ${detection.connectedTo}`
-      });
-    } catch (_) {}
-  }
 }
 
 async function runLanGameScan() {
@@ -585,42 +767,34 @@ async function runLanGameScan() {
   }
   if (banner) {
     banner.style.display = 'block';
-    banner.innerHTML = `<div class="game-scan-banner"><div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;"><span class="status-pill warning">Scanning Topology</span><span style="font-size:0.78rem; color:var(--text-muted);">Polling routers, APs, ARP neighbors, DNS cache &amp; game ports across subnets...</span></div></div>`;
+    banner.innerHTML = `<div class="game-scan-banner"><div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;"><span class="status-pill warning">Scanning Network</span><span class="game-deck-meta">Refreshing LAN discovery and checking game-related ports on known clients.</span></div></div>`;
   }
   try {
     const res = await apiJson('/api/gaming/scan', {
       method: 'POST',
       body: JSON.stringify({})
     });
-    if (res.gameActivity) appState.gameActivity = res.gameActivity;
+    applyGameActivitySnapshot(res.gameActivity);
     const dets = Array.isArray(res.detections) ? res.detections : [];
     if (dets.length) {
-      showGameDetectedToast(dets[0]);
       if (dets.some(d => d.isBlocked) && gameActivityFilter === 'active') {
         setGameActivityFilter('blocked');
       }
     }
     if (banner) {
-      const nodesCnt = Number(res.topologyNodesScanned || 0);
-      const hubsCnt = Number(res.topologyHubsScanned || 0);
+      const routersPolled = Number(res.routersPolled || 0);
       const devCnt = Number(res.scannedDevices || 0);
       const foundCnt = Number(res.confirmedHits ?? res.detectedCount ?? 0);
+      const portHints = Number(res.openPortHits || 0);
       const activeCnt = Number(res.activeCount || 0);
       const blockedCnt = Number(res.blockedCount || 0);
-      const act = res.gameActivity || getGameActivityData();
-      const bypass = (act.sensorStatus && act.sensorStatus.bypassingExternalDns) || [];
-      const noteHtml =
-        foundCnt > 0 || activeCnt > 0 || blockedCnt > 0
-          ? `Scanned ${hubsCnt} router/AP hub(s)${nodesCnt ? ` (${nodesCnt} map nodes)` : ''} &amp; ${devCnt} device(s) — <strong>${foundCnt}</strong> live hit(s) (${activeCnt} active, ${blockedCnt} blocked).`
-          : bypass.length && !(act.sensorStatus && act.sensorStatus.dnsInterceptReady)
-          ? `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} device(s). 0 open game ports/processes. External DHCP DNS detected (<code>${esc(bypass.join(', '))}</code>) — configure Wi-Fi DNS interception to capture phone lookups.`
-          : `Scanned ${hubsCnt} router/AP hub(s) &amp; ${devCnt} device(s) across the topology — no active games detected.`;
+      const noteHtml = `Checked game-related ports on ${devCnt} candidate device(s). Attempted client-list reads on ${routersPolled} configured router(s). ${activeCnt} active game detection(s), ${blockedCnt} blocked.`;
       banner.style.display = 'block';
       banner.innerHTML = `
         <div class="game-scan-banner">
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
             <span class="status-pill ${foundCnt > 0 || activeCnt > 0 ? 'warning' : 'online'}">${foundCnt > 0 ? `Found ${foundCnt} Match(es)` : 'Scan Complete'}</span>
-            <span style="font-size:0.78rem; color:var(--text-muted);">${noteHtml}</span>
+            <span style="font-size:0.78rem; color:var(--text-muted);">${noteHtml}${portHints ? ` Open-port hints: ${portHints}.` : ''}</span>
           </div>
           <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">Dismiss</button>
         </div>
@@ -646,6 +820,7 @@ async function dismissGameSession(id) {
       body: JSON.stringify({ id })
     });
     if (res.gameActivity) appState.gameActivity = res.gameActivity;
+    dismissGameToast(`game-toast-${id}`);
     renderGamingSection();
     await loadInitialState();
   } catch (err) {
@@ -668,54 +843,62 @@ async function clearGameActivity() {
   }
 }
 
-async function shutOffGameSession(
-  sessionId,
-  ip,
-  gameId,
-  scope = 'device_throttle',
-  cutWifi = false
-) {
-  const banner = document.getElementById('gameScanResultBanner');
+let pendingGameDeviceControl = null;
+
+function shutOffGameSession(sessionId, ip, gameId, scope = 'device_throttle', toastId = '') {
+  if (!sessionId || isMonitorOnlyDetection(gameId)) return;
+  const bandwidth = scope === 'device_throttle';
+  const rates = document.getElementById('gameControlRates');
+  pendingGameDeviceControl = {sessionId, ip, gameId, scope, toastId};
+  document.getElementById('gameControlTitle').textContent = bandwidth ? 'Limit Device Bandwidth' : 'Block Device Access';
+  const device = (getGameActivityData().logs || []).find(item => item.id === sessionId);
+  document.getElementById('gameControlDevice').textContent = [
+    device?.deviceName, ip, device?.mac
+  ].filter(Boolean).join(' ? ');
+  document.getElementById('gameControlError').textContent = '';
+  rates.hidden = !bandwidth;
+  for (const input of rates.querySelectorAll('input')) input.disabled = !bandwidth;
+  document.getElementById('gameControlSubmit').textContent = bandwidth ? 'Apply Limit' : 'Block Device Access';
+  openModal('gameControlModal');
+}
+
+async function submitGameDeviceControl(event) {
+  event.preventDefault();
+  const control = pendingGameDeviceControl;
+  if (!control) return;
+  const submit = document.getElementById('gameControlSubmit');
+  if (submit.disabled) return;
+  const feedback = document.getElementById('gameControlError');
+  const {sessionId, ip, gameId, scope, toastId} = control;
+  const body = {
+    sessionId, ip, gameId, scope, routerOnly: true,
+    durationMinutes: document.getElementById('gameControlDuration').value
+  };
+  if (scope === 'device_throttle') {
+    body.downloadKbps = document.getElementById('gameControlDownload').value;
+    body.uploadKbps = document.getElementById('gameControlUpload').value;
+  }
+  submit.disabled = true;
+  feedback.textContent = 'Checking the router?';
   try {
-    const res = await apiJson('/api/gaming/block', {
-      method: 'POST',
-      body: JSON.stringify({
-        sessionId: sessionId || '',
-        ip: ip || '',
-        gameId: gameId || '',
-        scope: scope || 'device_throttle',
-        cutWifi: Boolean(cutWifi)
-      })
-    });
-    if (res.gameActivity) appState.gameActivity = res.gameActivity;
-    const det = res.enforcementDetails || null;
-    if (banner && det) {
-      const hasSetupGap = Boolean(det.requiresSetup && det.setupHint);
-      const layerText = Array.isArray(det.layers) && det.layers.length
-        ? det.layers.join(' + ')
-        : 'Rule Saved';
-      banner.style.display = 'block';
-      banner.innerHTML = `
-        <div class="game-scan-banner">
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
-            <span class="status-pill ${hasSetupGap ? 'warning' : 'online'}">${hasSetupGap ? 'Router Setup Needed' : (scope === 'device_throttle' ? 'Connection Throttled' : 'Restriction Applied')}</span>
-            <span style="font-size:0.78rem; color:var(--text-muted);">${hasSetupGap ? esc(det.setupHint) : `Active layers for ${esc(ip || 'device')}: <strong>${esc(layerText)}</strong>.`}</span>
-          </div>
-          ${hasSetupGap && typeof openModal === 'function' ? `<button type="button" class="btn btn-primary btn-xs" onclick="openModal('routerConfigModal')">Router Settings</button>` : ''}
-          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">Dismiss</button>
-        </div>
-      `;
-    }
+    const result = await apiJson('/api/gaming/block', {method: 'POST', body: JSON.stringify(body)});
+    applyGameActivitySnapshot(result.gameActivity);
     renderGamingSection();
-    await loadInitialState();
+    if (!result.success) {
+      feedback.textContent = result.enforcementDetails?.setupHint || 'The router did not verify the restriction.';
+      return;
+    }
+    if (toastId) dismissGameToast(toastId);
+    if (pendingGameDeviceControl === control) closeModal('gameControlModal');
   } catch (err) {
-    alert(err.message);
+    feedback.textContent = err.message;
+  } finally {
+    submit.disabled = false;
   }
 }
 
-async function shutOffGameFromToast(toastId, sessionId, ip, gameId) {
-  dismissGameToast(toastId);
-  await shutOffGameSession(sessionId, ip, gameId, 'device_throttle', false);
+function shutOffGameFromToast(toastId, sessionId, ip, gameId) {
+  shutOffGameSession(sessionId, ip, gameId, 'device_throttle', toastId);
 }
 
 async function unblockGameRule(ruleId) {
@@ -773,57 +956,64 @@ async function configureRouterGameDns() {
   }
 }
 
+let captureConfigPending = false;
+
 function renderWiresharkStatusBar(ws) {
   const bar = document.getElementById('gameWiresharkBar');
   const badge = document.getElementById('gameWiresharkBadge');
   const sum = document.getElementById('gameWiresharkSummary');
   const strip = document.getElementById('gameWiresharkHitsStrip');
   const toggleBtn = document.getElementById('btnToggleWireshark');
-  if (!bar && !badge && !sum) return;
+  const download = document.getElementById('btnDownloadWiresharkPcap');
+  const s = ws || {};
+  const known = typeof s.enabled === 'boolean';
+  const changing = s.sensorOnline && typeof s.sensorCaptureEnabled === 'boolean' && s.enabled !== s.sensorCaptureEnabled;
+  const localActive = s.activeInterfaceCount == null ? s.active && !s.tzspActive : s.activeInterfaceCount > 0;
+  const sources = [];
+  if (localActive) sources.push(({tshark: 'TShark', 'npcap-wpcap': 'Npcap'})[s.engine] || 'Local adapters');
+  if (s.tzspActive) sources.push('Router mirror listener');
 
-  const s = ws && typeof ws === 'object' ? ws : {};
-  const enabled = s.enabled !== false;
-  const active = Boolean(s.active && enabled);
-  const tsharkOn = Boolean(s.tsharkInstalled);
-  const npcapOn = Boolean(s.npcapAvailable);
-  const pkts = Number(s.packetsCaptured || 0);
-  const matched = Number(s.packetsMatched || 0);
-  const tlsCnt = Number(s.tlsSniMatches || 0);
-  const dnsCnt = Number(s.dnsMatches || 0);
-  const flowCnt = Number(s.portMatches || 0);
-  const pcapKB = ((Number(s.pcapBytes || 0)) / 1024).toFixed(1);
-  const ifaceCount = Array.isArray(s.selectedInterfaces) ? s.selectedInterfaces.length : 0;
-
-  if (badge) {
-    if (!enabled) {
-      badge.className = 'status-pill';
-      badge.textContent = 'Wireshark · Paused';
-    } else if (active) {
-      badge.className = 'status-pill online';
-      badge.textContent = `Wireshark · ${tsharkOn ? 'TShark Live' : 'Npcap Live'} (${pkts.toLocaleString()} pkts)`;
-    } else if (npcapOn || tsharkOn) {
-      badge.className = 'status-pill warning';
-      badge.textContent = 'Wireshark · Standby';
+  let label = 'Checking capture status…';
+  let style = '';
+  const details = [];
+  if (known) {
+    if (changing) label = s.enabled ? 'Resuming…' : 'Pausing…';
+    else if (!s.enabled) label = 'Paused';
+    else if (!s.sensorOnline) {
+      label = 'Sensor offline';
+      style = 'warning';
+      details.push('Start the host sensor to capture live traffic.');
+    } else if (localActive) {
+      label = 'Capturing';
+      style = 'online';
+    } else if (s.tzspActive) {
+      label = 'Router mirror ready';
+      style = 'online';
     } else {
-      badge.className = 'status-pill';
-      badge.textContent = 'Wireshark · Offline .pcap Mode';
+      label = 'Capture unavailable';
+      style = 'warning';
+      details.push('Check the capture adapter and host sensor configuration.');
     }
+    if (s.enabled && sources.length) details.push(sources.join(' + '));
+    if (s.sensorOnline || s.packetsCaptured) {
+      details.push(`${Number(s.packetsCaptured || 0).toLocaleString()} packets seen`);
+      details.push(`${Number(s.packetsMatched || 0).toLocaleString()} game matches`);
+    }
+    details.push(s.pcapAvailable ? 'Export contains saved game traffic' : 'No saved packets to download');
   }
-  if (bar) {
-    bar.classList.toggle('warn', Boolean(enabled && !active && (npcapOn || tsharkOn)));
+  if (badge.textContent !== label) badge.textContent = label;
+  badge.className = `status-pill ${style}`.trim();
+  bar.classList.toggle('warn', style === 'warning');
+  toggleBtn.disabled = !known || captureConfigPending || changing;
+  toggleBtn.textContent = s.enabled === false ? 'Resume capture' : 'Pause capture';
+  if (s.pcapAvailable) {
+    download.href = s.pcapUrl;
+    download.removeAttribute('aria-disabled');
+  } else {
+    download.removeAttribute('href');
+    download.setAttribute('aria-disabled', 'true');
   }
-  if (toggleBtn) {
-    toggleBtn.textContent = enabled ? 'Pause' : 'Resume';
-  }
-  if (sum) {
-    const engineLabel = tsharkOn ? 'TShark' : npcapOn ? 'Npcap (wpcap)' : 'Offline Parser';
-    const tzspText = s.tzspActive ? ` · TZSP :${s.tzspPort || 37008}` : '';
-    const nicText = ifaceCount > 0 ? ` · ${ifaceCount} NIC(s)` : '';
-    sum.innerHTML =
-      `${esc(engineLabel)}${esc(nicText)}${esc(tzspText)} · ` +
-      `Matched: <strong>${matched}</strong> (SNI ${tlsCnt} · DNS ${dnsCnt} · Flows ${flowCnt}) · ` +
-      `<code>${esc(pcapKB)} KB</code>`;
-  }
+  sum.textContent = details.join(' · ');
   if (strip) {
     const hits = Array.isArray(s.recentHits) ? s.recentHits.slice(0, 2) : [];
     const lastA = s.lastAnalyze;
@@ -836,7 +1026,7 @@ function renderWiresharkStatusBar(ws) {
               h =>
                 `<span class="mono">[${esc(h.protocol || 'DPI')}]</span> ${esc(h.ip)} → <code>${esc(
                   h.matchedIndicator || h.gameName
-                )}</code>`
+                )}</code>${h.frameSourceMac ? ` · Frame source MAC: <code>${esc(h.frameSourceMac)}</code>` : ''}`
             )
             .join(' · ')
       );
@@ -859,6 +1049,12 @@ function renderWiresharkStatusBar(ws) {
 }
 
 async function toggleWiresharkCapture() {
+  const button = document.getElementById('btnToggleWireshark');
+  if (button.disabled) return;
+  captureConfigPending = true;
+  button.disabled = true;
+  const feedback = document.getElementById('gameWiresharkFeedback');
+  feedback.textContent = '';
   const ws = (getGameActivityData() && getGameActivityData().wiresharkStatus) || {};
   const nextEnabled = ws.enabled === false;
   try {
@@ -867,27 +1063,25 @@ async function toggleWiresharkCapture() {
       body: JSON.stringify({ enabled: nextEnabled })
     });
     if (res && res.wiresharkStatus && appState.gameActivity) {
+      gameActivityRevision += 1;
       appState.gameActivity.wiresharkStatus = res.wiresharkStatus;
+      renderGamingSection();
     }
-    await refreshGameActivityAuto();
+    await refreshGameActivityAuto(true);
   } catch (err) {
-    alert(err.message);
+    feedback.textContent = err.message;
+  } finally {
+    captureConfigPending = false;
+    renderWiresharkStatusBar(getGameActivityData().wiresharkStatus);
   }
 }
 
 async function copyWiresharkDisplayFilter() {
   const ws = (getGameActivityData() && getGameActivityData().wiresharkStatus) || {};
   const filter = String(ws.displayFilter || 'dns or tls.handshake.type == 1');
-  const btn = document.getElementById('btnCopyWiresharkFilter');
   try {
     await navigator.clipboard.writeText(filter);
-    if (btn) {
-      const prev = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => {
-        btn.textContent = prev;
-      }, 2000);
-    }
+    document.getElementById('gameWiresharkFeedback').textContent = 'Wireshark filter copied.';
   } catch (_) {
     window.prompt('Copy Wireshark Display Filter:', filter);
   }
@@ -901,16 +1095,16 @@ function triggerWiresharkPcapImport() {
 async function handleWiresharkPcapUpload(input) {
   const file = input && input.files && input.files[0];
   if (!file) return;
-  const banner = document.getElementById('gameScanResultBanner');
+  const button = document.getElementById('btnImportWiresharkPcap');
+  const feedback = document.getElementById('gameWiresharkFeedback');
+  if (button.disabled) return;
+  button.disabled = true;
   try {
     if (file.size > 11 * 1024 * 1024) {
-      alert('Please upload a .pcap or .pcapng capture smaller than 11 MB.');
+      feedback.textContent = 'Choose a capture file of 11 MB or less.';
       return;
     }
-    if (banner) {
-      banner.style.display = 'block';
-      banner.innerHTML = `<div class="game-scan-banner"><div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;"><span class="status-pill warning">Analyzing Capture</span><span style="font-size:0.78rem; color:var(--text-muted);">Dissecting DNS, TLS SNI, HTTP &amp; UDP/TCP game packets from <code>${esc(file.name)}</code>...</span></div></div>`;
-    }
+    feedback.textContent = `Analyzing ${file.name}…`;
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
     let bin = '';
@@ -921,34 +1115,30 @@ async function handleWiresharkPcapUpload(input) {
     const dataBase64 = btoa(bin);
     const res = await apiJson('/api/gaming/wireshark/analyze', {
       method: 'POST',
-      body: JSON.stringify({ filename: file.name, dataBase64, ingest: true })
+      body: JSON.stringify({ filename: file.name, dataBase64 })
     });
-    if (res.gameActivity) appState.gameActivity = res.gameActivity;
-    if (banner) {
-      banner.style.display = 'block';
-      banner.innerHTML = `
-        <div class="game-scan-banner">
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex:1;">
-            <span class="status-pill ${res.uniqueMatches > 0 ? 'warning' : 'online'}">${esc(file.name)}</span>
-            <span style="font-size:0.78rem; color:var(--text-muted);">Parsed <strong>${Number(res.packetsParsed || 0)}</strong> packets — found <strong>${Number(res.uniqueMatches || 0)}</strong> match(es) (${Number(res.detectionsLogged || 0)} active session(s)).</span>
-          </div>
-          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('gameScanResultBanner').style.display='none'">Dismiss</button>
-        </div>
-      `;
-    }
+    applyGameActivitySnapshot(res.gameActivity);
+    feedback.textContent = `${file.name}: ${res.packetsParsed} packets analyzed, ${res.uniqueMatches} historical game matches.`;
     renderGamingSection();
     await loadInitialState();
   } catch (err) {
-    if (banner) banner.style.display = 'none';
-    alert(err.message);
+    feedback.textContent = err.message;
   } finally {
+    button.disabled = false;
     input.value = '';
   }
 }
 
 function notifyUnseenActiveGames(activity) {
-  if (!activity || !Array.isArray(activity.logs) || !gameBaselineSeeded) return;
-  const activeLogs = activity.logs.filter(x => x && x.isActive && !x.isBlocked);
+  if (!activity || !Array.isArray(activity.logs)) return;
+  const activeLogs = activity.logs.filter(x => x && x.isActive && !x.isBlocked && !x.hintType && !x.portHint);
+  if (!gameBaselineSeeded) {
+    for (const item of activeLogs) {
+      if (item.id) seenActiveSessionIds.add(item.id);
+    }
+    gameBaselineSeeded = true;
+    return;
+  }
   for (const item of activeLogs) {
     if (item.id && !seenActiveSessionIds.has(item.id)) {
       seenActiveSessionIds.add(item.id);
@@ -957,21 +1147,55 @@ function notifyUnseenActiveGames(activity) {
   }
 }
 
-let gamePollCounter = 0;
+function applyGameActivitySnapshot(activity) {
+  if (!activity || !Array.isArray(activity.logs)) return;
+  gameActivityRevision += 1;
+  appState.gameActivity = activity;
+  notifyUnseenActiveGames(activity);
+}
 
-async function refreshGameActivityAuto() {
-  if (gameAutoPollInFlight || document.hidden) return;
-  gamePollCounter += 1;
+function applyLiveGameDetection(detection, updated = false) {
+  if (!detection?.id || detection.hintType || detection.portHint) return;
+  gameActivityRevision += 1;
+  const activity = getGameActivityData();
+  const logs = activity.logs || [];
+  const previous = logs.find(item => item.id === detection.id);
+  if (previous && Date.parse(previous.timestamp) > Date.parse(detection.timestamp)) return;
+  appState.gameActivity = {
+    ...activity,
+    logs: [detection, ...logs.filter(item => item.id !== detection.id)],
+    summary: {
+      ...activity.summary,
+      totalCount: (activity.summary?.totalCount ?? logs.filter(item => !item.hintType && !item.portHint).length)
+        + (!previous || previous.hintType || previous.portHint ? 1 : 0)
+    }
+  };
+  if (!updated && !seenActiveSessionIds.has(detection.id)) showGameDetectedToast(detection);
+}
+
+function applyEndedGameSessions(sessionIds) {
+  if (!Array.isArray(sessionIds) || !sessionIds.length) return;
+  const activity = getGameActivityData();
+  const ended = new Set(sessionIds);
+  gameActivityRevision += 1;
+  appState.gameActivity = {
+    ...activity,
+    logs: (activity.logs || []).map(item => ended.has(item.id) ? {...item, isActive: false} : item)
+  };
+}
+
+async function refreshGameActivityAuto(force = false) {
+  if (gameAutoPollInFlight) return;
   const gSection = document.getElementById('gamingSection');
   const isViewingGaming = Boolean(gSection && gSection.style.display !== 'none');
-  if (!isViewingGaming && gamePollCounter % 2 !== 0) return;
+  if (!force && gameEventStreamConnected && (document.hidden || !isViewingGaming)) return;
 
   gameAutoPollInFlight = true;
+  const revision = gameActivityRevision;
   try {
     const activity = await apiJson('/api/gaming/activity');
-    if (activity && typeof activity === 'object') {
-      appState.gameActivity = activity;
-      notifyUnseenActiveGames(activity);
+    if (revision === gameActivityRevision) {
+      applyGameActivitySnapshot(activity);
       renderGamingSection();
     }
   } catch (_) {
@@ -980,4 +1204,4 @@ async function refreshGameActivityAuto() {
   }
 }
 
-setInterval(refreshGameActivityAuto, 8000);
+setInterval(refreshGameActivityAuto, 3000);

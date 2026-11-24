@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import ipaddress
 import json
 import os
@@ -10,7 +9,6 @@ import re
 import selectors
 import socket
 import ssl
-import struct
 import subprocess
 import sys
 import threading
@@ -19,13 +17,81 @@ import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 if os.name == "nt":
+    import ctypes
     import winreg
+    from ctypes import wintypes
 
-from .config import utc_now, validate_ip
+    class _ProcessEntry(ctypes.Structure):
+        # PROCESSENTRY32W from tlhelp32.h.
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
 
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    for _process_iterator in (_kernel32.Process32FirstW, _kernel32.Process32NextW):
+        _process_iterator.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ProcessEntry))
+        _process_iterator.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.ProcessIdToSessionId.argtypes = (wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+    _kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+
+from typing import TYPE_CHECKING, cast
+
+from .config import normalize_mac, observed_inventory_mac, utc_now, validate_ip
+from .router_game_control import RouterGameControl
+
+if TYPE_CHECKING:
+    from .engine import Monitor
+
+STEAM_CLIENT_ID = "steam_client"
+RIOT_CLIENT_ID = "riot_client"
+LAUNCHER_IDS = frozenset({STEAM_CLIENT_ID, RIOT_CLIENT_ID})
+RIOT_WEBSITE_ID = "riot_website"
+MLBB_WEBSITE_ID = "mlbb_website"
+_WEBSITE_SIGNATURES = [
+    {
+        "id": website_id,
+        "name": f"{name} website",
+        "category": "Website",
+        "icon": "🌐",
+        "isMobile": is_mobile,
+        "domains": domains,
+        "exactDomainsOnly": True,
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    }
+    for website_id, name, is_mobile, domains in (
+        (RIOT_WEBSITE_ID, "Riot Games", False, ("riotgames.com", "www.riotgames.com")),
+        (MLBB_WEBSITE_ID, "Mobile Legends", True, ("mobilelegends.com", "www.mobilelegends.com", "m.mobilelegends.com", "play.mobilelegends.com")),
+        ("wildrift_website", "Wild Rift", True, ("wildrift.leagueoflegends.com",)),
+        ("supercell_website", "Supercell", False, ("supercell.com", "www.supercell.com")),
+        ("clashofclans_website", "Clash of Clans", True, ("clashofclans.com", "www.clashofclans.com")),
+        ("clashroyale_website", "Clash Royale", True, ("clashroyale.com", "www.clashroyale.com")),
+        ("brawlstars_website", "Brawl Stars", True, ("brawlstars.com", "www.brawlstars.com")),
+        ("hayday_website", "Hay Day", True, ("hayday.com", "www.hayday.com")),
+        ("boombeach_website", "Boom Beach", True, ("boombeach.com", "www.boombeach.com", "boombeach.supercell.com")),
+        ("moco_website", "mo.co", True, ("mo.co", "www.mo.co")),
+        ("squadbusters_website", "Squad Busters", True, ("squadbusters.com", "www.squadbusters.com", "squadbusters.supercell.com")),
+    )
+]
+WEBSITE_IDS = frozenset(signature["id"] for signature in _WEBSITE_SIGNATURES)
+MONITOR_ONLY_IDS = LAUNCHER_IDS | WEBSITE_IDS
 GAME_SIGNATURES: list[dict] = [
     {
         "id": "mlbb",
@@ -55,7 +121,6 @@ GAME_SIGNATURES: list[dict] = [
             "joygame.com",
         ),
         "domainKeywords": (
-            "mobilelegends",
             "youngjoygame",
             "moonton",
             "yuanzhanapp",
@@ -137,18 +202,32 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile MOBA · 5v5",
         "icon": "⚡",
         "isMobile": True,
-        "domains": (
-            "wildrift.leagueoflegends.com",
-            "teamfighttactics.leagueoflegends.com",
-            "auth.riotgames.com",
-            "riotcdn.net",
-            "leagueoflegends.com",
-            "rgpub.io",
-            "riotgames.net",
-        ),
-        "domainKeywords": ("wildrift", "riotcdn", "leagueoflegends", "rgpub.io", "riotgames.net"),
+        "domains": ("wildrift.leagueoflegends.com",),
+        "domainKeywords": (),
         "ports": (),
-        "processes": ("League of Legends.exe", "LeagueClientUx.exe"),
+        "processes": (),
+    },
+    {
+        "id": "lol",
+        "name": "League of Legends",
+        "category": "PC MOBA · 5v5",
+        "icon": "⚔️",
+        "isMobile": False,
+        "domains": (),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": ("League of Legends.exe",),
+    },
+    {
+        "id": "runeterra",
+        "name": "Legends of Runeterra",
+        "category": "PC / Mobile Card Game",
+        "icon": "🃏",
+        "isMobile": True,
+        "domains": ("playruneterra.com",),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": ("LoR.exe",),
     },
     {
         "id": "hoyoverse",
@@ -188,7 +267,7 @@ GAME_SIGNATURES: list[dict] = [
         ),
         "domainKeywords": ("freefire", "ggblueshark", "ff.garena"),
         "ports": (39698, 39800),
-        "processes": ("HD-Player.exe", "Bluestacks.exe", "MuMuPlayer.exe", "dnplayer.exe"),
+        "processes": (),
     },
     {
         "id": "clashofclans",
@@ -196,9 +275,9 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Strategy",
         "icon": "🛡️",
         "isMobile": True,
-        "domains": ("game.clashofclans.com", "clashofclans.com", "supercell.com", "supercell.net", "supercellid.com"),
-        "domainKeywords": ("clashofclans", "supercellid", "supercell."),
-        "ports": (9339,),
+        "domains": ("clashofclans.com",),
+        "domainKeywords": (),
+        "ports": (),
         "processes": (),
     },
     {
@@ -208,8 +287,8 @@ GAME_SIGNATURES: list[dict] = [
         "icon": "🏰",
         "isMobile": True,
         "domains": ("game.clashroyaleapp.com", "clashroyaleapp.com", "clashroyale.com"),
-        "domainKeywords": ("clashroyale",),
-        "ports": (9339,),
+        "domainKeywords": (),
+        "ports": (),
         "processes": (),
     },
     {
@@ -218,9 +297,53 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Arena Brawler",
         "icon": "⭐",
         "isMobile": True,
-        "domains": ("game.brawlstarsgame.com", "brawlstarsgame.com", "brawlstars.com", "squadbusters.com"),
-        "domainKeywords": ("brawlstars", "squadbusters"),
-        "ports": (9339,),
+        "domains": ("brawlstarsgame.com", "brawlstars.com"),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "hayday",
+        "name": "Hay Day",
+        "category": "Mobile Farming",
+        "icon": "🌾",
+        "isMobile": True,
+        "domains": ("hayday.com", "haydaygame.com"),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "boombeach",
+        "name": "Boom Beach",
+        "category": "Mobile / PC Strategy",
+        "icon": "🏝️",
+        "isMobile": True,
+        "domains": ("boombeach.com",),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "moco",
+        "name": "mo.co",
+        "category": "Mobile Action",
+        "icon": "👾",
+        "isMobile": True,
+        "domains": ("mo.co",),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "squadbusters",
+        "name": "Squad Busters",
+        "category": "Mobile Party Action",
+        "icon": "💎",
+        "isMobile": True,
+        "domains": ("squadbusters.com",),
+        "domainKeywords": (),
+        "ports": (),
         "processes": (),
     },
     {
@@ -267,7 +390,7 @@ GAME_SIGNATURES: list[dict] = [
         ),
         "domainKeywords": ("roblox", "rbxcdn", "rbxinfra"),
         "ports": (53640,),
-        "processes": ("RobloxPlayerBeta.exe", "RobloxPlayerLauncher.exe"),
+        "processes": ("RobloxPlayerBeta.exe",),
     },
     {
         "id": "valorant",
@@ -275,8 +398,8 @@ GAME_SIGNATURES: list[dict] = [
         "category": "PC Tactical FPS",
         "icon": "🎯",
         "isMobile": False,
-        "domains": ("playvalorant.com", "valorant.com", "pvp.net", "riotgames.com"),
-        "domainKeywords": ("playvalorant",),
+        "domains": ("playvalorant.com", "valorant.com"),
+        "domainKeywords": (),
         "ports": (8393, 8394),
         "processes": ("VALORANT.exe", "VALORANT-Win64-Shipping.exe"),
     },
@@ -292,7 +415,6 @@ GAME_SIGNATURES: list[dict] = [
         "processes": (
             "Minecraft.Windows.exe",
             "Minecraft.exe",
-            "MinecraftLauncher.exe",
             "Lunar Client.exe",
             "Badlion Client.exe",
         ),
@@ -306,11 +428,11 @@ GAME_SIGNATURES: list[dict] = [
         "domains": ("fortnite.com", "ol.epicgames.com", "epicgames.dev"),
         "domainKeywords": ("fortnite",),
         "ports": (5795, 5800),
-        "processes": ("FortniteClient-Win64-Shipping.exe", "FortniteLauncher.exe"),
+        "processes": ("FortniteClient-Win64-Shipping.exe",),
     },
     {
         "id": "steam",
-        "name": "Steam Gaming Client / Dota 2 / CS2",
+        "name": "Steam-related activity",
         "category": "PC Competitive",
         "icon": "🎮",
         "isMobile": False,
@@ -327,7 +449,43 @@ GAME_SIGNATURES: list[dict] = [
         "ports": (27015, 27036),
         "processes": ("dota2.exe", "cs2.exe", "ApexLegends.exe", "Overwatch.exe", "GTA5.exe"),
     },
+    {
+        "id": STEAM_CLIENT_ID,
+        "name": "Steam Client",
+        "category": "PC Launcher",
+        "icon": "🎮",
+        "isMobile": False,
+        "domains": (),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": ("steam.exe",),
+    },
+    {
+        "id": RIOT_CLIENT_ID,
+        "name": "Riot Client",
+        "category": "PC Launcher",
+        "icon": "🎮",
+        "isMobile": False,
+        "domains": (),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": ("RiotClientServices.exe",),
+    },
+    *_WEBSITE_SIGNATURES,
 ]
+
+ANDROID_GAME_PACKAGES = {
+    "com.mobile.legends": "mlbb",
+    "com.riotgames.league.wildrift": "wildrift",
+    "com.roblox.client": "roblox",
+    "com.supercell.clashofclans": "clashofclans",
+    "com.supercell.clashroyale": "clashroyale",
+    "com.supercell.brawlstars": "brawlstars",
+    "com.supercell.hayday": "hayday",
+    "com.supercell.boombeach": "boombeach",
+    "com.supercell.moco": "moco",
+    "com.supercell.squad": "squadbusters",
+}
 
 _DOH_CANARY_DOMAINS = (
     "use-application-dns.net",
@@ -354,18 +512,13 @@ _GAME_ID_ALIASES = {
     "supercell": "clashofclans",
 }
 
-SCAN_GAME_PORTS = (19132, 25565, 27015, 27036, 9339, 7500, 17500, 22101, 30090)
-_PASSIVE_DNS_CACHE_EXCLUDE = frozenset({
-    "steampowered.com",
-    "steamcommunity.com",
-    "valvesoftware.com",
-    "riotcdn.net",
-    "api.steampowered.com",
-})
+SCAN_GAME_PORTS = (19132, 25565, 27015, 27036, 7500, 17500, 22101, 30090)
+PORT_HINT_METHODS = frozenset({"Whole-Topology Port Scan", "Active Game Port Scan", "Auto LAN Game Port Sensor"})
+DNS_CACHE_HINT_METHODS = frozenset({"Auto DNS Cache Sensor", "Topology Host DNS Cache Scan"})
 _NETSTAT_GAME_PORTS = frozenset({
     5508, 5551, 30090, 30091, 7500, 7501, 10012,
     17500, 20001, 10010, 10011, 22101, 22102, 39698, 39800,
-    9339, 3659, 17502, 8433, 22023, 8393, 8394, 5795, 5800,
+    3659, 17502, 8433, 22023, 8393, 8394, 5795, 5800,
     19132, 25565, 27015, 27036,
 })
 
@@ -383,6 +536,65 @@ _NON_GAMING_TOKENS = (
     "tuya", "espressif", "mxchip", "ai-link", "high-flying", "hyper-v",
 )
 
+HOST_PROCESS_DETECTION = "Windows game process"
+MANAGED_PROCESS_DETECTION = "Managed Windows game process"
+ANDROID_APP_DETECTION = "Android foreground app"
+
+
+def _game_hint_type(method: str) -> str | None:
+    if method in {"Real-Time LAN Broadcast Listener", "Wireshark LAN Broadcast"}:
+        return "lan_discovery"
+    if method in PORT_HINT_METHODS:
+        return "port"
+    if method in DNS_CACHE_HINT_METHODS:
+        return "dns_cache"
+    if method.startswith(("Wireshark File (", "Wireshark Capture (")):
+        return "capture_file"
+    return None
+
+
+def list_windows_processes(*, current_session_only: bool = False) -> list[str] | None:
+    """Return a successful process snapshot, or None if Windows could not enumerate it."""
+    if sys.platform != "win32":
+        return None
+    session_id = wintypes.DWORD()
+    process_session = wintypes.DWORD()
+    if current_session_only and not _kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session_id)):
+        return None
+    snapshot = _kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == ctypes.c_void_p(-1).value:
+        return None
+    entry = _ProcessEntry()
+    entry.dwSize = ctypes.sizeof(entry)
+    names = []
+    try:
+        found = _kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while found:
+            if not current_session_only or (
+                _kernel32.ProcessIdToSessionId(entry.th32ProcessID, ctypes.byref(process_session))
+                and process_session.value == session_id.value
+            ):
+                names.append(entry.szExeFile)
+            found = _kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        return names if ctypes.get_last_error() == 18 else None  # ERROR_NO_MORE_FILES
+    finally:
+        _kernel32.CloseHandle(snapshot)
+
+
+def host_game_processes(ip: str, processes: list[str]) -> dict[tuple[str, str], dict]:
+    open_games = {}
+    for name in processes:
+        game = GameDetectorMixin._match_game_signature(process=name)
+        if game is not None:
+            open_games.setdefault((ip, game["id"]), {
+                "ip": ip,
+                "gameId": game["id"],
+                "process": name,
+                "matchedIndicator": f"Process {name}",
+                "detectionMethod": HOST_PROCESS_DETECTION,
+            })
+    return open_games
+
 
 class GameDetectorMixin:
     """Detects mobile/PC game launches from exact client DNS/syslog/port signals without guessing."""
@@ -390,8 +602,11 @@ class GameDetectorMixin:
     DNS_LISTENER_PORT = 5354
     SYSLOG_LISTENER_PORT = 5140
     HOST_DNS_IP = "192.168.0.224"
+    _cached_dhcp_dns_val: list[str] = []
+    _cached_dhcp_dns_ts = float("-inf")
 
     def _game_store(self) -> None:
+        self = cast("Monitor", self)
         with self._connect() as db:
             db.executescript(
                 """
@@ -399,6 +614,7 @@ class GameDetectorMixin:
                     id TEXT PRIMARY KEY,
                     timestamp TEXT NOT NULL,
                     ip TEXT NOT NULL,
+                    player TEXT NOT NULL DEFAULT '',
                     mac TEXT NOT NULL DEFAULT '',
                     device_name TEXT NOT NULL,
                     vendor TEXT NOT NULL DEFAULT '',
@@ -413,6 +629,7 @@ class GameDetectorMixin:
                     matched_indicator TEXT NOT NULL DEFAULT '',
                     detection_method TEXT NOT NULL DEFAULT 'Live DNS',
                     is_active INTEGER NOT NULL DEFAULT 1,
+                    is_dismissed INTEGER NOT NULL DEFAULT 0,
                     is_blocked INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_game_activity_ts
@@ -427,6 +644,8 @@ class GameDetectorMixin:
                     game_name TEXT NOT NULL DEFAULT '',
                     scope TEXT NOT NULL DEFAULT 'device_game',
                     cut_wifi INTEGER NOT NULL DEFAULT 1,
+                    throttle_routers TEXT,
+                    cut_routers TEXT,
                     active INTEGER NOT NULL DEFAULT 1
                 );
                 """
@@ -439,6 +658,15 @@ class GameDetectorMixin:
                 db.execute(
                     "ALTER TABLE game_activity_logs ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0"
                 )
+            if "is_dismissed" not in cols:
+                db.execute(
+                    "ALTER TABLE game_activity_logs ADD COLUMN is_dismissed INTEGER NOT NULL DEFAULT 0"
+                )
+            if "player" not in cols:
+                db.execute("ALTER TABLE game_activity_logs ADD COLUMN player TEXT NOT NULL DEFAULT ''")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_game_activity_active ON game_activity_logs(ip, game_id, player) WHERE is_active=1"
+            )
             blk_cols = {
                 row["name"]
                 for row in db.execute("PRAGMA table_info(game_block_rules)").fetchall()
@@ -447,17 +675,28 @@ class GameDetectorMixin:
                 db.execute(
                     "ALTER TABLE game_block_rules ADD COLUMN cut_wifi INTEGER NOT NULL DEFAULT 1"
                 )
+            if "throttle_routers" not in blk_cols:
+                db.execute("ALTER TABLE game_block_rules ADD COLUMN throttle_routers TEXT")
+            if "cut_routers" not in blk_cols:
+                db.execute("ALTER TABLE game_block_rules ADD COLUMN cut_routers TEXT")
+            for column in ("control_plan", "control_status", "expires_at"):
+                if column not in blk_cols:
+                    db.execute(f"ALTER TABLE game_block_rules ADD COLUMN {column} TEXT")
+        self._game_restriction_lock = threading.Lock()
         self._game_listeners_started = False
+        self._game_endpoint_seen: dict[str, float] = {}
         self._gaming_sensor_telemetry: dict = {
             "lastSeenEpoch": 0.0,
             "lastSeen": None,
             "pid": None,
-            "dnsHost": self.HOST_DNS_IP,
+            "dnsHost": "",
             "dnsPort": 53,
             "hotspotIp": "",
             "syslogPort": 514,
             "dnsQueriesTotal": 0,
             "dnsBlockedTotal": 0,
+            "dnsForwardedTotal": 0,
+            "dnsForwardFailures": 0,
             "dnsClients": {},
             "lastDnsClientIp": "",
             "lastDnsDomain": "",
@@ -467,10 +706,12 @@ class GameDetectorMixin:
         }
 
     def get_gaming_policy(self) -> dict:
+        self = cast("Monitor", self)
         with self.lock:
             raw = dict(self.config.get("gaming") or {})
         mode = str(raw.get("preventionMode") or "alert_only").strip().lower()
-        if mode not in {"alert_only", "auto_block_game", "auto_wifi_cut"}:
+        restrictions_enabled = os.environ.get("PULSE_ALLOW_NETWORK_CHANGES") == "1"
+        if not restrictions_enabled or mode not in {"alert_only", "auto_block_game", "auto_wifi_cut"}:
             mode = "alert_only"
         try:
             stale_sec = max(20, min(600, int(raw.get("staleSessionSeconds") or 75)))
@@ -478,17 +719,22 @@ class GameDetectorMixin:
             stale_sec = 75
         return {
             "preventionMode": mode,
+            "restrictionsEnabled": restrictions_enabled,
+            "deviceControlsEnabled": True,
             "autoPreventEnabled": mode in {"auto_block_game", "auto_wifi_cut"},
             "autoCutWifi": mode == "auto_wifi_cut",
             "staleSessionSeconds": stale_sec,
         }
 
     def set_gaming_policy(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
         if not isinstance(payload, dict):
             raise ValueError("Invalid gaming policy payload")
         mode = str(payload.get("preventionMode") or "").strip().lower()
         if mode not in {"alert_only", "auto_block_game", "auto_wifi_cut"}:
             raise ValueError("preventionMode must be alert_only, auto_block_game, or auto_wifi_cut")
+        if mode != "alert_only" and os.environ.get("PULSE_ALLOW_NETWORK_CHANGES") != "1":
+            raise ValueError("Game restrictions are disabled in monitoring-only mode")
         with self.lock:
             gaming_cfg = self.config.setdefault("gaming", {})
             gaming_cfg["preventionMode"] = mode
@@ -595,6 +841,7 @@ class GameDetectorMixin:
         return servers
 
     def record_gaming_sensor_heartbeat(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
         if not isinstance(payload, dict):
             payload = {}
         now_epoch = time.time()
@@ -608,11 +855,15 @@ class GameDetectorMixin:
                 tel["dnsHost"] = str(payload["dnsHost"]).strip()
             if payload.get("dnsPort") is not None:
                 tel["dnsPort"] = int(payload["dnsPort"])
+            tel["dnsForwardingEnabled"] = payload.get("dnsForwardingEnabled") is True
             tel["hotspotIp"] = str(payload.get("hotspotIp") or "").strip()
             if payload.get("dnsQueriesTotal") is not None:
                 tel["dnsQueriesTotal"] = int(payload["dnsQueriesTotal"])
             if payload.get("dnsBlockedTotal") is not None:
                 tel["dnsBlockedTotal"] = int(payload["dnsBlockedTotal"])
+            for key in ("dnsForwardedTotal", "dnsForwardFailures"):
+                if payload.get(key) is not None:
+                    tel[key] = int(payload[key])
             if isinstance(payload.get("dnsClients"), dict):
                 tel["dnsClients"] = {
                     str(k): str(v) for k, v in list(payload["dnsClients"].items())[:120]
@@ -633,6 +884,7 @@ class GameDetectorMixin:
         }
 
     def get_wireshark_config(self) -> dict:
+        self = cast("Monitor", self)
         with self.lock:
             gaming = dict(self.config.get("gaming") or {})
         raw = dict(gaming.get("wireshark") or {})
@@ -640,10 +892,10 @@ class GameDetectorMixin:
         return {
             "enabled": True if raw.get("enabled") is None else bool(raw.get("enabled")),
             "selectedInterfaces": [str(x) for x in selected] if isinstance(selected, list) else None,
-            "customTsharkPath": str(raw.get("customTsharkPath") or "").strip(),
         }
 
     def set_wireshark_config(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
         if not isinstance(payload, dict):
             raise ValueError("Request body must be a JSON object")
         with self.lock:
@@ -654,13 +906,12 @@ class GameDetectorMixin:
             if "selectedInterfaces" in payload:
                 sel = payload["selectedInterfaces"]
                 ws["selectedInterfaces"] = [str(x).strip() for x in sel if str(x).strip()] if isinstance(sel, list) else None
-            if "customTsharkPath" in payload:
-                ws["customTsharkPath"] = str(payload.get("customTsharkPath") or "").strip()
             gaming["wireshark"] = ws
             self.save_config()
         return {"success": True, "wiresharkStatus": self.get_wireshark_status()}
 
     def get_wireshark_status(self) -> dict:
+        self = cast("Monitor", self)
         from .wireshark_capture import (
             PcapRingRecorder,
             build_wireshark_display_filter,
@@ -686,7 +937,7 @@ class GameDetectorMixin:
             ifaces = list(live_ws.get("interfaces") or [])
         else:
             in_test = getattr(self, "_skip_live_probe_in_test", False)
-            bins = find_wireshark_binaries(cfg.get("customTsharkPath", ""))
+            bins = find_wireshark_binaries(os.environ.get("PULSE_TSHARK_PATH", ""))
             ifaces = [] if in_test else list_npcap_interfaces(
                 bins.get("wpcapPath", ""), bins.get("tsharkPath", "")
             )
@@ -708,7 +959,9 @@ class GameDetectorMixin:
         )
         return {
             "enabled": bool(cfg.get("enabled", True)),
+            "sensorCaptureEnabled": live_ws.get("enabled") if sensor_online else None,
             "active": bool(sensor_online and live_ws.get("active")),
+            "activeInterfaceCount": live_ws.get("activeInterfaceCount") if sensor_online else 0,
             "sensorOnline": sensor_online,
             "engine": engine_name,
             "tsharkInstalled": bool(bins.get("tsharkInstalled")),
@@ -726,7 +979,8 @@ class GameDetectorMixin:
             "tlsSniMatches": int(live_ws.get("tlsSniMatches") or 0),
             "httpMatches": int(live_ws.get("httpMatches") or 0),
             "portMatches": int(live_ws.get("portMatches") or 0),
-            "pcapBytes": int(live_ws.get("pcapBytes") or pcap_bytes),
+            "pcapBytes": pcap_bytes,
+            "pcapAvailable": pcap_bytes > len(PcapRingRecorder.GLOBAL_HEADER),
             "pcapUrl": "/api/gaming/wireshark/capture.pcap",
             "lastHitAt": live_ws.get("lastHitAt"),
             "recentHits": list(live_ws.get("recentHits") or []),
@@ -735,6 +989,7 @@ class GameDetectorMixin:
         }
 
     def get_wireshark_capture_bytes(self) -> bytes:
+        self = cast("Monitor", self)
         from .wireshark_capture import PcapRingRecorder
 
         pcap_path = self._data_dir() / "wireshark_live.pcap"
@@ -748,6 +1003,7 @@ class GameDetectorMixin:
         return PcapRingRecorder.GLOBAL_HEADER
 
     def analyze_wireshark_capture(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
         import base64
         from .wireshark_capture import dissect_raw_packet, parse_pcap_or_pcapng
 
@@ -755,7 +1011,6 @@ class GameDetectorMixin:
             raise ValueError("Request body must be a JSON object")
         b64_raw = str(payload.get("dataBase64") or "").strip()
         filename = str(payload.get("filename") or "capture.pcapng").strip()[:160]
-        ingest = True if payload.get("ingest") is None else bool(payload.get("ingest"))
         if not b64_raw:
             raise ValueError("Capture file payload (dataBase64) is required")
         if "," in b64_raw and b64_raw[:64].lower().startswith("data:"):
@@ -768,8 +1023,6 @@ class GameDetectorMixin:
         frames = parse_pcap_or_pcapng(raw_bytes)
         seen_hits: set[tuple[str, str, str]] = set()
         hits: list[dict] = []
-        detections: list[dict] = []
-        seen_detect_keys: set[tuple[str, str]] = set()
         matched_packets = 0
 
         for ts_epoch, dlt, frame in frames:
@@ -798,19 +1051,6 @@ class GameDetectorMixin:
                     "port": res.get("port"),
                     "domain": res.get("domain", ""),
                 })
-            if ingest and (res["ip"], res["gameId"]) not in seen_detect_keys:
-                seen_detect_keys.add((res["ip"], res["gameId"]))
-                det_res = self.record_game_detection({
-                    "ip": res["ip"],
-                    "gameId": res["gameId"],
-                    "domain": res.get("domain", ""),
-                    "port": res.get("port"),
-                    "matchedIndicator": res.get("matchedIndicator", ""),
-                    "detectionMethod": f"Wireshark Capture ({filename})",
-                    "skipAutoPrevent": True,
-                })
-                if det_res.get("detection"):
-                    detections.append(det_res["detection"])
 
         summary = {
             "filename": filename,
@@ -818,22 +1058,21 @@ class GameDetectorMixin:
             "packetsParsed": len(frames),
             "matchedPackets": matched_packets,
             "uniqueMatches": len(hits),
-            "detectionsLogged": len(detections),
+            "detectionsLogged": 0,
             "hits": hits[:80],
         }
         with self.lock:
             self._gaming_sensor_telemetry["wiresharkLastAnalyze"] = summary
         activity = self.get_game_activity(100)
-        if detections:
-            self.broadcast("game_detected", {"gameActivity": activity})
         return {
             "success": True,
             **summary,
-            "detections": detections,
+            "detections": [],
             "gameActivity": activity,
         }
 
     def _get_gaming_sensor_status(self) -> dict:
+        self = cast("Monitor", self)
         with self.lock:
             tel = dict(self._gaming_sensor_telemetry)
             dns_clients = dict(tel.get("dnsClients") or {})
@@ -841,27 +1080,29 @@ class GameDetectorMixin:
 
         in_test = getattr(self, "_skip_live_probe_in_test", False)
         host_ip = tel.get("dnsHost") or (
-            self.HOST_DNS_IP if in_test else self._detect_host_lan_ip(self.HOST_DNS_IP)
+            self.HOST_DNS_IP if in_test else self._detect_host_lan_ip("127.0.0.1", router_cfg.get("ip") or "")
         )
         local_dns = [] if in_test else self._detect_local_dhcp_dns()
         sensor_online = (time.time() - float(tel.get("lastSeenEpoch") or 0.0)) <= 12.0
-        non_self_clients = [ip for ip in dns_clients if ip != host_ip]
-        dns_intercept_ready = bool(
-            non_self_clients
-            or (host_ip in local_dns)
-            or bool(tel.get("hotspotIp"))
-        )
+        non_self_clients = [
+            ip for ip in dns_clients
+            if ip not in {host_ip, tel.get("hotspotIp"), "127.0.0.1", "::1"}
+        ]
+        dns_intercept_ready = sensor_online and bool(non_self_clients)
         bypass_dns = [d for d in local_dns if d != host_ip]
         router_state = getattr(self, "router_state", {}) or {}
         return {
             "sensorOnline": sensor_online,
             "lastSeen": tel.get("lastSeen"),
+            "dnsForwardingEnabled": bool(tel.get("dnsForwardingEnabled")),
             "dnsHost": host_ip,
             "dnsPort": int(tel.get("dnsPort") or 53),
             "hotspotIp": tel.get("hotspotIp") or "",
             "syslogPort": int(tel.get("syslogPort") or 514),
             "dnsQueriesTotal": int(tel.get("dnsQueriesTotal") or 0),
             "dnsBlockedTotal": int(tel.get("dnsBlockedTotal") or 0),
+            "dnsForwardedTotal": int(tel.get("dnsForwardedTotal") or 0),
+            "dnsForwardFailures": int(tel.get("dnsForwardFailures") or 0),
             "dnsClientsCount": len(non_self_clients),
             "dnsActiveClients": non_self_clients[:25],
             "lastDnsClientIp": tel.get("lastDnsClientIp") or "",
@@ -876,6 +1117,14 @@ class GameDetectorMixin:
 
     def configure_router_game_dns(self) -> dict:
         """Attempt one-click TP-Link LuCI DHCP Primary DNS setup so all Wi-Fi clients route via Pulse DNS."""
+        self = cast("Monitor", self)
+        if os.environ.get("PULSE_ALLOW_NETWORK_CHANGES") != "1":
+            raise ValueError("Router DNS changes are disabled in monitoring-only mode")
+        with self.lock:
+            telemetry = self._gaming_sensor_telemetry
+            sensor_dns_ready = telemetry.get("dnsForwardingEnabled") and time.time() - telemetry["lastSeenEpoch"] <= 12
+        if not sensor_dns_ready:
+            raise ValueError("The host sensor is not configured to forward DNS")
         host_ip = self._detect_host_lan_ip(self.HOST_DNS_IP)
         configs = (
             self._resolve_router_configs()
@@ -1008,7 +1257,10 @@ class GameDetectorMixin:
         dom = str(domain or "").strip().lower().rstrip(".")
         if dom:
             for g in GAME_SIGNATURES:
-                if any(dom == sig or dom.endswith(f".{sig}") for sig in g["domains"]):
+                if g.get("exactDomainsOnly") and dom in g["domains"]:
+                    return g
+            for g in GAME_SIGNATURES:
+                if not g.get("exactDomainsOnly") and any(dom == sig or dom.endswith(f".{sig}") for sig in g["domains"]):
                     return g
             for g in GAME_SIGNATURES:
                 if any(GameDetectorMixin._domain_keyword_matches(kw, dom) for kw in g.get("domainKeywords", ())):
@@ -1018,13 +1270,13 @@ class GameDetectorMixin:
             for g in GAME_SIGNATURES:
                 if any(proc == p.lower() for p in g.get("processes", ())):
                     return g
-        if port is not None and str(port).strip():
+        if isinstance(port, (str, int, float)) and str(port).strip():
             try:
                 pnum = int(port)
                 for g in GAME_SIGNATURES:
                     if pnum in g["ports"]:
                         return g
-            except (TypeError, ValueError):
+            except (OverflowError, ValueError):
                 pass
         return None
 
@@ -1037,13 +1289,17 @@ class GameDetectorMixin:
         topo_by_ip: dict[str, dict],
         node_by_id: dict[str, dict],
         topo_links: list[dict],
-        infra_devs: list[dict],
-        gw_ip: str,
         reporter_ip: str = "",
         allow_live_name_probe: bool = False,
     ) -> dict:
+        self = cast("Monitor", self)
+        host_ip = self._reporting_host_ip()
         mon_dev = mon_by_ip.get(client_ip)
-        mac = str((mon_dev or {}).get("mac") or (inv_row or {}).get("mac") or "").lower()
+        if inv_row and mon_dev and mon_dev.get("mac") and mon_dev["mac"].lower() != inv_row["mac"].lower():
+            mon_dev = None
+        mac = observed_inventory_mac(
+            str((mon_dev or {}).get("mac") or (inv_row or {}).get("mac") or "").lower(), client_ip,
+        )
         vendor = str((mon_dev or {}).get("vendor") or (inv_row or {}).get("vendor") or "")
         if (not vendor or "unknown" in vendor.lower()) and mac and hasattr(self, "_vendor_for_oui"):
             vendor, _ = self._vendor_for_oui(mac.replace(":", "")[:6])
@@ -1073,29 +1329,21 @@ class GameDetectorMixin:
         elif hostname:
             device_name = (
                 f"{hostname} (Host Monitor PC)"
-                if client_ip == self.HOST_DNS_IP and vendor == "LAN Client"
+                if client_ip == host_ip and vendor == "LAN Client"
                 else f"{hostname} ({vendor})"
             )
-        elif client_ip == self.HOST_DNS_IP:
+        elif client_ip == host_ip:
             device_name = f"Host Monitor PC ({client_ip})"
         else:
             device_name = f"{vendor} ({client_ip})"
 
         low_combo = f"{device_name} {vendor}".lower()
-        is_laa = False
-        if mac:
-            try:
-                is_laa = (int(mac.split(":")[0], 16) & 2) != 0
-            except ValueError:
-                pass
-        is_mobile = bool(
-            not mon_dev and (is_laa or any(tok in low_combo for tok in _MOBILE_HINT_TOKENS))
-        )
+        is_mobile = bool(not mon_dev and any(tok in low_combo for tok in _MOBILE_HINT_TOKENS))
         if mon_dev:
             device_type = f"Office {str(mon_dev.get('type') or 'Device').upper()}"
         elif is_mobile:
             device_type = "Mobile Phone / Wi-Fi Device"
-        elif client_ip == self.HOST_DNS_IP or any(tok in low_combo for tok in _PC_HINT_TOKENS):
+        elif client_ip == host_ip or any(tok in low_combo for tok in _PC_HINT_TOKENS):
             device_type = "PC / Workstation"
         else:
             device_type = "LAN / Wi-Fi Device"
@@ -1138,24 +1386,6 @@ class GameDetectorMixin:
                         router_ip = str(peer.get("ip") or "")
                         break
 
-        if not connected_to and infra_devs:
-            zone_matches = [d for d in infra_devs if d.get("ip") != client_ip and zone_prefix and str(d.get("ip", "")).startswith(zone_prefix)]
-            picked = (
-                next((d for d in zone_matches if d.get("type") == "ap"), None)
-                or next((d for d in zone_matches if d.get("type") == "router"), None)
-                or next((d for d in zone_matches if d.get("type") == "gateway"), None)
-                or (zone_matches[0] if zone_matches else None)
-                or next((d for d in infra_devs if d.get("ip") == gw_ip), None)
-                or next((d for d in infra_devs if d.get("type") == "gateway"), None)
-            )
-            if picked:
-                connected_to = f"{picked['name']} ({picked['ip']})"
-                router_ip = str(picked["ip"])
-
-        if not connected_to:
-            connected_to = f"Main Gateway Router ({gw_ip})"
-            router_ip = gw_ip
-
         return {
             "ip": client_ip,
             "mac": mac,
@@ -1172,9 +1402,10 @@ class GameDetectorMixin:
         self, client_ip: str, reporter_ip: str = ""
     ) -> dict:
         """Identify what device client_ip is and which AP/router/subnet zone it is connected through."""
+        self = cast("Monitor", self)
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM discovered_devices WHERE ip=? ORDER BY last_seen DESC LIMIT 1",
+                "SELECT * FROM discovered_devices WHERE ip=? AND is_online=1 ORDER BY last_seen DESC LIMIT 1",
                 (client_ip,),
             ).fetchone()
             topo_nodes = [dict(r) for r in db.execute("SELECT * FROM topology_nodes").fetchall()]
@@ -1183,12 +1414,8 @@ class GameDetectorMixin:
         inv_row = dict(row) if row is not None else None
         mon_devices = self.get_devices()
         mon_by_ip = {str(d.get("ip") or ""): d for d in mon_devices if d.get("ip")}
-        infra_devs = [
-            d for d in mon_devices
-            if str(d.get("type") or "").lower() in {"ap", "router", "gateway", "switch"}
-        ]
         cached_hosts = (
-            self._get_cached_hostnames()
+            self._get_cached_hostnames({client_ip: inv_row["mac"]} if inv_row else {})
             if hasattr(self, "_get_cached_hostnames")
             else {}
         )
@@ -1200,20 +1427,24 @@ class GameDetectorMixin:
             topo_by_ip={str(n.get("ip") or ""): n for n in topo_nodes if n.get("ip")},
             node_by_id={n["id"]: n for n in topo_nodes},
             topo_links=topo_links,
-            infra_devs=infra_devs,
-            gw_ip=str(self.config.get("router", {}).get("ip") or "192.168.0.1"),
             reporter_ip=reporter_ip,
             allow_live_name_probe=True,
         )
 
-    def record_game_detection(self, payload: dict) -> dict:
+    def record_game_detection(self, payload: dict, *, player: str = "", include_activity: bool = True) -> dict:
         """Record a verified device-level mobile/PC game detection, log event, raise alert, and push SSE."""
+        self = cast("Monitor", self)
         if not isinstance(payload, dict):
             raise ValueError("Invalid game detection payload")
         raw_ip = str(
             payload.get("ip") or payload.get("clientIp") or payload.get("deviceIp") or ""
         ).strip()
         client_ip = validate_ip(raw_ip)
+        method = str(payload.get("detectionMethod") or "Live DNS").strip()[:60]
+        hint_type = _game_hint_type(method)
+        if hint_type:
+            return {"success": True, "detection": None, "portHint": hint_type == "port", "hintType": hint_type,
+                    **({"gameActivity": self.get_game_activity(60)} if include_activity else {})}
         reporter_ip = str(payload.get("reporterIp") or payload.get("routerIp") or "").strip()
         game = self._match_game_signature(
             game_id=payload.get("gameId", ""),
@@ -1223,6 +1454,21 @@ class GameDetectorMixin:
         )
         if game is None:
             raise ValueError("Specify a recognized game, game domain, process, or game port")
+        launcher = game["id"] in LAUNCHER_IDS
+        website = game["id"] in WEBSITE_IDS
+        monitor_only = game["id"] in MONITOR_ONLY_IDS
+        domain = str(payload.get("domain") or "").strip().lower().rstrip(".")
+        if website and domain not in game["domains"]:
+            raise ValueError(f"{game['name']} activity requires a matching website hostname")
+        process_name = str(payload.get("process") or "").strip()
+        if launcher:
+            expected_process = game["processes"][0]
+            if (
+                method not in {HOST_PROCESS_DETECTION, MANAGED_PROCESS_DETECTION}
+                or process_name.lower() != expected_process.lower()
+            ):
+                raise ValueError(f"{game['name']} requires a Windows {expected_process} process report")
+            method = "Managed Windows client process" if method == MANAGED_PROCESS_DETECTION else "Windows client process"
 
         ctx = self._resolve_game_client_context(client_ip, reporter_ip)
         if str(payload.get("deviceName") or "").strip():
@@ -1230,7 +1476,7 @@ class GameDetectorMixin:
         if str(payload.get("connectedTo") or "").strip():
             ctx["connectedTo"] = str(payload["connectedTo"]).strip()[:140]
 
-        indicator = (
+        indicator = f"Process {expected_process}" if launcher else (
             str(
                 payload.get("matchedIndicator")
                 or payload.get("domain")
@@ -1238,14 +1484,13 @@ class GameDetectorMixin:
                 or ""
             ).strip()
             or (f"Port {payload['port']}" if payload.get("port") else "")
-            or game["domains"][0]
+            or next(iter(game["domains"]), game["name"])
         )[:120]
-        method = str(payload.get("detectionMethod") or "Live DNS").strip()[:60]
         self.expire_stale_game_sessions()
         now = utc_now()
         policy = self.get_gaming_policy()
 
-        if self._match_active_block_rule(client_ip, game["id"]) is not None:
+        if not monitor_only and self._match_active_block_rule(client_ip, game["id"]) is not None:
             with self._connect() as db:
                 latest_blk = db.execute(
                     "SELECT id FROM game_activity_logs WHERE ip=? AND game_id=? ORDER BY timestamp DESC LIMIT 1",
@@ -1263,18 +1508,20 @@ class GameDetectorMixin:
                 "blocked": True,
                 "autoPrevented": bool(payload.get("autoPrevented")),
                 "detection": None,
-                "gameActivity": self.get_game_activity(60),
+                **({"gameActivity": self.get_game_activity(60)} if include_activity else {}),
             }
 
         existing_row = None
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 """SELECT * FROM game_activity_logs
                    WHERE ip=? AND game_id=? AND is_active=1
-                   ORDER BY timestamp DESC LIMIT 1""",
-                (client_ip, game["id"]),
+                     AND (player=? OR player='' OR ?='')
+                   ORDER BY (player=?) DESC, timestamp DESC LIMIT 1""",
+                (client_ip, game["id"], player, player, player),
             ).fetchone()
-            if row:
+            if row and not _game_hint_type(row["detection_method"]):
                 try:
                     prev_dt = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
                     now_dt = datetime.now(timezone.utc)
@@ -1283,17 +1530,40 @@ class GameDetectorMixin:
                 except ValueError:
                     pass
 
+            if existing_row and method == ANDROID_APP_DETECTION and existing_row["detection_method"] != method:
+                # Start a new confirmed detection so a preceding network signal cannot consume its alert.
+                db.execute("UPDATE game_activity_logs SET is_active=0 WHERE id=?", (existing_row["id"],))
+                existing_row = None
+
             if existing_row is not None:
                 session_id = existing_row["id"]
+                if (existing_row["player"] and not player) or (
+                    existing_row["detection_method"] == ANDROID_APP_DETECTION and method != ANDROID_APP_DETECTION
+                ):
+                    # Network traffic cannot keep a directly observed app open.
+                    db.commit()
+                    return {
+                        "success": True, "detection": None,
+                        **({"gameActivity": self.get_game_activity(60)} if include_activity else {}),
+                    }
+                if existing_row["detection_method"] == HOST_PROCESS_DETECTION and method != HOST_PROCESS_DETECTION:
+                    method = existing_row["detection_method"]
+                    indicator = existing_row["matched_indicator"]
                 db.execute(
                     """UPDATE game_activity_logs
-                       SET timestamp=?, device_name=?, connected_to=?, router_ip=?, matched_indicator=?, detection_method=?
+                       SET timestamp=?, player=?, mac=?, device_name=?, vendor=?, device_type=?,
+                           connected_to=?, router_ip=?, zone_label=?, matched_indicator=?, detection_method=?
                        WHERE id=?""",
                     (
                         now,
+                        player,
+                        ctx["mac"],
                         ctx["deviceName"],
+                        ctx["vendor"],
+                        ctx["deviceType"],
                         ctx["connectedTo"],
                         ctx["routerIp"],
+                        ctx["zoneLabel"],
                         indicator,
                         method,
                         session_id,
@@ -1303,14 +1573,15 @@ class GameDetectorMixin:
                 session_id = f"game-{uuid.uuid4().hex[:10]}"
                 db.execute(
                     """INSERT INTO game_activity_logs
-                       (id, timestamp, ip, mac, device_name, vendor, device_type,
+                       (id, timestamp, ip, player, mac, device_name, vendor, device_type,
                         game_id, game_name, game_category, game_icon,
                         connected_to, router_ip, zone_label, matched_indicator, detection_method, is_active)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
                     (
                         session_id,
                         now,
                         client_ip,
+                        player,
                         ctx["mac"],
                         ctx["deviceName"],
                         ctx["vendor"],
@@ -1327,10 +1598,24 @@ class GameDetectorMixin:
                     ),
                 )
 
+        dismissed = bool(existing_row and existing_row["is_dismissed"])
+        if existing_row and player and not existing_row["player"] and not dismissed:
+            previous_key = self._game_alert_key(client_ip, game["id"], "")
+            player_key = self._game_alert_key(client_ip, game["id"], player)
+            with self.lock:
+                existing_alert = self.active_alerts.pop(previous_key, None)
+                if existing_alert is not None:
+                    self.active_alerts[player_key] = {**existing_alert, "key": player_key}
+                for alert in self.config.get("alerts", []):
+                    if alert.get("key") == previous_key:
+                        alert["key"] = player_key
+                if existing_alert is not None:
+                    self.save_config()
         entry = {
             "id": session_id,
             "timestamp": now,
             "ip": client_ip,
+            "player": player,
             "mac": ctx["mac"],
             "deviceName": ctx["deviceName"],
             "vendor": ctx["vendor"],
@@ -1344,11 +1629,12 @@ class GameDetectorMixin:
             "zoneLabel": ctx["zoneLabel"],
             "matchedIndicator": indicator,
             "detectionMethod": method,
-            "isActive": True,
+            "isActive": not dismissed,
+            "isDismissed": dismissed,
             "isBlocked": False,
         }
 
-        if policy["autoPreventEnabled"] and not payload.get("skipAutoPrevent"):
+        if not monitor_only and policy["autoPreventEnabled"] and not payload.get("skipAutoPrevent"):
             prevent_scope = "device_wifi_cut" if policy["autoCutWifi"] else "device_game"
             blk_res = self.block_game_session({
                 "sessionId": session_id,
@@ -1373,15 +1659,15 @@ class GameDetectorMixin:
                 "gameActivity": blk_res.get("gameActivity") or self.get_game_activity(60),
             }
 
-        changed_signal = existing_row is None or (
-            existing_row.get("matched_indicator") != indicator
-            or existing_row.get("detection_method") != method
-        )
         if existing_row is None:
-            title = f"{game['icon']} {game['name']} opened on {ctx['deviceName']}"
+            self.broadcast("game_detected", {"detection": entry})
+            evidence = "running" if launcher else "observed" if website else (
+                "opened" if process_name or method == ANDROID_APP_DETECTION else "traffic detected"
+            )
+            title = f"{game['icon']} {game['name']} {evidence} on {ctx['deviceName']}"
             msg = (
-                f"{ctx['deviceName']} ({client_ip}) opened {game['name']} "
-                f"while connected to {ctx['connectedTo']} via {indicator}."
+                f"{game['name']} {evidence} on {ctx['deviceName']} ({client_ip}). "
+                f"Observed via {indicator}."
             )
             self._record_event(
                 "GAME_DETECTED",
@@ -1392,7 +1678,7 @@ class GameDetectorMixin:
                 ip=client_ip,
                 device_name=ctx["deviceName"],
             )
-            alert_key = f"game-{client_ip}-{game['id']}"
+            alert_key = self._game_alert_key(client_ip, game["id"], player)
             alert = self._make_alert(alert_key, "INFO", title, msg, client_ip, 443)
             alert.update({
                 "type": "GAME_DETECTED",
@@ -1402,12 +1688,12 @@ class GameDetectorMixin:
                 "deviceName": ctx["deviceName"],
                 "gameName": game["name"],
                 "connectedTo": ctx["connectedTo"],
-                "likelyFault": f"Active {game['name']} session ({method})",
-                "rootCause": f"Device {ctx['deviceName']} ({ctx['deviceType']}) accessed {indicator}.",
+                "likelyFault": f"{game['name']} {evidence} ({method})",
+                "rootCause": f"Observed {indicator} on {ctx['deviceName']} ({ctx['deviceType']}).",
                 "remediation": [
                     f"Connected access point / router: {ctx['connectedTo']}",
                     f"Zone: {ctx['zoneLabel']}",
-                    "No outage — informational notification triggered on game launch.",
+                    "Informational notification for the observed activity.",
                 ],
             })
             with self.lock:
@@ -1415,15 +1701,21 @@ class GameDetectorMixin:
             self.save_alert(alert)
             self.broadcast("new_alert", alert)
 
-        activity = self.get_game_activity(60)
-        if existing_row is None:
-            self.broadcast("game_detected", {"detection": entry, "gameActivity": activity})
-        elif changed_signal:
-            self.broadcast("game_detected", {"gameActivity": activity})
-        return {"success": True, "detection": entry, "gameActivity": activity}
+        elif not dismissed:
+            self.broadcast("game_detected", {"detection": entry, "updated": True})
+        return {
+            "success": True,
+            "detection": None if dismissed else entry,
+            **({"gameActivity": self.get_game_activity(60)} if include_activity else {}),
+        }
+
+    @staticmethod
+    def _game_alert_key(ip: str, game_id: str, player: str) -> str:
+        return f"game-{ip}-{game_id}" + (f"-{player}" if player else "")
 
     def expire_stale_game_sessions(self, max_idle_seconds: int | None = None) -> int:
         """Automatically end active game sessions when no traffic/process heartbeat was seen recently."""
+        self = cast("Monitor", self)
         idle_limit = (
             int(max_idle_seconds)
             if max_idle_seconds is not None
@@ -1433,15 +1725,16 @@ class GameDetectorMixin:
         expired_ids: list[str] = []
         expired_keys: set[str] = set()
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             rows = db.execute(
-                "SELECT id, ip, game_id, timestamp FROM game_activity_logs WHERE is_active=1"
+                "SELECT id, ip, game_id, player, timestamp FROM game_activity_logs WHERE is_active=1"
             ).fetchall()
             for r in rows:
                 try:
                     prev_dt = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00"))
                     if (now_dt - prev_dt).total_seconds() >= idle_limit:
                         expired_ids.append(r["id"])
-                        expired_keys.add(f"game-{r['ip']}-{r['game_id']}")
+                        expired_keys.add(self._game_alert_key(r["ip"], r["game_id"], r["player"]))
                 except ValueError:
                     continue
             if expired_ids:
@@ -1465,10 +1758,15 @@ class GameDetectorMixin:
                     changed_cfg = True
                 if changed_cfg:
                     self.save_config()
+        if expired_ids:
+            self.broadcast("game_detected", {"endedSessionIds": expired_ids})
         return len(expired_ids)
 
-    def mark_game_session_ended_by_ip_game(self, client_ip: str, game_id: str) -> dict:
+    def mark_game_session_ended_by_ip_game(
+        self, client_ip: str, game_id: str, *, player: str = "", include_activity: bool = True, detection_method: str = ""
+    ) -> dict:
         """Immediately mark active sessions ended when the host sensor detects a game process closed."""
+        self = cast("Monitor", self)
         ip = validate_ip(client_ip)
         raw_gid = str(game_id or "").strip().lower()
         gid = _GAME_ID_ALIASES.get(raw_gid, raw_gid)
@@ -1476,13 +1774,14 @@ class GameDetectorMixin:
             raise ValueError("Game id is required")
         with self._connect() as db:
             cur = db.execute(
-                "UPDATE game_activity_logs SET is_active=0 WHERE ip=? AND game_id=? AND is_active=1",
-                (ip, gid),
+                """UPDATE game_activity_logs SET is_active=0 WHERE ip=? AND game_id=? AND player=? AND is_active=1
+                   AND (?='' OR detection_method=?)""",
+                (ip, gid, player, detection_method, detection_method),
             )
             changed = int(cur.rowcount or 0) > 0
         if not changed:
-            return {"success": True, "changed": False, "gameActivity": self.get_game_activity(100)}
-        alert_key = f"game-{ip}-{gid}"
+            return {"success": True, "changed": False, **({"gameActivity": self.get_game_activity(100)} if include_activity else {})}
+        alert_key = self._game_alert_key(ip, gid, player)
         with self.lock:
             self.active_alerts.pop(alert_key, None)
             self.config["alerts"] = [
@@ -1491,10 +1790,37 @@ class GameDetectorMixin:
             self.save_config()
         activity = self.get_game_activity(100)
         self.broadcast("game_detected", {"gameActivity": activity})
-        return {"success": True, "gameActivity": activity}
+        return {"success": True, **({"gameActivity": activity} if include_activity else {})}
+
+    def report_android_game_activity(self, payload: dict) -> dict:
+        ip = validate_ip(payload.get("ip"))
+        if not self._is_real_lan_client_ip(ip):
+            raise ValueError("The Android phone must be on a monitored LAN subnet")
+        package = str(payload.get("package") or "")
+        game_id = ANDROID_GAME_PACKAGES.get(package)
+        if game_id is None:
+            raise ValueError("Unrecognized Android game package")
+        if payload.get("ended") is True:
+            return self.mark_game_session_ended_by_ip_game(
+                ip, game_id, include_activity=False, detection_method=ANDROID_APP_DETECTION,
+            )
+        return self.record_game_detection({
+            "ip": ip,
+            "gameId": game_id,
+            "matchedIndicator": f"Android app {package}",
+            "detectionMethod": ANDROID_APP_DETECTION,
+            "skipAutoPrevent": True,
+        }, include_activity=False)
+
+    def _reporting_host_ip(self) -> str:
+        tel = self._gaming_sensor_telemetry
+        if time.time() - float(tel.get("lastSeenEpoch") or 0) <= 12:
+            return str(tel.get("dnsHost") or "")
+        return self.HOST_DNS_IP if getattr(self, "_skip_live_probe_in_test", False) else ""
 
     def _build_online_game_devices(self, active_logs: list[dict], blocks: list[dict]) -> list[dict]:
         """Build automatic list of currently online client devices (phones, tablets, PCs) with live game state."""
+        self = cast("Monitor", self)
         infra_types = {"router", "gateway", "ap", "switch", "firewall"}
         mon_devices = self.get_devices()
         mon_by_ip = {str(d.get("ip") or ""): d for d in mon_devices if d.get("ip")}
@@ -1510,7 +1836,7 @@ class GameDetectorMixin:
             inv_rows = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT * FROM discovered_devices WHERE is_online=1 ORDER BY ip LIMIT 200"
+                    "SELECT * FROM discovered_devices WHERE is_online=1 ORDER BY ip"
                 ).fetchall()
             ]
             topo_nodes = [dict(r) for r in db.execute("SELECT * FROM topology_nodes").fetchall()]
@@ -1518,16 +1844,12 @@ class GameDetectorMixin:
 
         inv_by_ip = {str(r.get("ip") or ""): r for r in inv_rows if r.get("ip")}
         cached_hosts = (
-            self._get_cached_hostnames()
+            self._get_cached_hostnames({ip: row["mac"] for ip, row in inv_by_ip.items()})
             if hasattr(self, "_get_cached_hostnames")
             else {}
         )
         node_by_id = {n["id"]: n for n in topo_nodes}
         topo_by_ip = {str(n.get("ip") or ""): n for n in topo_nodes if n.get("ip")}
-        infra_devs = [
-            d for d in mon_devices
-            if str(d.get("type") or "").lower() in {"ap", "router", "gateway", "switch"}
-        ]
 
         candidate_ips: list[str] = []
         seen_ips: set[str] = set()
@@ -1538,13 +1860,16 @@ class GameDetectorMixin:
                 not ip_s
                 or ip_s in seen_ips
                 or ip_s in infra_ips
-                or ip_s.startswith("172.27.")
                 or ip_s.startswith("127.")
             ):
                 return
             seen_ips.add(ip_s)
             candidate_ips.append(ip_s)
 
+        games_by_ip: dict[str, list[dict]] = {}
+        for log in active_logs:
+            _add_candidate(log.get("ip", ""))
+            games_by_ip.setdefault(log["ip"], []).append(log)
         for row in inv_rows:
             if row.get("archived"):
                 continue
@@ -1562,17 +1887,13 @@ class GameDetectorMixin:
             low = f"{dev.get('name') or ''} {dev.get('vendor') or ''}".lower()
             if any(tok in low for tok in _NON_GAMING_TOKENS):
                 continue
-            _add_candidate(dev.get("ip", ""))
-
-        for log in active_logs:
-            _add_candidate(log.get("ip", ""))
-        for blk in blocks:
-            if blk.get("ip") and blk.get("ip") != "*":
-                _add_candidate(blk["ip"])
-        _add_candidate(self.HOST_DNS_IP)
+            probe = self.latest_devices.get(dev["ip"], {})
+            if probe.get("directlyReachable"):
+                _add_candidate(dev["ip"])
+        _add_candidate(self._reporting_host_ip())
 
         online_devices: list[dict] = []
-        for ip in candidate_ips[:120]:
+        for ip in candidate_ips:
             ctx = self._assemble_client_context(
                 client_ip=ip,
                 mon_by_ip=mon_by_ip,
@@ -1581,8 +1902,6 @@ class GameDetectorMixin:
                 topo_by_ip=topo_by_ip,
                 node_by_id=node_by_id,
                 topo_links=topo_links,
-                infra_devs=infra_devs,
-                gw_ip=gw_ip,
                 allow_live_name_probe=False,
             )
             dev_active = [
@@ -1590,13 +1909,13 @@ class GameDetectorMixin:
                     "id": x["id"],
                     "gameId": x["gameId"],
                     "gameName": x["gameName"],
+                    "player": x["player"],
                     "gameIcon": x["gameIcon"],
                     "matchedIndicator": x["matchedIndicator"],
                     "detectionMethod": x["detectionMethod"],
                     "timestamp": x["timestamp"],
                 }
-                for x in active_logs
-                if x["ip"] == ip
+                for x in games_by_ip.get(ip, [])
             ]
             exact_blk = next((b for b in blocks if b["ip"] == ip), None)
             any_blk = exact_blk or next((b for b in blocks if b["ip"] == "*"), None)
@@ -1634,22 +1953,63 @@ class GameDetectorMixin:
         )
         return online_devices
 
+    def note_game_endpoint(self, ip: str) -> None:
+        self = cast("Monitor", self)
+        with self.lock:
+            self._game_endpoint_seen[validate_ip(ip)] = time.monotonic()
+
+    def _get_game_coverage(self, sensor_status: dict) -> dict:
+        self = cast("Monitor", self)
+        with self.lock:
+            cutoff = time.monotonic() - 90
+            for ip in [ip for ip, seen in self._game_endpoint_seen.items() if seen < cutoff]:
+                del self._game_endpoint_seen[ip]
+            endpoints = sorted(self._game_endpoint_seen)
+            dns_clients = dict(self._gaming_sensor_telemetry.get("dnsClients") or {})
+        recent_dns = []
+        now = datetime.now(timezone.utc)
+        dns_cutoff = now - timedelta(seconds=90)
+        local_ips = {sensor_status["dnsHost"], sensor_status["hotspotIp"], "127.0.0.1", "::1"}
+        if sensor_status["sensorOnline"]:
+            for ip, observed_at in dns_clients.items():
+                if ip in local_ips:
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                    if stamp.tzinfo is not None and dns_cutoff <= stamp <= now:
+                        recent_dns.append(validate_ip(ip))
+                except ValueError:
+                    continue
+        return {
+            **self.get_discovery_coverage(),
+            "endpointIps": endpoints,
+            "recentDnsIps": sorted(set(recent_dns)),
+            "endpointEnrollmentEnabled": bool(os.environ.get("PULSE_GAME_ENDPOINT_TOKEN")),
+        }
+
     def get_game_activity(self, limit: int = 100) -> dict:
+        self = cast("Monitor", self)
         self.expire_stale_game_sessions()
         policy = self.get_gaming_policy()
         sensor_status = self._get_gaming_sensor_status()
         limit = max(1, min(int(limit), 300))
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM game_activity_logs ORDER BY timestamp DESC LIMIT ?",
+                """SELECT * FROM game_activity_logs WHERE is_active=1 AND is_dismissed=0
+                   UNION ALL SELECT * FROM (
+                       SELECT * FROM game_activity_logs ORDER BY timestamp DESC LIMIT ?
+                   ) WHERE is_active=0 OR is_dismissed=1 ORDER BY timestamp DESC""",
                 (limit,),
             ).fetchall()
 
-        logs = [
-            {
+        logs = []
+        for r in rows:
+            hint_type = _game_hint_type(r["detection_method"])
+            logs.append({
                 "id": r["id"],
                 "timestamp": r["timestamp"],
                 "ip": r["ip"],
+                "player": r["player"],
                 "mac": r["mac"],
                 "deviceName": r["device_name"],
                 "vendor": r["vendor"],
@@ -1663,23 +2023,31 @@ class GameDetectorMixin:
                 "zoneLabel": r["zone_label"],
                 "matchedIndicator": r["matched_indicator"],
                 "detectionMethod": r["detection_method"],
-                "isActive": bool(r["is_active"]),
+                "isActive": bool(r["is_active"] and not r["is_dismissed"] and not hint_type),
+                "portHint": hint_type == "port",
+                "hintType": hint_type,
+                "isDismissed": bool(r["is_dismissed"]),
                 "isBlocked": bool(r["is_blocked"]) if "is_blocked" in r.keys() else False,
-            }
-            for r in rows
-        ]
+            })
+            if hint_type == "lan_discovery":
+                logs[-1].update(mac="", deviceName="Unverified device", vendor="", deviceType="",
+                                connectedTo="", routerIp="")
         blocks = self.get_game_blocks()
         active_logs = [x for x in logs if x["isActive"]]
-        online_devices = self._build_online_game_devices(active_logs, blocks)
+        online_devices = self._build_online_game_devices(
+            active_logs, [rule for rule in blocks if not rule["controlStatus"] or rule["controlStatus"] == "active"]
+        )
         game_counts: dict[str, int] = {}
         zone_counts: dict[str, int] = {}
         for item in logs:
+            if item["hintType"]:
+                continue
             game_counts[item["gameName"]] = game_counts.get(item["gameName"], 0) + 1
             if item["connectedTo"]:
                 zone_counts[item["connectedTo"]] = zone_counts.get(item["connectedTo"], 0) + 1
 
-        top_game = max(game_counts, key=game_counts.get) if game_counts else "None yet"
-        top_zone = max(zone_counts, key=zone_counts.get) if zone_counts else "No traffic yet"
+        top_game = max(game_counts, key=game_counts.__getitem__) if game_counts else "None yet"
+        top_zone = max(zone_counts, key=zone_counts.__getitem__) if zone_counts else "No traffic yet"
         catalog = [
             {
                 "id": g["id"],
@@ -1687,6 +2055,8 @@ class GameDetectorMixin:
                 "category": g["category"],
                 "icon": g["icon"],
                 "isMobile": bool(g.get("isMobile")),
+                "hasWindowsProcess": bool(g["processes"]),
+                "hasAndroidPackage": g["id"] in ANDROID_GAME_PACKAGES.values(),
                 "domains": list(g["domains"]),
                 "ports": list(g["ports"]),
             }
@@ -1696,14 +2066,15 @@ class GameDetectorMixin:
             "logs": logs,
             "blocks": blocks,
             "onlineDevices": online_devices,
-            "autoScanActive": True,
+            "autoScanActive": os.environ.get("PULSE_ENABLE_BACKGROUND_SCANS") == "1",
             "policy": policy,
             "sensorStatus": sensor_status,
+            "coverage": self._get_game_coverage(sensor_status),
             "wiresharkStatus": self.get_wireshark_status(),
             "summary": {
                 "activeCount": len(active_logs),
                 "blockedCount": len(blocks),
-                "totalCount": len(logs),
+                "totalCount": sum(not item["hintType"] for item in logs),
                 "onlineDevicesCount": len(online_devices),
                 "topGame": top_game,
                 "topZone": top_zone,
@@ -1717,6 +2088,7 @@ class GameDetectorMixin:
         }
 
     def get_game_blocks(self) -> list[dict]:
+        self = cast("Monitor", self)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM game_block_rules WHERE active=1 ORDER BY created_at DESC"
@@ -1732,6 +2104,11 @@ class GameDetectorMixin:
                 "gameName": r["game_name"],
                 "scope": r["scope"],
                 "cutWifi": bool(r["cut_wifi"]) if "cut_wifi" in r.keys() else True,
+                "throttleRouters": json.loads(r["throttle_routers"]) if r["throttle_routers"] else [],
+                "cutRouters": json.loads(r["cut_routers"]) if r["cut_routers"] else [],
+                "controlStatus": r["control_status"],
+                "expiresAt": r["expires_at"],
+                "limitsKbps": json.loads(r["control_plan"]).get("limitsKbps") if r["control_plan"] else None,
                 "active": bool(r["active"]),
             }
             for r in rows
@@ -1749,16 +2126,18 @@ class GameDetectorMixin:
         client_ip: str, qname: str, matched_sig: dict | None, active_blocks: list[dict]
     ) -> dict | None:
         """Decide whether a DNS query from client_ip must be sinkholed immediately to 0.0.0.0."""
+        if matched_sig and matched_sig["id"] in MONITOR_ONLY_IDS:
+            matched_sig = None
         gid = matched_sig["id"] if matched_sig else ""
         is_captive = GameDetectorMixin._is_wifi_captive_domain(qname)
         for rule in active_blocks:
+            if rule.get("controlStatus"):
+                continue
             r_ip = str(rule.get("ip") or "")
             r_gid = str(rule.get("gameId") or "")
             r_scope = str(rule.get("scope") or "")
             if r_ip == client_ip:
-                if r_scope == "device_throttle":
-                    if matched_sig is not None:
-                        return rule
+                if r_scope == "device_throttle" or rule.get("cutRouters"):
                     continue
                 if r_gid == "*" or r_scope in {"device_all_games", "device_wifi_cut"}:
                     return rule
@@ -1770,24 +2149,13 @@ class GameDetectorMixin:
                 return rule
         return None
 
-    @staticmethod
-    def _classify_dns_query_action(
-        client_ip: str, qname: str, matched_sig: dict | None, active_blocks: list[dict]
-    ) -> tuple[str, dict | None]:
-        """Classify DNS handling as ('sinkhole', rule), ('throttle', rule), or ('allow', None)."""
-        sink = GameDetectorMixin._should_sinkhole_query(client_ip, qname, matched_sig, active_blocks)
-        if sink is not None:
-            return "sinkhole", sink
-        for rule in active_blocks:
-            if (
-                str(rule.get("ip") or "") == client_ip
-                and str(rule.get("scope") or "") == "device_throttle"
-            ):
-                return "throttle", rule
-        return "allow", None
-
     def _match_active_block_rule(self, client_ip: str, game_id: str) -> dict | None:
+        rules_enabled = os.environ.get("PULSE_ALLOW_NETWORK_CHANGES") == "1"
         for rule in self.get_game_blocks():
+            if rule.get("controlStatus"):
+                continue
+            if not rules_enabled and not (rule.get("throttleRouters") or rule.get("cutRouters")):
+                continue
             if rule["ip"] in (client_ip, "*") and (
                 rule["gameId"] in (game_id, "*")
                 or rule.get("scope") in {"device_all_games", "device_wifi_cut", "device_throttle"}
@@ -1803,10 +2171,12 @@ class GameDetectorMixin:
         router_ip: str,
         block: bool,
         mode: str = "cut",
+        router_targets: list[str] | None = None,
     ) -> list[str]:
         """Best-effort TP-Link LuCI QoS bandwidth throttle (1 KB/s) or MAC access-control block/unblock."""
+        self = cast("Monitor", self)
         clean_mac = str(mac or "").strip().upper().replace("-", ":")
-        if ip == "*" or not clean_mac or getattr(self, "_skip_live_probe_in_test", False):
+        if ip == "*" or not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", clean_mac) or getattr(self, "_skip_live_probe_in_test", False):
             return []
 
         configs = (
@@ -1820,7 +2190,14 @@ class GameDetectorMixin:
             if str(cfg.get("stok") or "").strip()
             and str(cfg.get("ip") or "") in {router_ip, primary_ip}
         ]
-        if not targets:
+        if router_targets is not None:
+            targets = [
+                cfg for cfg in configs
+                if cfg.get("ip") in router_targets and str(cfg.get("stok") or "").strip()
+            ]
+        elif mode == "throttle" and block:
+            targets.sort(key=lambda cfg: cfg.get("ip") != router_ip)
+        elif not targets:
             targets = [cfg for cfg in configs if str(cfg.get("stok") or "").strip()]
         if not targets:
             return []
@@ -1861,16 +2238,8 @@ class GameDetectorMixin:
                             "enable": "on" if block else "off",
                             "up_band": "1" if block else "0",
                             "down_band": "1" if block else "0",
-                        }).encode("utf-8"),
-                    ),
-                    (
-                        f"/cgi-bin/luci/;stok={encoded_stok}/admin/client?form=client_list",
-                        urllib.parse.urlencode({
-                            "operation": "speed_limit",
-                            "mac": mac_dash,
-                            "enable": "on" if block else "off",
-                            "up_limit": "1" if block else "0",
-                            "down_limit": "1" if block else "0",
+                            "up_unit": "KB/s",
+                            "down_unit": "KB/s",
                         }).encode("utf-8"),
                     ),
                 )
@@ -1907,18 +2276,208 @@ class GameDetectorMixin:
                         req, timeout=1.2, context=ctx if scheme == "https" else None
                     ) as resp:
                         raw = resp.read(8192).decode("utf-8", "ignore")
-                    if '"success":true' in raw.replace(" ", "").lower():
-                        enforced.append(f"{r_host}")
+                    reply = json.loads(raw)
+                    if isinstance(reply, dict) and reply.get("success") is True:
+                        enforced.append(r_host)
                         break
                 except Exception:
                     continue
+            if mode == "throttle" and block and enforced:
+                break
         return enforced
 
     def block_game_session(self, payload: dict) -> dict:
-        """Throttle/block a user's internet rate to unplayable speed, cut Wi-Fi, or block a game via router QoS/ACL, DNS lag & socket RST."""
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid block request payload")
+        router_only = payload.get("routerOnly") is True or os.environ.get("PULSE_ALLOW_NETWORK_CHANGES") != "1"
+        if router_only and (payload.get("scope") not in ("device_throttle", "device_wifi_cut") or payload.get("autoPrevented")):
+            raise ValueError("Select a per-device throttle or disconnect from a current game detection")
+        with self._game_restriction_lock:
+            return self._block_game_session(payload, router_only=router_only)
+
+    def _validate_device_control_target(self, ip: str, mac: str, observed_mac: str) -> None:
+        self = cast("Monitor", self)
+        if not mac or mac != observed_mac:
+            raise ValueError("The selected detection needs a confirmed device MAC. Refresh LAN inventory and wait for a new detection.")
+        infrastructure = set(self._known_local_gateways())
+        infrastructure.update(
+            d["ip"] for d in self.get_devices()
+            if str(d.get("type") or "").lower() in {"ap", "gateway", "router", "switch", "firewall"}
+        )
+        infrastructure.update(str(cfg.get("ip") or "") for cfg in self._resolve_router_configs())
+        sensor = self._get_gaming_sensor_status()
+        infrastructure.update(ip for ip in (sensor.get("dnsHost"), sensor.get("hotspotIp")) if isinstance(ip, str))
+        if ip in infrastructure or not self._is_real_lan_client_ip(ip):
+            raise ValueError("Device controls require an individual client on a monitored LAN.")
+
+    def _manual_game_router(self, ip: str) -> RouterGameControl | None:
+        self = cast("Monitor", self)
+        if getattr(self, "_skip_live_probe_in_test", False):
+            return None
+        for cfg in self._resolve_router_configs():
+            if cfg.get("ip") == ip and str(cfg.get("stok") or "").strip():
+                return RouterGameControl(cfg, self._luci_post)
+        return None
+
+    @staticmethod
+    def _game_control_number(value: object, label: str, low: int, high: int) -> int:
+        text = str(value)
+        if not re.fullmatch(r"[0-9]{1,7}", text) or not low <= int(text) <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return int(text)
+
+    def block_gateway_device(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
+        ip = validate_ip(payload.get("ip"))
+        mac = normalize_mac(payload.get("mac"))
+        with self._game_restriction_lock:
+            self._validate_device_control_target(ip, mac, mac)
+            local_ip = self._detect_host_lan_ip("", gateway_ip=ip)
+            if not local_ip or local_ip == ip:
+                raise ValueError("Device access controls require a client other than the monitoring PC.")
+            gateway = str(self.config["router"]["ip"])
+            if self.router_state.get("ip") != gateway or self.router_state.get("routerClientSource") != "router":
+                return {"success": False, "error": "Connect the main router admin session and refresh its client list."}
+            client = next((row for row in self.router_state.get("routerClients", [])
+                           if row["ip"] == ip and row["mac"] == mac), None)
+            if client is None:
+                raise ValueError("The client is no longer in the main router's client list.")
+            return self._apply_manual_game_control(payload, ip, mac, client["name"], "device_wifi_cut", gateway)
+
+    def restore_gateway_device(self, rule_id: object) -> dict:
+        self = cast("Monitor", self)
+        with self._game_restriction_lock:
+            with self._connect() as db:
+                rule = db.execute(
+                    """SELECT * FROM game_block_rules WHERE id=? AND active=1
+                       AND scope='device_wifi_cut' AND control_plan IS NOT NULL""",
+                    (str(rule_id or ""),),
+                ).fetchone()
+            if rule is None:
+                raise ValueError("Device access rule not found")
+            return self._restore_manual_game_control(dict(rule))
+
+    def _apply_manual_game_control(
+        self, payload: dict, ip: str, mac: str, name: str, scope: str, gateway: str | None = None,
+    ) -> dict:
+        self = cast("Monitor", self)
+        mode = "throttle" if scope == "device_throttle" else "cut"
+        duration = self._game_control_number(payload.get("durationMinutes", 15), "Duration in minutes", 1, 240)
+        limits = None
+        if mode == "throttle":
+            limits = {
+                "download": self._game_control_number(payload.get("downloadKbps", 512), "Download Kbps", 8, 1_000_000),
+                "upload": self._game_control_number(payload.get("uploadKbps", 256), "Upload Kbps", 8, 1_000_000),
+            }
+        with self._connect() as db:
+            existing = db.execute(
+                "SELECT id FROM game_block_rules WHERE active=1 AND (ip=? OR mac=?) AND scope IN ('device_throttle', 'device_wifi_cut')",
+                (ip, mac),
+            ).fetchone()
+        if existing:
+            raise ValueError("Restore the existing device restriction before applying a new one.")
+        gateway = gateway or str(self.config.get("router", {}).get("ip") or "192.168.0.1")
+        router = self._manual_game_router(gateway)
+        wire_mac = mac.upper().replace(":", "-")
+        before = router.read(mode, wire_mac) if router and router.has_client(ip, wire_mac) else None
+        if router is None or before is None:
+            hint = "Sign in under Router Settings. The main router must confirm this client and expose its bandwidth limit or an enabled deny list."
+            return {"success": False, "scope": scope, "routerEnforced": [],
+                    "enforcementDetails": {"requiresSetup": True, "setupHint": hint, "layers": []}}
+        if before.get("present") or before.get("enable") == "on":
+            raise ValueError("The router already has a restriction on this device. Review it in the router before continuing.")
+
+        rule_id = f"gblk-{uuid.uuid4().hex[:10]}"
+        plan = {"gateway": gateway, "mode": mode, "mac": wire_mac, "before": before,
+                "name": f"Pulse {rule_id[5:]}", "limitsKbps": limits}
+        label = "Block device access"
+        if limits:
+            after = {**before, "enable": "on"}
+            for direction, field in (("upload", "up"), ("download", "down")):
+                value = limits[direction]
+                if before[f"{field}_unit"] == "KB/s":
+                    if value % 8:
+                        raise ValueError("This router uses KB/s. Enter limits divisible by 8 Kbps.")
+                    value //= 8
+                after[f"{field}_band"] = str(value)
+            plan["after"] = after
+            label = f"{limits['download']} Kbps down / {limits['upload']} Kbps up"
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        # Journal the original state before changing the router so restart can recover an interrupted write.
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO game_block_rules
+                   (id, created_at, ip, mac, device_name, game_name, scope, cut_wifi, control_plan, control_status, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'applying', ?)""",
+                (rule_id, utc_now(), ip, mac, name, label, scope, mode == "cut", json.dumps(plan), expires),
+            )
+        confirmed = router.change(plan)
+        throttle = json.dumps([gateway]) if confirmed and limits else None
+        cut = json.dumps([gateway]) if confirmed and not limits else None
+        with self._connect() as db:
+            db.execute(
+                "UPDATE game_block_rules SET control_status=?, throttle_routers=?, cut_routers=? WHERE id=?",
+                ("active" if confirmed else "restore_pending", throttle, cut, rule_id),
+            )
+        self._record_event(
+            "GAME_BLOCKED" if confirmed else "GAME_CONTROL_UNVERIFIED", "WARNING",
+            label if confirmed else "Device restriction could not be verified",
+            f"Router {gateway}: {label} for {name} ({ip}). " +
+            (f"Restoration due {expires}." if confirmed else "Pulse will verify restoration."),
+            mac=mac, ip=ip, device_name=name,
+        )
+        activity = self.get_game_activity(100)
+        self.broadcast("game_detected", {"gameActivity": activity})
+        return {"success": confirmed, "scope": scope, "ruleId": rule_id, "gameActivity": activity,
+                "routerEnforced": [gateway] if confirmed else [], "expiresAt": expires,
+                "enforcementDetails": {"requiresSetup": not confirmed, "layers": [label] if confirmed else [],
+                                       "setupHint": "The router did not confirm the change. Pulse will retry restoration." if not confirmed else ""}}
+
+    def _restore_manual_game_control(self, rule: dict) -> dict:
+        self = cast("Monitor", self)
+        plan = json.loads(rule["control_plan"])
+        router = self._manual_game_router(plan["gateway"])
+        restored = router is not None and router.change(plan, restore=True)
+        with self._connect() as db:
+            if restored:
+                db.execute("DELETE FROM game_block_rules WHERE id=?", (rule["id"],))
+            else:
+                db.execute("UPDATE game_block_rules SET control_status='restore_pending' WHERE id=?", (rule["id"],))
+        if restored:
+            self._record_event("GAME_UNBLOCKED", "INFO", "Device access restored",
+                               f"Router {plan['gateway']} confirmed restoration for {rule['device_name']}.",
+                               mac=rule["mac"], ip=rule["ip"], device_name=rule["device_name"])
+        elif rule["control_status"] == "restore_pending":
+            return {"success": False, "error": "Router restoration is still unverified. Pulse will retry."}
+        activity = self.get_game_activity(100)
+        self.broadcast("game_detected", {"gameActivity": activity})
+        return {"success": restored, "gameActivity": activity,
+                **({} if restored else {"error": "The router did not confirm restoration. Pulse will retry."})}
+
+    def _game_control_expiry_loop(self) -> None:
+        self = cast("Monitor", self)
+        while not self._stop.is_set():
+            try:
+                with self._game_restriction_lock:
+                    with self._connect() as db:
+                        rows = db.execute(
+                            """SELECT * FROM game_block_rules WHERE active=1 AND control_plan IS NOT NULL
+                               AND (control_status IN ('applying', 'restore_pending') OR expires_at<=?)""",
+                            (utc_now(),),
+                        ).fetchall()
+                    for row in rows:
+                        self._restore_manual_game_control(dict(row))
+            except Exception as exc:
+                print(f"[monitor] Device restoration retry: {exc}", flush=True)
+            self._stop.wait(15)
+
+    def _block_game_session(self, payload: dict, *, router_only: bool) -> dict:
+        """Apply a device restriction through router QoS, router access control, or game DNS rules."""
+        self = cast("Monitor", self)
         if not isinstance(payload, dict):
             raise ValueError("Invalid block request payload")
         session_id = str(payload.get("sessionId") or "").strip()
+        srow = None
         scope = str(payload.get("scope") or "device_throttle").strip().lower()
         if scope not in {"device_throttle", "device_game", "device_all_games", "device_wifi_cut", "network_game"}:
             scope = "device_throttle"
@@ -1927,16 +2486,32 @@ class GameDetectorMixin:
         raw_ip = str(payload.get("ip") or payload.get("clientIp") or "").strip()
         raw_game_id = str(payload.get("gameId") or "").strip().lower()
 
+        if router_only and not session_id:
+            raise ValueError("Select a current game detection before applying a device control")
         if session_id:
             with self._connect() as db:
                 srow = db.execute(
-                    "SELECT ip, game_id FROM game_activity_logs WHERE id=?", (session_id,)
+                    "SELECT ip, mac, game_id, timestamp, is_active, is_dismissed, detection_method FROM game_activity_logs WHERE id=?", (session_id,)
                 ).fetchone()
-            if srow:
-                if not raw_ip:
-                    raw_ip = str(srow["ip"] or "")
-                if not raw_game_id:
-                    raw_game_id = str(srow["game_id"] or "")
+            if srow is None:
+                raise ValueError("Game activity session not found")
+            hint_type = _game_hint_type(srow["detection_method"])
+            if hint_type:
+                evidence = {"port": "An open port", "dns_cache": "Cached DNS", "capture_file": "An imported capture"}
+                raise ValueError(f"{evidence[hint_type]} does not qualify for game-session controls.")
+            if (raw_ip and raw_ip != srow["ip"]) or (raw_game_id and raw_game_id != srow["game_id"]):
+                raise ValueError("The selected game session belongs to a different device or game")
+            if router_only:
+                cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.get_gaming_policy()["staleSessionSeconds"])
+                if not srow["is_active"] or srow["is_dismissed"] or srow["timestamp"] <= cutoff.isoformat().replace("+00:00", "Z"):
+                    raise ValueError("The game detection has expired. Select a current detection.")
+            raw_ip = srow["ip"]
+            raw_game_id = srow["game_id"]
+
+        if raw_game_id in MONITOR_ONLY_IDS:
+            signal = self._match_game_signature(game_id=raw_game_id)
+            name = signal["name"] if signal else "This activity"
+            raise ValueError(f"{name} detections are for monitoring only")
 
         if scope == "network_game":
             ip = "*"
@@ -1950,56 +2525,79 @@ class GameDetectorMixin:
             mac = ctx["mac"]
             router_ip = ctx.get("routerIp", "")
             device_name = ctx["deviceName"]
+            if srow and srow["mac"] and mac and srow["mac"] != mac:
+                raise ValueError("The device address changed. Select a current game session.")
+            if router_only:
+                if srow is None:
+                    raise ValueError("Select a current game detection before applying a device control")
+                self._validate_device_control_target(ip, mac, srow["mac"])
+                return self._apply_manual_game_control(payload, ip, mac, device_name, scope)
 
         if scope in {"device_all_games", "device_wifi_cut", "device_throttle"} or raw_game_id == "*":
-            sig = self._match_game_signature(game_id=raw_game_id) if raw_game_id and raw_game_id != "*" else None
             game_id = "*"
             if scope == "device_throttle":
                 cut_wifi = False
-                game_name = (
-                    f"Unplayable Rate (1 KB/s + Lag) — {sig['name']}"
-                    if sig is not None
-                    else "Unplayable Internet Rate (1 KB/s + Lag)"
-                )
-                game_ports: tuple[int, ...] = tuple(dict.fromkeys([*SCAN_GAME_PORTS, 80, 443, 8443, 3074, 3478]))
+                game_name = "Device bandwidth limit (1 KB/s)"
             elif scope == "device_wifi_cut":
                 cut_wifi = True
+                sig = self._match_game_signature(game_id=raw_game_id)
                 game_name = (
                     f"{sig['name']} + User Wi-Fi Cut Off"
                     if sig is not None
                     else "All Games + User Wi-Fi Cut Off"
                 )
-                game_ports = SCAN_GAME_PORTS
             else:
                 game_name = "All Games + User Wi-Fi" if cut_wifi else "All Mobile & Online Games"
-                game_ports = SCAN_GAME_PORTS
         else:
             sig = self._match_game_signature(game_id=raw_game_id)
             if sig is None:
                 raise ValueError("Select a valid game or block scope")
             game_id = sig["id"]
             game_name = sig["name"]
-            game_ports = tuple(sig.get("ports") or ())
 
+        router_applied: list[str] = []
         now = utc_now()
         with self._connect() as db:
             existing = db.execute(
-                "SELECT id FROM game_block_rules WHERE ip=? AND game_id=? AND active=1",
-                (ip, game_id),
+                """SELECT id, mac, throttle_routers FROM game_block_rules
+                   WHERE ip=? AND game_id=? AND active=1 AND control_plan IS NULL AND (scope='device_throttle')=?""",
+                (ip, game_id, scope == "device_throttle"),
             ).fetchone()
+            if scope == "device_throttle":
+                if existing and existing["throttle_routers"]:
+                    if existing["mac"] != mac:
+                        raise ValueError("Restore the previous device limit before applying a new one to this IP.")
+                    router_applied = json.loads(existing["throttle_routers"])
+                else:
+                    router_applied = self._enforce_router_client_block(
+                        ip, mac, device_name, router_ip, block=True, mode="throttle"
+                    )
+                if not router_applied:
+                    hint = (
+                        "The device needs a known MAC address. Refresh the LAN inventory and try again."
+                        if not mac else
+                        "The router did not confirm the bandwidth limit. Sign in under Router Settings and check that the router supports per-device bandwidth limits."
+                    )
+                    return {
+                        "success": False,
+                        "scope": scope,
+                        "routerEnforced": [],
+                        "enforcementDetails": {"requiresSetup": True, "setupHint": hint, "layers": []},
+                    }
+            throttle_routers = json.dumps(router_applied) if scope == "device_throttle" else None
             if existing:
                 rule_id = existing["id"]
                 db.execute(
-                    "UPDATE game_block_rules SET created_at=?, mac=?, device_name=?, game_name=?, scope=?, cut_wifi=? WHERE id=?",
-                    (now, mac, device_name, game_name, scope, 1 if cut_wifi else 0, rule_id),
+                    "UPDATE game_block_rules SET created_at=?, mac=?, device_name=?, game_name=?, scope=?, cut_wifi=?, throttle_routers=? WHERE id=?",
+                    (now, mac, device_name, game_name, scope, 1 if cut_wifi else 0, throttle_routers, rule_id),
                 )
             else:
                 rule_id = f"gblk-{uuid.uuid4().hex[:10]}"
                 db.execute(
                     """INSERT INTO game_block_rules
-                       (id, created_at, ip, mac, device_name, game_id, game_name, scope, cut_wifi, active)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-                    (rule_id, now, ip, mac, device_name, game_id, game_name, scope, 1 if cut_wifi else 0),
+                       (id, created_at, ip, mac, device_name, game_id, game_name, scope, cut_wifi, throttle_routers, active)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                    (rule_id, now, ip, mac, device_name, game_id, game_name, scope, 1 if cut_wifi else 0, throttle_routers),
                 )
 
             if ip == "*":
@@ -2038,25 +2636,7 @@ class GameDetectorMixin:
             ]
             self.save_config()
 
-        # Best-effort TCP RST burst across game + client ports to drop active sockets
-        if ip != "*" and not getattr(self, "_skip_live_probe_in_test", False):
-            linger = struct.pack("ii", 1, 0)
-            burst_ports = list(dict.fromkeys([*game_ports, *SCAN_GAME_PORTS]))
-            for p in burst_ports[:14]:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rsock:
-                        rsock.settimeout(0.06)
-                        rsock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
-                        rsock.connect((ip, int(p)))
-                except OSError:
-                    pass
-
-        router_applied: list[str] = []
-        if scope == "device_throttle":
-            router_applied = self._enforce_router_client_block(
-                ip, mac, device_name, router_ip, block=True, mode="throttle"
-            )
-        elif cut_wifi or scope in {"device_all_games", "device_wifi_cut"}:
+        if not router_only and (cut_wifi or scope in {"device_all_games", "device_wifi_cut"}):
             router_applied = self._enforce_router_client_block(
                 ip, mac, device_name, router_ip, block=True, mode="cut"
             )
@@ -2068,7 +2648,7 @@ class GameDetectorMixin:
         local_dhcp_has_host = str(sensor_status.get("dnsHost") or "") in (
             sensor_status.get("localDhcpDnsServers") or []
         )
-        dns_active_for_target = bool(client_in_dns or local_dhcp_has_host or dns_ready)
+        dns_active_for_target = not router_only and bool(client_in_dns or local_dhcp_has_host or dns_ready)
         enforced_layers: list[str] = []
         if router_applied:
             enforced_layers.append(
@@ -2076,16 +2656,8 @@ class GameDetectorMixin:
                 if scope == "device_throttle"
                 else f"Router MAC Kick ({', '.join(router_applied)})"
             )
-        if client_in_dns or local_dhcp_has_host:
-            enforced_layers.append(
-                "DNS Bandwidth Lag + Game Sinkhole"
-                if scope == "device_throttle"
-                else "DNS 0.0.0.0 Sinkhole"
-            )
-        if is_host_ip:
-            enforced_layers.append("Host Socket Reset & Process Stop")
-        elif ip != "*":
-            enforced_layers.append("LAN Socket RST Disruption")
+        if not router_only and scope != "device_throttle" and (client_in_dns or local_dhcp_has_host):
+            enforced_layers.append("DNS 0.0.0.0 Sinkhole")
 
         requires_setup = bool(
             ip != "*"
@@ -2101,7 +2673,7 @@ class GameDetectorMixin:
             setup_hint = (
                 f"Block rule saved for {ip}, but router QoS admin login is not connected and {ip} is currently "
                 f"using external DHCP DNS ({', '.join(sensor_status.get('localDhcpDnsServers') or ['1.1.1.1'])}). "
-                f"Sign into Router Settings ({r_ip}) or set router DHCP DNS to {h_ip} to drop {ip}'s connection to unplayable speed."
+                f"Sign into Router Settings ({r_ip}) for router access control, or set router DHCP DNS to {h_ip} for DNS filtering."
             )
 
         enforcement_details = {
@@ -2122,10 +2694,8 @@ class GameDetectorMixin:
                 if scope == "device_throttle"
                 else f" Router MAC kick applied on {', '.join(router_applied)}."
             )
-        elif scope == "device_throttle":
-            router_note = " Enforced via unplayable 2.4s DNS lag/drop + game sinkhole & active socket RST."
         else:
-            router_note = " Enforced via per-device DNS 0.0.0.0 sinkhole & active socket reset."
+            router_note = " DNS filtering applies when the device uses the monitor for DNS."
 
         auto_prevented = bool(payload.get("autoPrevented"))
         action_prefix = "🛡️ Auto-Prevented" if auto_prevented else ("🐌 Throttled" if scope == "device_throttle" else "🛑 Blocked")
@@ -2168,35 +2738,49 @@ class GameDetectorMixin:
         }
 
     def unblock_game_rule(self, rule_id: str) -> dict:
+        with self._game_restriction_lock:
+            return self._unblock_game_rule(rule_id)
+
+    def _unblock_game_rule(self, rule_id: str) -> dict:
+        self = cast("Monitor", self)
         rid = str(rule_id or "").strip()
         if not rid:
             raise ValueError("Block rule id is required")
+        with self._connect() as db:
+            manual = db.execute("SELECT * FROM game_block_rules WHERE id=? AND control_plan IS NOT NULL", (rid,)).fetchone()
+        if manual is not None:
+            return self._restore_manual_game_control(dict(manual))
         with self._connect() as db:
             row = db.execute("SELECT * FROM game_block_rules WHERE id=?", (rid,)).fetchone()
             if row is None:
                 raise ValueError("Game block rule not found")
             rule = dict(row)
+            throttle = rule["scope"] == "device_throttle"
+            if throttle or rule["cut_routers"]:
+                router_records = rule["throttle_routers"] if throttle else rule["cut_routers"]
+                targets = json.loads(router_records) if router_records else None
+                restored = self._enforce_router_client_block(
+                    rule["ip"], rule["mac"], rule["device_name"], "",
+                    block=False, mode="throttle" if throttle else "cut", router_targets=targets,
+                )
+                if targets and not set(targets).issubset(restored):
+                    return {
+                        "success": False,
+                        "error": "The router did not confirm removal of the device restriction. Check Router Settings and retry.",
+                    }
             db.execute("DELETE FROM game_block_rules WHERE id=?", (rid,))
-            if rule["ip"] == "*":
-                db.execute(
-                    "UPDATE game_activity_logs SET is_blocked=0 WHERE game_id=?",
-                    (rule["game_id"],),
-                )
-            elif rule["game_id"] == "*":
-                db.execute(
-                    "UPDATE game_activity_logs SET is_blocked=0 WHERE ip=?",
-                    (rule["ip"],),
-                )
-            else:
-                db.execute(
-                    "UPDATE game_activity_logs SET is_blocked=0 WHERE ip=? AND game_id=?",
-                    (rule["ip"], rule["game_id"]),
-                )
+            db.execute(
+                """UPDATE game_activity_logs AS log SET is_blocked=EXISTS (
+                       SELECT 1 FROM game_block_rules AS rule WHERE rule.active=1 AND rule.control_plan IS NULL
+                       AND rule.ip IN (log.ip, '*') AND rule.game_id IN (log.game_id, '*')
+                   ) WHERE ? IN (log.ip, '*') AND ? IN (log.game_id, '*')""",
+                (rule["ip"], rule["game_id"]),
+            )
 
-        unblock_mode = "throttle" if str(rule.get("scope") or "") == "device_throttle" else "cut"
-        self._enforce_router_client_block(
-            rule["ip"], rule.get("mac") or "", rule["device_name"], "", block=False, mode=unblock_mode
-        )
+        if not rule["cut_routers"] and (rule["cut_wifi"] or rule["scope"] in {"device_all_games", "device_wifi_cut"}):
+            self._enforce_router_client_block(
+                rule["ip"], rule.get("mac") or "", rule["device_name"], "", block=False
+            )
         self._record_event(
             "GAME_UNBLOCKED",
             "INFO",
@@ -2298,7 +2882,7 @@ class GameDetectorMixin:
                 while pending and time.monotonic() < deadline:
                     wait_t = max(0.01, deadline - time.monotonic())
                     for key, _events in sel.select(timeout=wait_t):
-                        sock = key.fileobj
+                        sock = cast(socket.socket, key.fileobj)
                         ip, port = key.data
                         sel.unregister(sock)
                         pending.pop(sock, None)
@@ -2325,13 +2909,14 @@ class GameDetectorMixin:
 
     def _sync_topology_arp_and_clients(self) -> int:
         """Harvest fresh live ARP neighbors and authenticated router DHCP/client lists across topology."""
+        self = cast("Monitor", self)
         if getattr(self, "_skip_live_probe_in_test", False):
             return 0
         synced = 0
         # 1. Fast ARP table refresh across all connected subnets
         if hasattr(self, "_read_arp_entries"):
             try:
-                arp_entries = self._read_arp_entries(os, subprocess)
+                arp_entries = self._read_arp_entries(os.name, subprocess.run)
                 local_nets = self._known_local_networks() if hasattr(self, "_known_local_networks") else []
                 with self._connect() as db:
                     known_macs = {
@@ -2417,37 +3002,13 @@ class GameDetectorMixin:
         return routers_polled
 
     def _collect_local_os_game_signals(self) -> list[dict]:
-        """Inspect host OS processes, netstat sockets, and non-passive DNS cache on Windows."""
+        """Inspect running host processes and established network connections on Windows."""
         if sys.platform != "win32" or getattr(self, "_skip_live_probe_in_test", False):
             return []
         flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
         host_ip = self._detect_host_lan_ip(self.HOST_DNS_IP)
-        found: list[dict] = []
-        seen_games: set[str] = set()
-
-        # 1. Running Windows game / Android emulator processes
-        try:
-            res = subprocess.run(
-                ["tasklist", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=2.5, creationflags=flags,
-            )
-            if res.returncode == 0:
-                for row in csv.reader(res.stdout.splitlines()):
-                    pname = str(row[0] or "").strip() if row else ""
-                    if not pname:
-                        continue
-                    sig = self._match_game_signature(process=pname)
-                    if sig and sig["id"] not in seen_games:
-                        seen_games.add(sig["id"])
-                        found.append({
-                            "ip": host_ip,
-                            "gameId": sig["id"],
-                            "process": pname,
-                            "matchedIndicator": f"Process {pname}",
-                            "detectionMethod": "Topology Host Process Scan",
-                        })
-        except Exception:
-            pass
+        found = list(host_game_processes(host_ip, list_windows_processes() or []).values())
+        seen_games = {hit["gameId"] for hit in found}
 
         # 2. Active outbound / inbound TCP sockets against dedicated game server ports
         try:
@@ -2497,35 +3058,11 @@ class GameDetectorMixin:
         except Exception:
             pass
 
-        # 3. Live non-expired Windows DNS client cache entries (excludes passive Steam/Riot CDN)
-        try:
-            res = subprocess.run(
-                ["ipconfig", "/displaydns"],
-                capture_output=True, text=True, timeout=2.5, creationflags=flags,
-            )
-            if res.returncode == 0:
-                for line in res.stdout.splitlines():
-                    if ":" not in line:
-                        continue
-                    cand = line.split(":", 1)[1].strip().lower().rstrip(".")
-                    if not cand or "." not in cand or cand in _PASSIVE_DNS_CACHE_EXCLUDE:
-                        continue
-                    sig = self._match_game_signature(domain=cand)
-                    if sig and sig["id"] not in seen_games:
-                        seen_games.add(sig["id"])
-                        found.append({
-                            "ip": host_ip,
-                            "gameId": sig["id"],
-                            "domain": cand,
-                            "detectionMethod": "Topology Host DNS Cache Scan",
-                        })
-        except Exception:
-            pass
-
         return found
 
     def scan_lan_for_games(self, include_topology_refresh: bool = False) -> dict:
         """Scan the whole network topology (routers, APs, topology nodes, host OS & all LAN clients) for open games."""
+        self = cast("Monitor", self)
         infra_types = {"router", "gateway", "ap", "switch", "firewall", "cloud"}
         mon_devices = self.get_devices()
         infra_ips = {
@@ -2541,7 +3078,14 @@ class GameDetectorMixin:
         detections: list[dict] = []
 
         confirmed_hits = 0
+        open_port_hits = 0
         if include_topology_refresh:
+            if not getattr(self, "_skip_live_probe_in_test", False):
+                try:
+                    self.discover_devices()
+                except RuntimeError:
+                    # Discovery already running. Use topology and DHCP records for this pass.
+                    pass
             routers_polled = self._sync_topology_arp_and_clients()
             self.poll_router_logs_for_games()
             for sig_payload in self._collect_local_os_game_signals():
@@ -2556,7 +3100,7 @@ class GameDetectorMixin:
 
         with self._connect() as db:
             inv_rows = db.execute(
-                "SELECT DISTINCT ip, vendor, suggested_name FROM discovered_devices WHERE is_online=1 ORDER BY ip LIMIT 1024"
+                "SELECT DISTINCT ip, vendor, suggested_name FROM discovered_devices WHERE is_online=1 ORDER BY ip"
             ).fetchall()
             topo_nodes = [dict(r) for r in db.execute("SELECT * FROM topology_nodes").fetchall()]
 
@@ -2573,13 +3117,12 @@ class GameDetectorMixin:
         seen_client_ips: set[str] = set()
 
         def _push_target(raw_ip: str, label_hint: str = "") -> None:
-            ip = str(raw_ip or "").strip()
-            if (
-                not ip
-                or ip in seen_client_ips
-                or ip in infra_ips
-                or ip.startswith(("172.27.", "127."))
-            ):
+            try:
+                ip = validate_ip(str(raw_ip or "").strip())
+                address = ipaddress.ip_address(ip)
+            except ValueError:
+                return
+            if ip in seen_client_ips or ip in infra_ips or address.version != 4 or address.is_loopback:
                 return
             low = label_hint.lower()
             if low and any(tok in low for tok in _NON_GAMING_TOKENS):
@@ -2616,26 +3159,18 @@ class GameDetectorMixin:
             else:
                 hits = self._batch_scan_ports_nonblocking(client_ips, SCAN_GAME_PORTS, timeout_sec=0.14)
 
-            for ip_key, open_port in hits.items():
-                confirmed_hits += 1
-                res = self.record_game_detection({
-                    "ip": ip_key,
-                    "port": open_port,
-                    "skipAutoPrevent": True,
-                    "detectionMethod": "Whole-Topology Port Scan" if include_topology_refresh else "Active Game Port Scan",
-                })
-                if res.get("detection"):
-                    detections.append(res["detection"])
+            open_port_hits = len(hits)
 
         activity = self.get_game_activity(100)
         if include_topology_refresh:
             self._record_event(
                 "GAME_TOPOLOGY_SCAN",
                 "INFO",
-                "🔍 Whole-Topology Game Scan Completed",
+                "Game scan completed",
                 (
-                    f"Scanned {topology_hubs} topology router/AP hub(s) ({len(topo_nodes)} map node(s)) and "
-                    f"{len(client_ips)} connected device(s) across all subnets — {confirmed_hits} open game hit(s), {len(detections)} newly logged."
+                    f"Checked game-related ports on {len(client_ips)} candidate device(s). "
+                    f"Attempted client-list reads on {routers_polled} router(s). "
+                    f"Local game signals: {confirmed_hits}. Open-port hints: {open_port_hits}."
                 ),
                 device_name="Pulse Topology Game Scanner",
             )
@@ -2648,6 +3183,7 @@ class GameDetectorMixin:
             "routersPolled": routers_polled,
             "scannedDevices": len(client_ips),
             "confirmedHits": confirmed_hits,
+            "openPortHits": open_port_hits,
             "detectedCount": len(detections),
             "activeCount": int((activity.get("summary") or {}).get("activeCount") or 0),
             "blockedCount": len(activity.get("blocks") or []),
@@ -2656,17 +3192,23 @@ class GameDetectorMixin:
         }
 
     def dismiss_game_session(self, session_id: str) -> dict:
+        self = cast("Monitor", self)
         sid = str(session_id or "").strip()
         if not sid:
             raise ValueError("Game session id is required")
         with self._connect() as db:
             row = db.execute(
-                "SELECT ip, game_id FROM game_activity_logs WHERE id=?", (sid,)
+                "SELECT ip, game_id, player FROM game_activity_logs WHERE id=?", (sid,)
             ).fetchone()
             if row is None:
                 raise ValueError("Game activity session not found")
-            db.execute("UPDATE game_activity_logs SET is_active=0 WHERE id=?", (sid,))
-        alert_key = f"game-{row['ip']}-{row['game_id']}"
+            changed = db.execute(
+                "UPDATE game_activity_logs SET is_dismissed=1 WHERE id=? AND is_active=1 AND is_dismissed=0",
+                (sid,),
+            ).rowcount
+        if not changed:
+            return {"success": True, "gameActivity": self.get_game_activity(100)}
+        alert_key = self._game_alert_key(row["ip"], row["game_id"], row["player"])
         with self.lock:
             self.active_alerts.pop(alert_key, None)
             self.config["alerts"] = [
@@ -2678,6 +3220,7 @@ class GameDetectorMixin:
         return {"success": True, "gameActivity": activity}
 
     def clear_game_activity(self) -> dict:
+        self = cast("Monitor", self)
         with self._connect() as db:
             removed = int(db.execute("SELECT COUNT(*) FROM game_activity_logs").fetchone()[0] or 0)
             db.execute("DELETE FROM game_activity_logs")
@@ -2714,6 +3257,7 @@ class GameDetectorMixin:
 
     def _is_real_lan_client_ip(self, candidate_ip: str) -> bool:
         """Accept only non-loopback, non-Docker-NAT private LAN IPs matching our monitored LAN ranges."""
+        self = cast("Monitor", self)
         try:
             ip_obj = ipaddress.ip_address(candidate_ip)
         except ValueError:
@@ -2723,22 +3267,42 @@ class GameDetectorMixin:
         local_nets = self._known_local_networks() if hasattr(self, "_known_local_networks") else []
         if local_nets:
             return any(ip_obj in net for net in local_nets)
-        return not str(ip_obj).startswith("172.")
+        return not (ip_obj.is_link_local or ip_obj.is_unspecified or ip_obj.is_reserved)
+
+    @staticmethod
+    def _syslog_game_client_ip(text: str, sender_ip: str) -> str:
+        # DNS and firewall logs carry the client separately from the reporting router.
+        match = re.search(
+            r'\b(?:src|src_ip|source_ip|client|client_ip|clientip|from)["\s:=]+((?:\d{1,3}\.){3}\d{1,3})\b',
+            text, re.I,
+        )
+        if not match or match.group(1) == sender_ip:
+            return ""
+        try:
+            address = ipaddress.ip_address(match.group(1))
+        except ValueError:
+            return ""
+        if address.is_private and not (address.is_loopback or address.is_unspecified or address.is_link_local):
+            return str(address)
+        return ""
 
     def start_game_listeners(self) -> None:
         """Start container UDP DNS listener (5354) and Router Syslog listener (5140)."""
         if getattr(self, "_game_listeners_started", False):
             return
         self._game_listeners_started = True
-        threading.Thread(
-            target=self._dns_game_listener_loop, daemon=True, name="game-dns-listener"
-        ).start()
+        if os.environ.get("PULSE_ENABLE_DNS_FORWARDING") == "1":
+            threading.Thread(
+                target=self._dns_game_listener_loop, daemon=True, name="game-dns-listener"
+            ).start()
         threading.Thread(
             target=self._syslog_game_listener_loop, daemon=True, name="game-syslog-listener"
         ).start()
 
     def _dns_game_listener_loop(self) -> None:
+        self = cast("Monitor", self)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        worker_slots = threading.BoundedSemaphore(32)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", self.DNS_LISTENER_PORT))
@@ -2748,8 +3312,11 @@ class GameDetectorMixin:
             return
 
         def _handle_dns_packet(raw: bytes, client_addr: tuple[str, int]) -> None:
+            if len(raw) < 12 or raw[2] & 0x80:
+                return
             qname = self._extract_dns_qname(raw)
-            if qname and self._is_doh_canary_domain(qname):
+            policy = self.get_gaming_policy()
+            if policy["restrictionsEnabled"] and qname and self._is_doh_canary_domain(qname):
                 nxd = self._build_dns_nxdomain_reply(raw)
                 if nxd:
                     try:
@@ -2758,13 +3325,13 @@ class GameDetectorMixin:
                         pass
                 return
             sig = self._match_game_signature(domain=qname) if qname else None
-            policy = self.get_gaming_policy()
             sinkhole_rule = (
                 self._should_sinkhole_query(client_addr[0], qname, sig, self.get_game_blocks())
-                if qname
+                if qname and policy["restrictionsEnabled"]
                 else None
             )
-            if sinkhole_rule is not None or (sig and policy["autoPreventEnabled"]):
+            auto_prevent = sig and sig["id"] not in MONITOR_ONLY_IDS and policy["autoPreventEnabled"]
+            if sinkhole_rule is not None or auto_prevent:
                 sink = self._build_dns_sinkhole_reply(raw)
                 if sink:
                     try:
@@ -2793,19 +3360,29 @@ class GameDetectorMixin:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as fwd:
                     fwd.settimeout(1.5)
-                    fwd.sendto(raw, ("1.1.1.1", 53))
-                    resp, _ = fwd.recvfrom(4096)
-                sock.sendto(resp, client_addr)
+                    fwd.connect(("1.1.1.1", 53))
+                    fwd.send(raw)
+                    resp = fwd.recv(4096)
+                if len(resp) >= 12 and resp[:2] == raw[:2] and resp[2] & 0x80:
+                    sock.sendto(resp, client_addr)
             except OSError:
                 pass
+
+        def _run_dns_worker(raw: bytes, client_addr: tuple[str, int]) -> None:
+            try:
+                _handle_dns_packet(raw, client_addr)
+            finally:
+                worker_slots.release()
 
         try:
             while not self._stop.is_set():
                 try:
                     data, addr = sock.recvfrom(4096)
-                    threading.Thread(
-                        target=_handle_dns_packet, args=(data, addr), daemon=True
-                    ).start()
+                    if worker_slots.acquire(blocking=False):
+                        try:
+                            threading.Thread(target=_run_dns_worker, args=(data, addr), daemon=True).start()
+                        except RuntimeError:
+                            worker_slots.release()
                 except socket.timeout:
                     continue
                 except OSError:
@@ -2827,19 +3404,14 @@ class GameDetectorMixin:
         if not matched_domain and matched_port is None:
             return None
 
-        client_ip = ""
-        for cand_ip in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text):
-            if cand_ip != sender_ip and self._is_real_lan_client_ip(cand_ip):
-                client_ip = cand_ip
-                break
-        if not client_ip and sender_ip and self._is_real_lan_client_ip(sender_ip):
-            client_ip = sender_ip
-        if not client_ip:
+        client_ip = self._syslog_game_client_ip(text, sender_ip)
+        if not client_ip or not self._is_real_lan_client_ip(client_ip):
             return None
         return client_ip, matched_domain, matched_port
 
     def poll_router_logs_for_games(self) -> int:
         """Poll authenticated TP-Link LuCI system logs for game domain/port traces."""
+        self = cast("Monitor", self)
         if getattr(self, "_skip_live_probe_in_test", False):
             return 0
         configs = (
@@ -2850,10 +3422,10 @@ class GameDetectorMixin:
         authed = [c for c in configs if str(c.get("stok") or "").strip()]
         if not authed:
             return 0
-        seen = getattr(self, "_seen_router_log_lines", None)
-        if seen is None:
-            seen = set()
-            self._seen_router_log_lines = seen
+        seen_by_router = getattr(self, "_seen_router_log_lines", None)
+        if seen_by_router is None:
+            seen_by_router = {}
+            self._seen_router_log_lines = seen_by_router
         found = 0
         ctx = ssl._create_unverified_context()
         for cfg in authed:
@@ -2874,13 +3446,17 @@ class GameDetectorMixin:
             rows = payload.get("data") if isinstance(payload, dict) else None
             if not isinstance(rows, list):
                 continue
-            for item in rows[-80:]:
-                line = json.dumps(item, sort_keys=True) if isinstance(item, dict) else str(item)
+            lines = [json.dumps(item, sort_keys=True) if isinstance(item, dict) else str(item) for item in rows[-80:]]
+            router_key = (host, port)
+            seen = seen_by_router.get(router_key)
+            if seen is None:
+                seen_by_router[router_key] = set(lines)
+                continue
+            seen_by_router[router_key] = set(lines)
+            for line in lines:
                 if line in seen:
                     continue
                 seen.add(line)
-                if len(seen) > 1500:
-                    seen.clear()
                 parsed = self._parse_syslog_game_text(line, sender_ip=host)
                 if not parsed:
                     continue
@@ -2892,13 +3468,14 @@ class GameDetectorMixin:
                         "domain": matched_domain,
                         "port": matched_port,
                         "detectionMethod": f"Router Log Poll ({host})",
-                    })
+                    }, include_activity=False)
                     found += 1
                 except Exception:
                     pass
         return found
 
     def _syslog_game_listener_loop(self) -> None:
+        self = cast("Monitor", self)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

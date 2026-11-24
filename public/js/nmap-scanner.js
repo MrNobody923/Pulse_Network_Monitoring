@@ -57,9 +57,9 @@ function renderNmapDeviceChips() {
   const chips = [
     `<button type="button" class="preset-chip ${
       selectedIp === routerIp ? 'active' : ''
-    }" data-chip-ip="${esc(routerIp)}" onclick="selectNmapTargetPreset('${esc(
+    }" data-chip-ip="${esc(routerIp)}" onclick="selectNmapTargetPreset(${inlineString(
       routerIp
-    )}', 'Main Gateway Router')">🔌 Gateway (${esc(routerIp)})</button>`,
+    )}, 'Main Gateway Router')">🔌 Gateway (${esc(routerIp)})</button>`,
     `<button type="button" class="preset-chip ${
       selectedIp === '127.0.0.1' ? 'active' : ''
     }" data-chip-ip="127.0.0.1" onclick="selectNmapTargetPreset('127.0.0.1', 'Local Monitoring Host')">💻 Localhost (127.0.0.1)</button>`
@@ -71,9 +71,9 @@ function renderNmapDeviceChips() {
     chips.push(
       `<button type="button" class="preset-chip ${
         selectedIp === r.ip ? 'active' : ''
-      }" data-chip-ip="${esc(r.ip)}" onclick="selectNmapTargetPreset('${esc(r.ip)}', '${esc(
+      }" data-chip-ip="${esc(r.ip)}" onclick="selectNmapTargetPreset(${inlineString(r.ip)}, ${inlineString(
         r.name
-      )}')">${icon} ${esc(r.name)} (${esc(r.ip)})</button>`
+      )})">${icon} ${esc(r.name)} (${esc(r.ip)})</button>`
     );
   });
 
@@ -86,13 +86,13 @@ async function loadNmapCatalog() {
   try {
     const data = await apiJson('/api/tools/port-scan/catalog');
     const engineBadge = document.getElementById('nmapEngineBadge');
-    if (engineBadge) {
+    if (engineBadge && !lastNmapReport) {
       if (data.nmapAvailable) {
         engineBadge.className = 'status-pill online';
-        engineBadge.textContent = '🛡️ Nmap CLI + Banner Engine Active';
+        engineBadge.textContent = 'Nmap available';
       } else {
         engineBadge.className = 'status-pill new';
-        engineBadge.textContent = '🛡️ Parallel TCP & Banner Engine';
+        engineBadge.textContent = 'TCP connect available';
       }
     }
     if (Array.isArray(data.history)) {
@@ -103,29 +103,6 @@ async function loadNmapCatalog() {
     }
     renderNmapScanHistory();
   } catch (_) {}
-}
-
-function estimateNmapPortCount(profile, customPorts) {
-  const counts = {
-    quick_audit: 25,
-    at_risk_only: 27,
-    full_office: 46,
-    web_admin: 14,
-    database_storage: 15
-  };
-  if (profile !== 'custom') return counts[profile] || 25;
-  let total = 0;
-  for (const part of String(customPorts || '').split(',')) {
-    const tok = part.trim();
-    if (!tok) continue;
-    if (tok.includes('-')) {
-      const [a, b] = tok.split('-').map(x => parseInt(x.trim(), 10));
-      if (!Number.isNaN(a) && !Number.isNaN(b) && b >= a) total += b - a + 1;
-    } else if (!Number.isNaN(parseInt(tok, 10))) {
-      total += 1;
-    }
-  }
-  return total || 25;
 }
 
 function showNmapError(msg) {
@@ -149,14 +126,21 @@ async function runNmapPortScan(event) {
   const customInput = document.getElementById('nmapCustomPortsInput');
   const timeoutSelect = document.getElementById('nmapTimeoutSelect');
   const btn = document.getElementById('btnStartNmapScan');
+  const submit = document.getElementById('btnSubmitNmapScan');
 
-  const host = (hostInput && hostInput.value.trim()) || '192.168.0.1';
+  const host = hostInput?.value.trim();
+  if (!host) {
+    showNmapError('Enter a device IP address or hostname.');
+    hostInput?.focus();
+    return;
+  }
   const profile = (profileSelect && profileSelect.value) || 'quick_audit';
   const customPorts = (customInput && customInput.value.trim()) || '';
   const timeoutMs = parseInt((timeoutSelect && timeoutSelect.value) || '650', 10);
 
   hideNmapError();
   nmapScanInProgress = true;
+  if (submit) submit.disabled = true;
   if (btn) {
     btn.disabled = true;
     btn.textContent = '⏳ Scanning Ports...';
@@ -168,10 +152,9 @@ async function runNmapPortScan(event) {
     phase: 'starting',
     progressPct: 4,
     scannedCount: 0,
-    totalPorts: estimateNmapPortCount(profile, customPorts),
     openCount: 0,
     atRiskCount: 0,
-    message: `Initializing Nmap & TCP Banner Audit on ${host}...`
+    message: `Preparing TCP port check on ${host}...`
   });
 
   try {
@@ -191,9 +174,10 @@ async function runNmapPortScan(event) {
     showNmapError(err.message);
   } finally {
     nmapScanInProgress = false;
+    if (submit) submit.disabled = false;
     if (btn) {
       btn.disabled = false;
-      btn.textContent = '🛡️ Start Nmap Port & Risk Scan';
+      btn.textContent = '🛡️ Start Security Scan';
     }
   }
 }
@@ -276,24 +260,21 @@ function renderNmapScanReport(report, fromDirectCall = false) {
 
   const engineBadge = document.getElementById('nmapEngineBadge');
   if (engineBadge && report.engine) {
-    engineBadge.className = `status-pill ${report.nmapAvailable ? 'online' : 'new'}`;
+    engineBadge.className = `status-pill ${report.nmapResultCount ? 'online' : 'new'}`;
     engineBadge.textContent = `🛡️ ${report.engine}`;
   }
 
-  // Update Posture Grade Ring & Summary
-  const ring = document.getElementById('nmapGradeRing');
-  if (ring) {
-    ring.className = `nmap-grade-ring grade-${String(report.securityGrade || 'A').toLowerCase()}`;
-  }
-  setTxt('nmapGradeLetter', report.securityGrade || 'A');
-  setTxt('nmapGradeScore', `${report.securityScore ?? 100}/100 SCORE`);
-  setTxt('nmapPostureVerdict', report.postureVerdict || 'HARDENED');
+  setTxt('nmapPostureVerdict', report.scope ? report.postureVerdict : 'Port check results');
   setTxt('nmapPostureSummary', report.postureSummary || '');
+  const scopePorts = report.scope?.ports || (report.allPorts || []).map(p => p.port);
+  setTxt('nmapScopePorts', scopePorts.join(', '));
   const metaParts = [
     `Target: ${report.deviceLabel || report.host} (${report.ip})`,
     `Profile: ${report.profileLabel}`,
     `Engine: ${report.engine || 'TCP Auditor'}`,
-    report.osGuess ? `OS: ${report.osGuess}` : null,
+    'From this monitor over TCP/IPv4',
+    report.nmapScannedCount ? `Nmap results: ${report.nmapResultCount}/${report.nmapScannedCount}` : null,
+    report.osGuess ? `Nmap OS guess: ${report.osGuess}` : null,
     `Completed in ${report.durationMs} ms`
   ].filter(Boolean);
   setTxt('nmapScanMetaLine', metaParts.join(' · '));
@@ -313,10 +294,15 @@ function renderNmapScanReport(report, fromDirectCall = false) {
   setTxt('nmapTabCountCrit', (counts.critical || 0) + (counts.high || 0));
   setTxt('nmapTabCountMed', counts.medium ?? 0);
   setTxt('nmapTabCountClosed', counts.closed ?? 0);
+  setTxt('nmapTabCountFiltered', counts.filtered ?? 0);
+  setTxt('nmapTabCountUnconfirmed', counts.unconfirmed ?? 0);
 
   // Reset filter intelligently for each brand-new scan
   if (!isAlreadyRendered) {
-    currentNmapPortFilter = (counts.open || 0) > 0 ? 'open' : 'all';
+    currentNmapPortFilter = 'all';
+    currentNmapPortSearch = '';
+    const searchInput = document.getElementById('nmapPortSearchInput');
+    if (searchInput) searchInput.value = '';
   }
 
   renderAtRiskSpotlight(report.atRiskPorts || []);
@@ -336,9 +322,7 @@ function renderNmapScanReport(report, fromDirectCall = false) {
         ip: report.ip,
         deviceLabel: report.deviceLabel,
         profileLabel: report.profileLabel,
-        securityScore: report.securityScore,
-        securityGrade: report.securityGrade,
-        postureVerdict: report.postureVerdict,
+        totalScanned: counts.totalScanned,
         openCount: counts.open,
         atRiskCount: counts.atRisk,
         durationMs: report.durationMs
@@ -359,6 +343,22 @@ function viewSavedNmapReport(reportId) {
   }
 }
 
+function rerunSavedNmapReport(reportId) {
+  const report = nmapCatalogReports[reportId];
+  if (!report?.scope) return;
+  selectNmapTargetPreset(report.ip, report.deviceLabel);
+  document.getElementById('nmapProfileSelect').value = report.profile;
+  onNmapProfileChange(report.profile);
+  document.getElementById('nmapCustomPortsInput').value = report.scope.ports.join(', ');
+  const timeoutSelect = document.getElementById('nmapTimeoutSelect');
+  const timeout = String(report.scope.timeoutMs);
+  if (![...timeoutSelect.options].some(option => option.value === timeout)) {
+    timeoutSelect.add(new Option(`${timeout} ms`, timeout));
+  }
+  timeoutSelect.value = timeout;
+  runNmapPortScan();
+}
+
 function renderAtRiskSpotlight(atRiskPorts) {
   const section = document.getElementById('nmapAtRiskSpotlightSection');
   const grid = document.getElementById('nmapAtRiskSpotlightGrid');
@@ -371,17 +371,7 @@ function renderAtRiskSpotlight(atRiskPorts) {
   }
 
   if (!atRiskPorts.length) {
-    grid.innerHTML = `
-      <div class="friendly-tip-box" style="margin-bottom: 0; border-color: var(--status-up-border); background: var(--status-up-bg);">
-        <span style="font-size: 1.4rem;">🛡️</span>
-        <div>
-          <strong style="color: var(--status-up-text);">Zero At-Risk Ports Exposed on Target</strong>
-          <div style="font-size: 0.84rem; color: var(--text-muted); margin-top: 2px;">
-            No vulnerable cleartext protocols (Telnet, FTP), exposed databases (MySQL, Redis, MSSQL), or high-risk file/remote services (SMB 445, RDP 3389, VNC 5900) responded on this host.
-          </div>
-        </div>
-      </div>
-    `;
+    grid.innerHTML = '<p class="friendly-tip-box">This scan found no open ports flagged for review.</p>';
     return;
   }
 
@@ -392,15 +382,15 @@ function renderAtRiskSpotlight(atRiskPorts) {
         <div class="at-risk-card ${riskLower}">
           <div class="at-risk-card-head">
             <div class="at-risk-port-title">
-              <span class="mono" style="color: var(--accent-cyan);">TCP/${p.port}</span> — ${esc(p.service)}
-              <small style="display: block; font-size: 0.75rem; color: var(--text-dim); font-weight: 600;">Category: ${esc(p.category)} · Response: ${p.latencyMs != null ? `${p.latencyMs} ms` : 'Active'}</small>
+              <span class="mono" style="color: var(--accent-cyan);">TCP/${p.port}</span> — ${esc(p.observedService || p.service)}
+              <small style="display: block; font-size: 0.75rem; color: var(--text-dim); font-weight: 600;">Category: ${esc(p.category)} · Evidence: ${esc(nmapServiceEvidence(p))}</small>
             </div>
             <span class="risk-badge ${riskLower}">⚠️ ${esc(p.riskLevel)} RISK</span>
           </div>
           <div style="font-size: 0.82rem; color: var(--text-main); margin-bottom: 6px;">
-            <strong>Detected Banner / Version:</strong> <code class="mono" style="color: var(--accent-cyan);">${esc(p.banner)}</code>
+            <strong>Banner / Version:</strong> <code class="mono" style="color: var(--accent-cyan);">${esc(p.banner || "No banner received")}</code>
           </div>
-          <div class="at-risk-section-lbl">Why This Port Is At Risk</div>
+          <div class="at-risk-section-lbl">${esc(nmapReviewEvidence(p))}</div>
           <div style="font-size: 0.82rem; color: var(--text-muted);">
             ${esc(p.exposureRisk)}
           </div>
@@ -411,6 +401,18 @@ function renderAtRiskSpotlight(atRiskPorts) {
       `;
     })
     .join('');
+}
+
+function nmapServiceEvidence(port) {
+  return {
+    'nmap-probe': 'Nmap service probe',
+    banner: 'Service response',
+    'port-number': 'Port-number hint'
+  }[port.serviceSource] || 'Service evidence unavailable';
+}
+
+function nmapReviewEvidence(port) {
+  return port.reviewSource === 'nmap-probe' ? 'Review based on detected service' : 'Review based on port catalog';
 }
 
 function renderNmapPortsTable(report) {
@@ -433,8 +435,8 @@ function renderNmapPortsTable(report) {
     );
   } else if (currentNmapPortFilter === 'medium') {
     rows = allPorts.filter(p => p.open && p.riskLevel === 'MEDIUM');
-  } else if (currentNmapPortFilter === 'closed') {
-    rows = allPorts.filter(p => !p.open);
+  } else if (['closed', 'filtered', 'unconfirmed'].includes(currentNmapPortFilter)) {
+    rows = allPorts.filter(p => p.state === currentNmapPortFilter);
   }
 
   if (currentNmapPortSearch) {
@@ -442,6 +444,8 @@ function renderNmapPortsTable(report) {
       p =>
         String(p.port).includes(currentNmapPortSearch) ||
         p.service.toLowerCase().includes(currentNmapPortSearch) ||
+        (p.observedService && p.observedService.toLowerCase().includes(currentNmapPortSearch)) ||
+        (p.reason && p.reason.toLowerCase().includes(currentNmapPortSearch)) ||
         p.category.toLowerCase().includes(currentNmapPortSearch) ||
         p.riskLevel.toLowerCase().includes(currentNmapPortSearch) ||
         (p.state && p.state.toLowerCase().includes(currentNmapPortSearch)) ||
@@ -454,7 +458,7 @@ function renderNmapPortsTable(report) {
     tbody.innerHTML = `
       <tr>
         <td colspan="7" style="text-align: center; padding: 26px; color: var(--text-dim);">
-          No ports match the current filter (<strong>${esc(currentNmapPortFilter.toUpperCase())}</strong>). Click <strong>"All Scanned Ports"</strong> to inspect closed/filtered ports.
+          No ports match the current filter (<strong>${esc(currentNmapPortFilter.toUpperCase())}</strong>). Click <strong>"All Scanned Ports"</strong> to inspect every result.
         </td>
       </tr>
     `;
@@ -463,24 +467,15 @@ function renderNmapPortsTable(report) {
 
   tbody.innerHTML = rows
     .map(p => {
-      const isFiltered = !p.open && String(p.state || '').includes('filtered');
-      const stateBadge = p.open
-        ? `<span class="status-pill online" style="font-size:0.65rem; padding:2px 7px;">● OPEN</span>`
-        : isFiltered
-        ? `<span class="status-pill warning" style="font-size:0.65rem; padding:2px 7px;">◈ FILTERED</span>`
-        : `<span class="status-pill" style="background:rgba(148,163,184,0.12); color:var(--text-dim); font-size:0.65rem; padding:2px 7px;">CLOSED</span>`;
-
-      const riskLower = p.open ? String(p.riskLevel || 'LOW').toLowerCase() : isFiltered ? 'filtered' : 'none';
-      const riskLabel = p.open
-        ? `${p.atRisk ? '⚠️ ' : '✓ '}${p.riskLevel} RISK`
-        : isFiltered
-        ? 'FIREWALL DROP'
-        : `SAFE · ${p.riskLevel} IF OPEN`;
-
-      const latLine =
-        p.latencyMs != null
-          ? `<div class="dev-row-sub mono" style="margin-top:3px;">${p.latencyMs} ms</div>`
-          : `<div class="dev-row-sub" style="margin-top:3px;">${esc(p.reason || '—')}</div>`;
+      const state = p.state || 'unconfirmed';
+      const stateStyle = state === 'open' ? 'online' : state === 'closed' ? '' : 'warning';
+      const stateBadge = `<span class="status-pill ${stateStyle}" style="font-size:0.65rem; padding:2px 7px;">${esc(state.toUpperCase())}</span>`;
+      const riskLower = String(p.riskLevel || 'LOW').toLowerCase();
+      const riskBadge = p.open
+        ? `<span class="risk-badge ${riskLower}" style="font-size:0.64rem; padding:2px 7px;">${esc(p.riskLevel)} REVIEW</span>`
+        : '';
+      const latency = p.latencyMs != null ? ` · ${p.latencyMs} ms` : '';
+      const evidenceLine = `<div class="dev-row-sub" style="margin-top:3px;">${esc((p.reason || '').replaceAll('-', ' '))}${latency}</div>`;
 
       const cpeLine = p.cpe
         ? `<div class="dev-row-sub mono" style="margin-top:2px; font-size:0.68rem;">${esc(p.cpe)}</div>`
@@ -492,28 +487,27 @@ function renderNmapPortsTable(report) {
             <div class="mono" style="font-weight: 700; color: var(--accent-cyan);">
               ${p.port}<span style="color: var(--text-dim); font-weight: 400;">/${esc(p.protocol)}</span>
             </div>
-            ${latLine}
+            ${evidenceLine}
           </td>
           <td>
             <div>${stateBadge}</div>
-            <div style="margin-top:4px;"><span class="risk-badge ${riskLower}" style="font-size:0.64rem; padding:2px 7px;">${esc(riskLabel)}</span></div>
+            <div style="margin-top:4px;">${riskBadge}</div>
           </td>
           <td>
-            <span class="dev-row-title">${esc(p.service)}</span>
-            <span class="dev-row-sub">${esc(p.category)}</span>
+            <span class="dev-row-title">${p.open ? esc(p.observedService || p.service) : '—'}</span>
+            ${p.open ? `<span class="dev-row-sub">${esc(nmapServiceEvidence(p))}</span>` : ''}
           </td>
           <td class="mono" style="font-size: 0.74rem; color: var(--text-muted);">
-            ${esc(p.banner)}${cpeLine}
+            ${p.open ? esc(p.banner || "No banner received") : "—"}${cpeLine}
           </td>
           <td style="font-size: 0.76rem; color: var(--text-muted);">
-            <strong style="color:var(--text-main);">${esc(p.summary)}</strong>
-            <div style="margin-top:2px;">${esc(p.exposureRisk)}</div>
+            ${p.open ? `<strong>${esc(nmapReviewEvidence(p))}</strong><div>${esc(p.exposureRisk)}</div>` : "—"}
           </td>
           <td style="font-size: 0.76rem; color: var(--text-main);">
-            ${esc(p.remediation)}
+            ${p.open ? esc(p.remediation) : "—"}
           </td>
           <td style="text-align: right;">
-            <button type="button" class="btn btn-secondary btn-xs" onclick="retestSinglePortFromTable('${esc(report.ip)}', ${p.port})">
+            <button type="button" class="btn btn-secondary btn-xs" onclick="retestSinglePortFromTable(${inlineString(report.ip)}, ${p.port})">
               Test
             </button>
           </td>
@@ -536,9 +530,13 @@ async function retestSinglePortFromTable(host, port) {
 async function runDeepSinglePortTest(event) {
   if (event) event.preventDefault();
   const host = document.getElementById('singlePortHostInput').value.trim();
-  const port = parseInt(document.getElementById('singlePortNumInput').value, 10) || 80;
+  const port = Number(document.getElementById('singlePortNumInput').value);
   const out = document.getElementById('singlePortTestResultArea');
   if (!out) return;
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    out.textContent = 'Enter a host and a TCP port from 1 to 65535.';
+    return;
+  }
 
   out.innerHTML = `<div class="tool-empty-state" style="padding: 18px;"><div class="spinner-ring"></div><p>Probing TCP/${port} on ${esc(host)} and inspecting service banner...</p></div>`;
   try {
@@ -553,36 +551,22 @@ async function runDeepSinglePortTest(event) {
     };">
         <div class="at-risk-card-head">
           <div>
-            <span class="status-pill ${res.open ? 'online' : 'offline'}">
-              ${res.open ? '● PORT OPEN & LISTENING' : '○ PORT CLOSED / FILTERED'}
+            <span class="status-pill ${res.open ? 'online' : res.state === 'closed' ? '' : 'warning'}">
+              ${esc(String(res.state || 'unconfirmed').toUpperCase())}
             </span>
             <strong class="mono" style="font-size: 1rem; margin-left: 8px; color: var(--accent-cyan);">
-              ${esc(res.host)}:${res.port} (${esc(res.service || `TCP/${res.port}`)})
+              ${esc(res.ip || res.host)}:${res.port}
             </strong>
           </div>
-          <span class="risk-badge ${res.open ? riskLower : 'none'}">
-            ${res.open ? `${esc(res.riskLevel)} RISK` : `CLOSED (${esc(res.riskLevel)} IF OPEN)`}
-          </span>
+          ${res.open ? `<span class="risk-badge ${riskLower}">${esc(res.riskLevel)} REVIEW</span>` : ''}
         </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 8px; font-size: 0.83rem;">
-          <div>
-            <span style="color: var(--text-dim);">Handshake Latency:</span>
-            <strong class="mono">${res.latencyMs != null ? `${res.latencyMs} ms` : 'Timed out / Refused'}</strong>
-          </div>
-          <div>
-            <span style="color: var(--text-dim);">Category:</span>
-            <strong>${esc(res.category || 'Custom Service')}</strong>
-          </div>
-          <div>
-            <span style="color: var(--text-dim);">Service Banner:</span>
-            <code class="mono" style="color: var(--accent-cyan);">${esc(res.banner || res.error || 'None')}</code>
-          </div>
-        </div>
-        <div class="at-risk-section-lbl" style="margin-top: 10px;">Security &amp; Risk Analysis</div>
-        <div style="font-size: 0.83rem; color: var(--text-muted);">${esc(res.exposureRisk || '')}</div>
-        <div class="at-risk-remediation">
-          <strong>🛡️ How to Fix:</strong> ${esc(res.remediation || '')}
-        </div>
+        ${res.open ? `
+          <p>${res.latencyMs == null ? 'Nmap confirmed the port is open.' : `TCP handshake: <strong>${res.latencyMs} ms</strong>`}</p>
+          <p>${esc(nmapServiceEvidence(res))}: <strong>${esc(res.observedService || res.service)}</strong></p>
+          <p>Banner: <code class="mono">${esc(res.banner || 'No banner received')}</code></p>
+          <p><strong>${esc(nmapReviewEvidence(res))}</strong> ${esc(res.exposureRisk)}</p>
+          <div class="at-risk-remediation">${esc(res.remediation)}</div>
+        ` : `<p>${esc(res.error || 'The monitor could not confirm the port state.')}</p>`}
       </div>
     `;
   } catch (err) {
@@ -590,19 +574,27 @@ async function runDeepSinglePortTest(event) {
   }
 }
 
-function copyNmapTranscript() {
+async function copyNmapTranscript() {
   const pre = document.getElementById('nmapTranscriptPre');
-  if (!pre || !pre.textContent) return;
-  navigator.clipboard.writeText(pre.textContent).then(() => {
-    const btn = document.getElementById('btnCopyNmapTranscript');
-    if (btn) {
-      const prev = btn.textContent;
-      btn.textContent = '✓ Copied CLI Output';
-      setTimeout(() => {
-        btn.textContent = prev;
-      }, 1800);
-    }
-  });
+  const btn = document.getElementById('btnCopyNmapTranscript');
+  if (!pre?.textContent || !btn) return;
+  btn.disabled = true;
+  try {
+    await navigator.clipboard.writeText(pre.textContent);
+    btn.textContent = '✓ Copied Transcript';
+  } catch (_) {
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    btn.textContent = 'Transcript selected. Press Ctrl+C to copy.';
+  } finally {
+    setTimeout(() => {
+      btn.textContent = 'Copy Transcript';
+      btn.disabled = false;
+    }, 2500);
+  }
 }
 
 function renderNmapScanHistory() {
@@ -638,17 +630,17 @@ function renderNmapScanHistory() {
             }
           </div>
         </td>
-        <td style="font-size:0.78rem;"><strong>Grade ${esc(h.securityGrade)}</strong> (${h.securityScore}/100)</td>
+        <td style="font-size:0.78rem;">${h.totalScanned == null ? "—" : `${h.totalScanned} TCP ports`}</td>
         <td style="text-align: right;">
           <div class="row-actions-group">
             ${
               hasCached
-                ? `<button type="button" class="btn btn-secondary btn-xs" onclick="viewSavedNmapReport('${esc(rid)}')">View</button>`
+                ? `<button type="button" class="btn btn-secondary btn-xs" onclick="viewSavedNmapReport(${inlineString(rid)})">View</button>`
                 : ''
             }
-            <button type="button" class="btn btn-secondary btn-xs" onclick="selectNmapTargetPreset('${esc(h.ip)}', '${esc(h.deviceLabel)}'); runNmapPortScan();">
-              Re-Scan
-            </button>
+            ${nmapCatalogReports[rid]?.scope
+              ? `<button type="button" class="btn btn-secondary btn-xs" onclick="rerunSavedNmapReport(${inlineString(rid)})">Re-Scan</button>`
+              : ''}
           </div>
         </td>
       </tr>

@@ -13,7 +13,12 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from typing import TYPE_CHECKING, cast
+
 from .config import utc_now, validate_host
+
+if TYPE_CHECKING:
+    from .engine import Monitor
 
 
 PORT_CATALOG: dict[int, dict] = {
@@ -524,7 +529,7 @@ class PortScannerMixin:
                     raise ValueError(f"Invalid port range: {token}") from exc
                 if start < 1 or end > 65535 or start > end:
                     raise ValueError(f"Port range out of bounds (1-65535): {token}")
-                if end - start > 250:
+                if end - start + 1 > 250:
                     raise ValueError("Custom port ranges are limited to 250 ports per scan")
                 ports.update(range(start, end + 1))
             else:
@@ -713,6 +718,8 @@ class PortScannerMixin:
         except (OSError, subprocess.SubprocessError) as exc:
             return {"error": str(exc)}
 
+        if proc.returncode != 0:
+            return {"error": (proc.stderr or f"Nmap exited with status {proc.returncode}").strip()}
         xml_raw = (proc.stdout or "").strip()
         if not xml_raw.startswith("<"):
             idx = xml_raw.find("<?xml")
@@ -751,7 +758,9 @@ class PortScannerMixin:
                         continue
                     state_el = p_el.find("state")
                     svc_el = p_el.find("service")
-                    state = state_el.attrib.get("state", "closed") if state_el is not None else "closed"
+                    if p_num not in ports or p_el.get("protocol") != "tcp" or state_el is None:
+                        continue
+                    state = state_el.get("state", "")
                     reason = state_el.attrib.get("reason", "") if state_el is not None else ""
                     svc_name = svc_el.attrib.get("name", "") if svc_el is not None else ""
                     product = svc_el.attrib.get("product", "") if svc_el is not None else ""
@@ -771,10 +780,18 @@ class PortScannerMixin:
                         "state": state,
                         "reason": reason,
                         "service": f"ssl/{svc_name}" if tunnel == "ssl" and svc_name and not svc_name.startswith("ssl/") else svc_name,
+                        "serviceProbed": svc_el is not None and svc_el.get("method") == "probed",
                         "tunnel": tunnel,
                         "versionBanner": " ".join(ver_parts).strip(),
                         "cpes": cpes,
                     }
+                omitted = set(ports) - parsed_ports.keys()
+                groups = ports_el.findall("extraports")
+                if omitted and len(groups) == 1 and groups[0].get("count") == str(len(omitted)):
+                    group_state = groups[0].get("state", "")
+                    if group_state in {"closed", "filtered"}:
+                        for port in omitted:
+                            parsed_ports[port] = {"state": group_state, "reason": "nmap-grouped-result"}
 
         fin_el = root.find("runstats/finished")
         summary_line = fin_el.attrib.get("summary", "") if fin_el is not None else ""
@@ -788,30 +805,74 @@ class PortScannerMixin:
         }
 
     def _scan_single_port(self, ip: str, port: int, timeout: float = 0.65) -> dict:
+        self = cast("Monitor", self)
         meta = self._port_metadata(port)
-        is_open, latency = self._probe_tcp(ip, port, timeout)
+        started = time.perf_counter()
+        latency = None
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                latency = round((time.perf_counter() - started) * 1000, 1)
+            state, reason = "open", "connected"
+        except ConnectionRefusedError:
+            state, reason = "closed", "connection-refused"
+        except TimeoutError:
+            state, reason = "unconfirmed", "timeout"
+        except OSError:
+            state, reason = "unconfirmed", "connection-error"
+        is_open = state == "open"
         banner = ""
         if is_open:
             banner = self._grab_service_banner(ip, port, timeout=min(0.75, timeout + 0.2))
-        state = "open" if is_open else "closed"
+        observed_service = ""
+        if re.match(r"^HTTP/\d(?:\.\d)? \d{3}\b", banner):
+            observed_service = "http"
+        elif re.match(r"^SSH-\d+\.\d+-", banner):
+            observed_service = "ssh"
+        elif re.match(r"^(?:TLS|SSL)v\d", banner):
+            observed_service = "tls"
         is_at_risk = bool(is_open and meta["atRisk"])
         effective_risk = meta["riskLevel"] if is_open else "NONE"
         return {
             "port": port,
             "protocol": "TCP",
             "state": state,
+            "reason": reason,
             "open": is_open,
             "latencyMs": latency,
             "service": meta["service"],
+            "observedService": observed_service,
+            "serviceSource": "banner" if observed_service else "port-number",
+            "reviewSource": "port-catalog",
             "category": meta["category"],
             "riskLevel": meta["riskLevel"],
             "effectiveRisk": effective_risk,
             "atRisk": is_at_risk,
-            "banner": banner or (f"{meta['service']} listener active" if is_open else "No response / Closed"),
+            "banner": banner,
             "summary": meta["summary"],
             "exposureRisk": meta["exposureRisk"],
             "remediation": meta["remediation"],
         }
+
+    def _apply_nmap_port_state(self, entry: dict, nmap_port: dict) -> None:
+        state = nmap_port.get("state")
+        if state not in {"open", "closed", "filtered"}:
+            return
+        if entry["state"] != state and (state == "open" or entry["state"] == "unconfirmed"):
+            entry["state"] = state
+            entry["open"] = state == "open"
+            entry["atRisk"] = entry["open"] and self._port_metadata(entry["port"])["atRisk"]
+            entry["effectiveRisk"] = entry["riskLevel"] if entry["open"] else "NONE"
+        if entry["state"] == state and entry["reason"] != "connected":
+            entry["reason"] = nmap_port.get("reason") or "nmap-result"
+
+    def check_tcp_port(self, ip: str, port: int) -> dict:
+        result = self._scan_single_port(ip, port, 1.5)
+        if result["state"] == "unconfirmed":
+            nmap_bin = self._find_nmap_binary()
+            if nmap_bin:
+                nmap = self._run_nmap_cli(nmap_bin, ip, [port], 1500, scan_versions=False)
+                self._apply_nmap_port_state(result, (nmap.get("ports") or {}).get(port, {}))
+        return result
 
     def run_port_scan(
         self,
@@ -821,6 +882,7 @@ class PortScannerMixin:
         timeout_ms: object = 650,
     ) -> dict:
         """Execute a detailed Nmap / TCP port security audit on the target host."""
+        self = cast("Monitor", self)
         scan_lock = self._get_portscan_lock()
         if not scan_lock.acquire(blocking=False):
             raise RuntimeError("A port scan is already in progress. Please wait a few seconds for it to complete.")
@@ -833,8 +895,9 @@ class PortScannerMixin:
                 raise ValueError(f"Could not resolve target host '{target_host}': {exc}") from exc
 
             try:
-                timeout_ms_int = max(200, min(3000, int(timeout_ms or 650)))
-            except (TypeError, ValueError):
+                timeout_value = timeout_ms if isinstance(timeout_ms, (str, int, float)) else 650
+                timeout_ms_int = max(200, min(3000, int(timeout_value or 650)))
+            except (ValueError, OverflowError):
                 timeout_ms_int = 650
             timeout_sec = timeout_ms_int / 1000.0
 
@@ -843,7 +906,9 @@ class PortScannerMixin:
                 ports_to_scan = self.parse_custom_ports(custom_ports)
                 profile_label = f"Custom Port Scan ({len(ports_to_scan)} Ports)"
             else:
-                prof = SCAN_PROFILES.get(profile_key, SCAN_PROFILES["quick_audit"])
+                if profile_key not in SCAN_PROFILES:
+                    profile_key = "quick_audit"
+                prof = SCAN_PROFILES[profile_key]
                 ports_to_scan = list(prof["ports"])
                 profile_label = prof["label"]
 
@@ -879,7 +944,6 @@ class PortScannerMixin:
                 }
                 for future in as_completed(future_map):
                     item = future.result()
-                    item["reason"] = "syn-ack" if item["open"] else "conn-refused"
                     results_by_port[item["port"]] = item
                     scanned_count += 1
                     if item["open"]:
@@ -912,11 +976,17 @@ class PortScannerMixin:
 
             # Phase 2: Real Nmap CLI (-sT -sV / firewall state detection) when nmap binary is available
             nmap_meta: dict = {}
+            nmap_target_ports: list[int] = []
             nmap_version = ""
             os_guess = ""
             if nmap_bin:
                 phase1_open = [p for p, r in results_by_port.items() if r["open"]]
-                nmap_target_ports = phase1_open if phase1_open else (ports_to_scan if total_ports <= 60 else [])
+                nmap_target_ports = phase1_open
+                if total_ports <= 60:
+                    nmap_target_ports = [
+                        port for port in ports_to_scan
+                        if results_by_port[port]["state"] in {"open", "unconfirmed"}
+                    ]
                 if nmap_target_ports:
                     self.broadcast(
                         "portscan_progress",
@@ -930,7 +1000,7 @@ class PortScannerMixin:
                             "openCount": open_count,
                             "atRiskCount": at_risk_count,
                             "message": (
-                                f"Running Nmap (-sV) service & firewall state inspection on {len(nmap_target_ports)} port(s)..."
+                                f"Running Nmap on {len(nmap_target_ports)} TCP port(s)..."
                             ),
                         },
                     )
@@ -947,20 +1017,16 @@ class PortScannerMixin:
                         entry = results_by_port.get(port_num)
                         if not entry:
                             continue
-                        n_state = np.get("state") or ""
-                        # Preserve ports already proven open by Phase 1; refine closed vs filtered or discover open
-                        if not entry["open"] and n_state in {"open", "filtered", "open|filtered"}:
-                            if n_state == "open":
-                                entry["open"] = True
-                                entry["state"] = "open"
-                                entry["latencyMs"] = entry["latencyMs"] or nmap_meta.get("hostLatencyMs")
-                            else:
-                                entry["state"] = n_state
-                        if np.get("reason"):
-                            entry["reason"] = np["reason"]
-                        if entry["open"]:
+                        self._apply_nmap_port_state(entry, np)
+                        if np.get("state") == "open":
+                            probed = bool(
+                                np.get("serviceProbed")
+                                and np.get("service") not in {None, "", "unknown", "tcpwrapped"}
+                            )
+                            metadata = self._port_metadata(port_num)
                             refined = self._infer_risk_from_service(
-                                port_num, np.get("service", ""), np.get("tunnel", ""), entry
+                                port_num, np.get("service", "") if probed else "",
+                                np.get("tunnel", "") if probed else "", metadata
                             )
                             entry["service"] = refined.get("service", entry["service"])
                             entry["category"] = refined.get("category", entry["category"])
@@ -971,27 +1037,28 @@ class PortScannerMixin:
                             entry["exposureRisk"] = refined.get("exposureRisk", entry["exposureRisk"])
                             entry["remediation"] = refined.get("remediation", entry["remediation"])
 
-                            ver_str = np.get("versionBanner") or ""
-                            cpes = np.get("cpes") or []
+                            ver_str = (np.get("versionBanner") or "") if probed else ""
+                            cpes = (np.get("cpes") or []) if probed else []
                             if ver_str:
                                 base_banner = entry.get("banner") or ""
-                                if base_banner.endswith("listener active") or base_banner.startswith("No response"):
+                                if not base_banner:
                                     entry["banner"] = ver_str[:130]
                                 elif ver_str.lower() not in base_banner.lower():
                                     entry["banner"] = f"{ver_str} · {base_banner}"[:130]
                             if cpes:
                                 entry["cpe"] = cpes[0]
-                            if np.get("service"):
+                            if probed:
                                 entry["nmapService"] = np["service"]
-                        elif entry["state"] == "filtered":
-                            entry["banner"] = f"Firewall filtered ({entry['reason'] or 'no-response'})"
+                                entry["observedService"] = np["service"]
+                                entry["serviceSource"] = "nmap-probe"
+                                if refined != metadata:
+                                    entry["reviewSource"] = "nmap-probe"
 
+            nmap_results = len(nmap_meta.get("ports") or {})
             engine_used = (
-                f"Nmap {nmap_version} (-sT -sV) + Python Banner Auditor"
-                if nmap_bin and nmap_version
-                else "Nmap Binary + Python TCP Banner Auditor"
-                if nmap_bin
-                else "Pulse Parallel TCP & Service Banner Engine"
+                f"TCP connect + Nmap {nmap_version}".strip()
+                if nmap_results
+                else "TCP connect"
             )
 
             ordered_ports = [results_by_port[p] for p in sorted(results_by_port)]
@@ -1001,60 +1068,48 @@ class PortScannerMixin:
             high_ports = [p for p in open_ports if p["riskLevel"] == "HIGH"]
             medium_ports = [p for p in open_ports if p["riskLevel"] == "MEDIUM"]
             low_ports = [p for p in open_ports if p["riskLevel"] == "LOW"]
-            closed_ports = [p for p in ordered_ports if not p["open"]]
-            filtered_ports = [p for p in closed_ports if "filtered" in (p.get("state") or "")]
+            closed_ports = [p for p in ordered_ports if p["state"] == "closed"]
+            filtered_ports = [p for p in ordered_ports if p["state"] == "filtered"]
+            unconfirmed_ports = [p for p in ordered_ports if p["state"] == "unconfirmed"]
+            unresolved_count = len(filtered_ports) + len(unconfirmed_ports)
 
-            # Compute Host Security Posture Score (0 - 100)
-            penalty = (
-                len(critical_ports) * 25
-                + len(high_ports) * 14
-                + len(medium_ports) * 6
-            )
-            security_score = max(0, min(100, 100 - penalty))
-            if security_score >= 92:
-                security_grade = "A"
-                posture_verdict = "HARDENED"
-                posture_summary = "No critical or high-risk ports were found exposed on this host."
-            elif security_score >= 75:
-                security_grade = "B"
-                posture_verdict = "MODERATE EXPOSURE"
-                posture_summary = f"{len(at_risk_ports)} management or service port(s) are open and should be reviewed."
-            elif security_score >= 50:
-                security_grade = "C"
-                posture_verdict = "AT-RISK SERVICES EXPOSED"
-                posture_summary = f"Found {len(at_risk_ports)} at-risk open port(s) ({len(critical_ports)} Critical, {len(high_ports)} High) requiring firewall hardening."
+            if at_risk_ports:
+                posture_verdict = "Open ports flagged for review"
+            elif unresolved_count:
+                posture_verdict = "Some port states remain uncertain"
+            elif open_ports:
+                posture_verdict = "No open ports flagged"
             else:
-                security_grade = "F"
-                posture_verdict = "HIGH SECURITY EXPOSURE"
-                posture_summary = f"Critical network services ({', '.join(str(p['port']) + '/' + p['service'] for p in (critical_ports + high_ports)[:4])}) are openly accessible."
+                posture_verdict = "No open TCP ports observed"
+            posture_summary = (
+                f"{len(open_ports)} open, {len(closed_ports)} closed, "
+                f"{len(filtered_ports)} filtered, {len(unconfirmed_ports)} unconfirmed."
+            )
 
             duration_ms = round((time.perf_counter() - started) * 1000)
-
-            # Generate Nmap CLI transcript incorporating real Nmap version/args when run
-            header_ver = f"Nmap {nmap_version}" if nmap_version else "Pulse Nmap Security Auditor 2.0"
             nmap_lines = [
-                f"Starting {header_ver} ( https://nmap.org ) at {utc_now()}",
+                f"TCP port check for {target_host} ({resolved_ip})",
                 f"Engine: {engine_used}",
-                f"Nmap scan report for {target_host} ({resolved_ip})",
-                f"Host is up ({open_ports[0]['latencyMs'] / 1000.0:.4f}s latency)." if open_ports and open_ports[0].get("latencyMs") else f"Host scanned ({total_ports} TCP ports).",
+                f"Scope: {total_ports} selected TCP ports from this monitor over IPv4",
+                posture_summary,
             ]
-            if os_guess:
-                nmap_lines.append(f"Service Info / OS Guess: {os_guess}")
-            nmap_lines.append(
-                f"Not shown: {len(closed_ports)} non-open tcp ports ({len(closed_ports) - len(filtered_ports)} closed, {len(filtered_ports)} filtered)"
-            )
-            nmap_lines.append("PORT      STATE  SERVICE               RISK       VERSION / BANNER")
-            for p in open_ports:
-                port_col = f"{p['port']}/tcp".ljust(9)
-                state_col = "open".ljust(6)
-                svc_col = (p.get("nmapService") or p["service"])[:21].ljust(21)
-                risk_col = p["riskLevel"].ljust(10)
-                nmap_lines.append(f"{port_col} {state_col} {svc_col} {risk_col} {p['banner']}")
-            if not open_ports:
-                nmap_lines.append("All scanned TCP ports on target are closed or filtered.")
-            nmap_lines.append(
-                f"\nNmap done: 1 IP address (1 host up) scanned in {duration_ms / 1000.0:.2f} seconds"
-            )
+            if nmap_target_ports:
+                nmap_lines.append(
+                    f"Nmap supplied {nmap_results} port states for {len(nmap_target_ports)} targeted ports."
+                )
+            if os_guess and nmap_results:
+                nmap_lines.append(f"Nmap OS guess: {os_guess}")
+            nmap_lines.append("PORT      STATE         REASON                  SERVICE / BANNER")
+            for port_result in ordered_ports:
+                label = f"{port_result['port']}/tcp"
+                evidence = ""
+                if port_result["open"]:
+                    service = port_result["observedService"] or port_result["service"]
+                    evidence = f"{service} ({port_result['serviceSource']}) {port_result['banner']}"
+                nmap_lines.append(
+                    f"{label:<9} {port_result['state']:<13} {port_result['reason']:<23} {evidence}".rstrip()
+                )
+            nmap_lines.append(f"Completed in {duration_ms / 1000.0:.2f} seconds")
 
             # Match device name from monitored devices or inventory if known
             device_label = target_host
@@ -1078,10 +1133,16 @@ class PortScannerMixin:
                 "engine": engine_used,
                 "nmapAvailable": bool(nmap_bin),
                 "nmapVersion": nmap_version or None,
-                "osGuess": os_guess or None,
+                "osGuess": os_guess if nmap_results and os_guess else None,
+                "nmapScannedCount": len(nmap_target_ports),
+                "nmapResultCount": nmap_results,
+                "scope": {
+                    "protocol": "TCP",
+                    "addressFamily": "IPv4",
+                    "ports": sorted(ports_to_scan),
+                    "timeoutMs": timeout_ms_int,
+                },
                 "durationMs": duration_ms,
-                "securityScore": security_score,
-                "securityGrade": security_grade,
                 "postureVerdict": posture_verdict,
                 "postureSummary": posture_summary,
                 "counts": {
@@ -1089,6 +1150,7 @@ class PortScannerMixin:
                     "open": len(open_ports),
                     "closed": len(closed_ports),
                     "filtered": len(filtered_ports),
+                    "unconfirmed": len(unconfirmed_ports),
                     "atRisk": len(at_risk_ports),
                     "critical": len(critical_ports),
                     "high": len(high_ports),
@@ -1113,8 +1175,7 @@ class PortScannerMixin:
                     "ip": resolved_ip,
                     "deviceLabel": device_label,
                     "profileLabel": profile_label,
-                    "securityScore": security_score,
-                    "securityGrade": security_grade,
+                    "totalScanned": total_ports,
                     "postureVerdict": posture_verdict,
                     "openCount": len(open_ports),
                     "atRiskCount": len(at_risk_ports),
@@ -1133,7 +1194,7 @@ class PortScannerMixin:
                 "PORT_SCAN",
                 "CRITICAL" if critical_ports else ("WARNING" if at_risk_ports else "INFO"),
                 f"Port Audit: {device_label}",
-                f"{profile_label} on {resolved_ip}: {len(open_ports)}/{total_ports} open port(s), {len(at_risk_ports)} at-risk · Score {security_score}/100 ({security_grade}).",
+                f"{profile_label} on {resolved_ip}: {posture_summary} {len(at_risk_ports)} open port(s) flagged.",
                 ip=resolved_ip,
                 device_name=device_label,
             )
@@ -1144,6 +1205,7 @@ class PortScannerMixin:
 
     def get_portscan_catalog(self) -> dict:
         """Return Nmap availability, scan profiles, recent scan history, and cached reports."""
+        self = cast("Monitor", self)
         nmap_bin = self._find_nmap_binary()
         with self.lock:
             history = list(self._get_portscan_history())

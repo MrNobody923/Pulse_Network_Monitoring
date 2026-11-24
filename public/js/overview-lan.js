@@ -9,6 +9,8 @@ function renderExecutiveBanner() {
   const rows = buildUnifiedDeviceRows();
   const activeRows = rows.filter(r => !r.archived);
   const downMonitored = activeRows.filter(r => r.monitored && r.status === 'offline');
+  const degradedMonitored = activeRows.filter(r => r.monitored && r.status === 'warning').length;
+  const actionableAlerts = (appState.activeAlerts || []).filter(alert => ['CRITICAL', 'HIGH', 'WARNING'].includes(alert.severity)).length;
   const ports = (appState.router && appState.router.ports) || [];
   const optimalPorts = ports.filter(p => p.status === 'optimal').length;
   const warnPorts = ports.filter(
@@ -16,27 +18,50 @@ function renderExecutiveBanner() {
   ).length;
   const isp = appState.isp || {};
   const pingMs = isp.tier1LatencyMs;
+  const checksPending = !isp.overallHealth || isp.overallHealth === 'UNKNOWN';
+  const telemetryOffline = document.getElementById('telemetryState')?.dataset.state === 'offline';
 
-  card.classList.remove('warning', 'critical');
-  if (downMonitored.length > 0 || isp.overallHealth === 'OUTAGE') {
+  card.classList.remove('warning', 'critical', 'checking');
+  if (telemetryOffline || checksPending) {
+    card.classList.add('checking');
+    icon.textContent = telemetryOffline ? 'Stale' : 'Checking';
+    title.textContent = telemetryOffline ? 'Waiting for fresh network data' : 'Network checks in progress';
+    if (telemetryOffline) {
+      desc.textContent = lastDashboardUpdate
+        ? 'The readings below are from the last successful update.'
+        : 'The dashboard could not reach Vertex Sentry. Use Refresh data to try again.';
+    } else {
+      desc.textContent = 'The first readings will appear as the monitor checks your devices.';
+    }
+  } else if (isp.overallHealth === 'OUTAGE') {
     card.classList.add('critical');
-    icon.textContent = 'CRIT';
-    title.textContent = `Alert: ${downMonitored.length} Important Device(s) Offline`;
-    desc.textContent = downMonitored.length
-      ? `Not responding right now: ${downMonitored.map(d => `${d.name} (${d.ip})`).join(', ')}.`
-      : 'Internet connection appears to be offline.';
-  } else if (warnPorts > 0 || isp.overallHealth === 'DEGRADED') {
+    icon.textContent = 'Outage';
+    title.textContent = 'External probes did not respond';
+    desc.textContent = 'Open Internet & Routers to compare the gateway and external reachability checks.';
+  } else if (downMonitored.length > 0) {
+    card.classList.add('critical');
+    icon.textContent = 'Offline';
+    title.textContent = `${downMonitored.length} monitored ${downMonitored.length === 1 ? 'device' : 'devices'} offline`;
+    const names = downMonitored.slice(0, 2).map(device => device.name).join(', ');
+    const additional = downMonitored.length > 2 ? ` and ${downMonitored.length - 2} more` : '';
+    desc.textContent = `${names}${additional} did not respond to their configured checks.`;
+  } else if (warnPorts > 0 || isp.overallHealth === 'DEGRADED' || isp.wanGatewayReachable === false) {
     card.classList.add('warning');
-    icon.textContent = 'WARN';
-    title.textContent = 'Notice: Slow Cable Speed or High Internet Ping';
-    desc.textContent =
-      'One or more router cable ports are running slow, or internet ping is higher than normal.';
+    icon.textContent = 'Degraded';
+    title.textContent = 'Network checks need attention';
+    desc.textContent = isp.wanGatewayReachable === false ? 'The main router did not respond to its reachability check.'
+      : warnPorts ? 'One or more router ports report a link issue.' : 'External probes indicate a degraded connection.';
+  } else if (degradedMonitored || actionableAlerts) {
+    card.classList.add('warning');
+    icon.textContent = 'Attention';
+    title.textContent = 'Network alerts need review';
+    desc.textContent = actionableAlerts
+      ? `${actionableAlerts} active ${actionableAlerts === 1 ? 'alert needs' : 'alerts need'} attention.`
+      : `${degradedMonitored} monitored ${degradedMonitored === 1 ? 'device reports' : 'devices report'} degraded connectivity.`;
   } else {
-    icon.textContent = 'OK';
-    title.textContent = 'Network Healthy — All Devices & Internet Working Normally';
-    desc.textContent = `Silently watching ${activeRows.length} devices (${
-      activeRows.filter(r => r.online).length
-    } online) in Ghost Passive Mode — 0% impact on office internet speed.`;
+    icon.textContent = 'Healthy';
+    title.textContent = 'Network checks are passing';
+    desc.textContent = `${activeRows.filter(r => r.online).length} online across ${activeRows.length} tracked devices.`;
   }
 
   const internetBadge = document.getElementById('overviewInternetBadge');
@@ -45,37 +70,33 @@ function renderExecutiveBanner() {
   const pingBadge = document.getElementById('overviewPingBadge');
 
   if (internetBadge) {
-    const health =
-      isp.overallHealth && isp.overallHealth !== 'UNKNOWN'
-        ? isp.overallHealth
-        : 'GOOD';
-    internetBadge.innerHTML = `<span>Internet Line:</span> <strong>${esc(health)}</strong>`;
+    const health = {EXCELLENT: 'Excellent', GOOD: 'Good', DEGRADED: 'Degraded', OUTAGE: 'Outage'}[isp.overallHealth] || 'Checking';
+    internetBadge.innerHTML = `<span>Internet health</span> <strong>${esc(health)}</strong>`;
   }
   if (cablesBadge) {
     const portSummary =
       warnPorts > 0
-        ? `${warnPorts} Slow Cable`
+        ? `${warnPorts} with issues`
         : optimalPorts > 0
-        ? `${optimalPorts}/${ports.length} Full Speed`
-        : appState.router && appState.router.reachable
-        ? 'Connected'
-        : `${ports.length} Ports Ready`;
-    cablesBadge.innerHTML = `<span>Router Ports:</span> <strong>${esc(portSummary)}</strong>`;
+        ? `${optimalPorts} at full speed`
+        : 'Unavailable';
+    cablesBadge.innerHTML = `<span>Router ports</span> <strong>${esc(portSummary)}</strong>`;
   }
   if (apsBadge) {
     const monCount = activeRows.filter(r => r.monitored).length;
-    apsBadge.innerHTML = `<span>Monitored Gear:</span> <strong>${monCount} Key · ${activeRows.length} Total</strong>`;
+    apsBadge.innerHTML = `<span>Monitored devices</span> <strong>${monCount}</strong>`;
   }
   if (pingBadge) {
-    pingBadge.innerHTML = `<span>Average Ping:</span> <strong>${
-      pingMs != null ? `${pingMs} ms` : 'Probing...'
+    pingBadge.innerHTML = `<span>External latency</span> <strong>${
+      pingMs != null ? `${pingMs} ms` : '—'
     }</strong>`;
   }
 }
 
-function selectDeviceFilter(filter, scrollToList = false) {
+function selectDeviceFilter(filter, scrollToList = false, syncRoute = true) {
   currentDeviceFilter = filter;
   renderOverviewAndLanCardsAndList();
+  if (syncRoute && currentWorkspace === 'devices') setWorkspaceHash('devices');
   if (scrollToList) {
     scrollToLanAssets();
   }
@@ -84,6 +105,7 @@ function selectDeviceFilter(filter, scrollToList = false) {
 function handleDeviceSearch(value) {
   currentDeviceSearch = String(value || '').trim().toLowerCase();
   renderOverviewAndLanCardsAndList();
+  if (currentWorkspace === 'devices') setWorkspaceHash('devices', true);
 }
 
 function renderOverviewAndLanCardsAndList() {
@@ -93,9 +115,10 @@ function renderOverviewAndLanCardsAndList() {
   const connectedRows = activeRows.filter(r => r.online);
   const favRows = activeRows.filter(r => r.favorite);
   const newRows = activeRows.filter(r => r.isNew);
+  const ignoredRows = activeRows.filter(r => r.reviewIgnored);
   const downRows = activeRows.filter(r => r.monitored && r.status === 'offline');
   const disconnectedRows = activeRows.filter(r => !r.monitored && !r.online);
-  const offlineRows = activeRows.filter(r => !r.online);
+  const offlineRows = activeRows.filter(r => r.status === 'offline');
   const monitoredRows = activeRows.filter(r => r.monitored);
 
   const setTxt = (id, val) => {
@@ -103,14 +126,11 @@ function renderOverviewAndLanCardsAndList() {
     if (el) el.textContent = val;
   };
 
-  // Update 7 Overview Cards
+  // Update overview device cards.
   setTxt('ovCardAll', activeRows.length);
   setTxt('ovCardConnected', connectedRows.length);
-  setTxt('ovCardFavorites', favRows.length);
-  setTxt('ovCardNew', newRows.length);
   setTxt('ovCardDown', downRows.length);
   setTxt('ovCardDisconnected', disconnectedRows.length);
-  setTxt('ovCardArchived', archivedRows.length);
 
   // Update Left Sidebar Badges & Quick Filter Counts
   setTxt('sideBadgeDevices', activeRows.length);
@@ -131,8 +151,10 @@ function renderOverviewAndLanCardsAndList() {
 
   const sideIspEl = document.getElementById('sideBadgeInternet');
   if (sideIspEl && appState.isp) {
-    const st = appState.isp.lastSpeedTest;
-    sideIspEl.textContent = st && st.downloadMbps ? `${Math.round(st.downloadMbps)}M` : (appState.isp.overallHealth || 'ISP');
+    const health = appState.isp.overallHealth;
+    sideIspEl.textContent = {EXCELLENT: 'Normal', GOOD: 'Normal', DEGRADED: 'Degraded', OUTAGE: 'Outage'}[health] || '—';
+    const tone = {EXCELLENT: 'green', GOOD: 'green', DEGRADED: 'amber', OUTAGE: 'red'}[health] || '';
+    sideIspEl.className = `side-badge ${tone}`;
   }
 
   // Update 5 LAN Asset Summary Cards
@@ -155,6 +177,7 @@ function renderOverviewAndLanCardsAndList() {
   setTxt('devTabConnected', connectedRows.length);
   setTxt('devTabFavorites', favRows.length);
   setTxt('devTabNew', newRows.length);
+  setTxt('devTabIgnored', ignoredRows.length);
   setTxt('devTabDown', downRows.length);
   setTxt('devTabOffline', offlineRows.length);
   setTxt('devTabDisconnected', disconnectedRows.length);
@@ -172,7 +195,7 @@ function renderOverviewAndLanCardsAndList() {
     lastScanEl.textContent = `Last completed scan: ${
       appState.lastDiscoveryAt
         ? fmtTime(appState.lastDiscoveryAt)
-        : 'Scheduled (runs automatically)'
+        : 'No completed scan'
     }`;
   }
 
@@ -180,23 +203,15 @@ function renderOverviewAndLanCardsAndList() {
   renderDownedDevicesTriageBoard(monitoredRows);
 
   // Highlight active cards and tabs
-  document.querySelectorAll('[data-overview-filter]').forEach(btn => {
-    btn.classList.toggle(
-      'active',
-      btn.getAttribute('data-overview-filter') === currentDeviceFilter
-    );
-  });
   document.querySelectorAll('[data-lan-filter]').forEach(btn => {
-    btn.classList.toggle(
-      'active',
-      btn.getAttribute('data-lan-filter') === currentDeviceFilter
-    );
+    const active = btn.getAttribute('data-lan-filter') === currentDeviceFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
   });
   document.querySelectorAll('[data-dev-filter]').forEach(btn => {
-    btn.classList.toggle(
-      'active',
-      btn.getAttribute('data-dev-filter') === currentDeviceFilter
-    );
+    const active = btn.getAttribute('data-dev-filter') === currentDeviceFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
   });
   document.querySelectorAll('[data-side-filter]').forEach(link => {
     link.classList.toggle(
@@ -211,6 +226,7 @@ function renderOverviewAndLanCardsAndList() {
   else if (currentDeviceFilter === 'connected') filtered = connectedRows;
   else if (currentDeviceFilter === 'favorites') filtered = favRows;
   else if (currentDeviceFilter === 'new') filtered = newRows;
+  else if (currentDeviceFilter === 'ignored') filtered = ignoredRows;
   else if (currentDeviceFilter === 'down') filtered = downRows;
   else if (currentDeviceFilter === 'offline') filtered = offlineRows;
   else if (currentDeviceFilter === 'disconnected') filtered = disconnectedRows;
@@ -218,7 +234,8 @@ function renderOverviewAndLanCardsAndList() {
   else if (currentDeviceFilter === 'monitored') filtered = monitoredRows;
 
   if (currentDeviceSearch) {
-    filtered = filtered.filter(
+    const exact = filtered.filter(r => r.ip?.toLowerCase() === currentDeviceSearch || r.mac?.toLowerCase() === currentDeviceSearch);
+    filtered = exact.length ? exact : filtered.filter(
       r =>
         r.name.toLowerCase().includes(currentDeviceSearch) ||
         r.ip.toLowerCase().includes(currentDeviceSearch) ||
@@ -232,39 +249,40 @@ function renderOverviewAndLanCardsAndList() {
   if (!tbody) return;
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `
+    renderDashboardControls(tbody, `
       <tr>
         <td colspan="7" style="text-align: center; padding: 28px; color: var(--text-dim);">
-          No devices match the current filter (<strong>${esc(
-            currentDeviceFilter.toUpperCase()
-          )}</strong>).
+          ${currentDeviceFilter === 'new' && !currentDeviceSearch ? 'No devices awaiting review.' : 'No devices match this view.'}
         </td>
       </tr>
-    `;
+    `);
     return;
   }
 
-  tbody.innerHTML = filtered
+  const markup = filtered
     .map((row, idx) => {
       let statusClass = 'online';
       let statusLabel = 'ONLINE';
+      if (!row.monitored && row.online) statusLabel = 'OBSERVED';
+      if (row.monitored && row.online && !row.directlyReachable) statusLabel = 'ARP OBSERVATION';
       if (row.status === 'offline') {
         statusClass = 'offline';
         statusLabel = row.monitored ? 'DEVICE DOWN' : 'OFFLINE';
       } else if (row.connectivityState === 'ONLINE_NO_INTERNET') {
         statusClass = 'warning';
-        statusLabel = 'NO INTERNET';
+        statusLabel = 'MONITOR WAN DOWN';
       } else if (row.status === 'warning') {
         statusClass = 'warning';
         statusLabel = 'DEGRADED';
       } else if (row.status === 'unknown') {
         statusClass = 'warning';
-        statusLabel = 'PROBING';
+        statusLabel = row.connectivityState === 'ARP_OBSERVED' ? 'ARP OBSERVED' : 'PROBING';
       }
 
       const badges = [
         `<span class="status-pill ${statusClass}" style="font-size:0.66rem; padding:3px 8px;">${esc(statusLabel)}</span>`,
-        row.isNew ? '<span class="status-pill new" style="font-size:0.64rem; padding:2px 6px;">NEW</span>' : '',
+        row.isNew ? '<span class="status-pill new">Needs review</span>' : '',
+        row.reviewIgnored ? '<span class="status-pill new">Review ignored</span>' : '',
         row.archived ? '<span class="status-pill warning" style="font-size:0.64rem; padding:2px 6px;">ARCHIVED</span>' : ''
       ]
         .filter(Boolean)
@@ -281,10 +299,10 @@ function renderOverviewAndLanCardsAndList() {
         ? `<div class="mono" style="font-weight:700;">${
             row.latencyMs != null ? `${row.latencyMs} ms` : '—'
           } <small style="color:var(--text-dim); font-weight:500;">(${
-            row.packetLossPct ?? 0
-          }% loss)</small></div>${portsHint}`
+            row.packetLossPct == null ? '—' : row.packetLossPct + '% unanswered'
+          })</small></div>${portsHint}`
         : `<div style="color:var(--text-muted); font-size:0.76rem; font-weight:600;">${
-            row.online ? 'Connected on Network' : 'Not seen recently'
+            row.online ? `Observed via ${esc(row.location)}` : 'Not observed in the latest scan'
           }</div>`;
 
       let roleBadgeText = 'Office Equipment';
@@ -319,7 +337,7 @@ function renderOverviewAndLanCardsAndList() {
         <tr>
           <td class="mono" style="color: var(--text-dim); font-size: 0.76rem;">${idx + 1}</td>
           <td>
-            <span class="dev-row-title">${esc(row.name)}</span>
+            <button type="button" class="dev-row-title device-connection-link" aria-haspopup="dialog" onclick="openDeviceConnection(${inlineString(row.ip)})">${esc(row.name)}</button>
             <span class="dev-row-sub">${esc(row.location)}</span>
             ${diagSubtext}
           </td>
@@ -332,7 +350,7 @@ function renderOverviewAndLanCardsAndList() {
               row.ip
             )}</div>
             <div class="mono" style="font-size: 0.71rem; color: var(--text-dim); margin-top: 1px;">${esc(
-              row.mac || '—'
+              row.observedMac || '—'
             )}</div>
           </td>
           <td>
@@ -340,55 +358,59 @@ function renderOverviewAndLanCardsAndList() {
             <div style="font-size: 0.7rem; color: var(--text-dim); margin-top: 2px;">${esc(
               fmtTime(row.lastSeen)
             )}</div>
+            ${row.monitored ? `<small class="dev-row-sub">${esc(formatProbeAge(row.lastProbeAt, row.probeIntervalSec))}</small>` : ''}
           </td>
           <td>
             <div style="display:flex; flex-wrap:wrap; gap:4px; align-items:center;">${badges}</div>
           </td>
           <td style="text-align: right;">
             <div class="row-actions-group">
+              <button type="button" class="btn btn-secondary btn-xs" onclick="openDeviceHistory(${inlineString(row.id || '')}, ${inlineString(row.mac || '')})">History</button>
+              ${row.id && row.type === 'switch' && !row.archived ? `<button type="button" class="btn btn-secondary btn-xs" onclick="openSwitchPorts(${inlineString(row.id)})">Switch ports</button>` : ''}
               <button type="button" class="star-btn ${
                 row.favorite ? 'active' : ''
-              }" onclick="toggleDeviceFavorite('${esc(
+              }" onclick="toggleDeviceFavorite(${inlineString(
         row.favoriteKey
-      )}')" title="Toggle Favourite">
+      )})" aria-label="Favourite ${esc(row.name)}" aria-pressed="${row.favorite}" title="Toggle Favourite">
                 ${row.favorite ? '★' : '☆'}
               </button>
-              <button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts('${esc(
+              <button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts(${inlineString(
                 row.ip
-              )}', '${esc(row.name)}')" title="Run Nmap Port &amp; Risk Audit on ${esc(
+              )}, ${inlineString(row.name)})" title="Run Nmap Port &amp; Risk Audit on ${esc(
         row.ip
       )}">Ports</button>
               ${
                 row.monitored && row.id
-                  ? `<button type="button" class="btn btn-secondary btn-xs" onclick="probeMonitoredDevice('${esc(
+                  ? `<button type="button" class="btn btn-secondary btn-xs" onclick="probeMonitoredDevice(${inlineString(
                       row.id
-                    )}')">Probe</button>${
+                    )})">Probe</button>${
                       !(typeof appState !== 'undefined' && appState.router && row.ip === appState.router.ip)
-                        ? `<button type="button" class="btn btn-secondary btn-xs" style="color:var(--danger,#ef4444);border-color:rgba(239,68,68,0.35);" onclick="deleteMonitoredDevice('${esc(
+                        ? `<button type="button" class="btn btn-secondary btn-xs" style="color:var(--danger,#ef4444);border-color:rgba(239,68,68,0.35);" onclick="deleteMonitoredDevice(${inlineString(
                             row.id
-                          )}', '${esc(
+                          )}, ${inlineString(
                             encodeURIComponent(row.name || row.ip)
-                          )}', '${esc(
+                          )}, ${inlineString(
                             row.ip
-                          )}')" title="Remove from Monitored Infrastructure">Remove</button>`
+                          )})" title="Remove from Monitored Infrastructure">Remove</button>`
                         : ''
                     }`
-                  : `<button type="button" class="btn btn-secondary btn-xs" onclick="promoteLanDeviceAsInfra('${esc(
+                  : `<button type="button" class="btn btn-secondary btn-xs" onclick="promoteLanDeviceAsInfra(${inlineString(
                       row.ip
-                    )}', '${esc(row.mac || '')}', '${esc(
+                    )}, ${inlineString(row.mac || '')}, ${inlineString(
                       encodeURIComponent(row.name || row.ip)
-                    )}')" title="Promote this LAN device to Monitored Access Point / Router">+ Track AP</button>`
+                    )})" title="Promote this LAN device to Monitored Access Point / Router">+ Track AP</button>`
               }
               ${
                 !row.authorized && row.mac
-                  ? `<button type="button" class="btn btn-primary btn-xs" onclick="authorizeLanDevice('${esc(
+                  ? `<button type="button" class="btn btn-primary btn-xs" onclick="authorizeLanDevice(${inlineString(
                       row.mac
-                    )}')">Review</button>`
+                    )})">Approve</button>
+                    <button type="button" class="btn btn-secondary btn-xs" onclick="setDeviceReviewIgnored(${inlineString(row.mac)}, ${!row.reviewIgnored})">${row.reviewIgnored ? 'Return to review' : 'Ignore'}</button>`
                   : ''
               }
-              <button type="button" class="btn btn-secondary btn-xs" onclick="toggleDeviceArchive('${esc(
-                row.favoriteKey
-              )}')">
+              <button type="button" class="btn btn-secondary btn-xs" onclick="toggleDeviceArchive(${inlineString(
+                row.assetKey
+              )})">
                 ${row.archived ? 'Restore' : 'Archive'}
               </button>
             </div>
@@ -397,15 +419,229 @@ function renderOverviewAndLanCardsAndList() {
       `;
     })
     .join('');
+  renderDashboardControls(tbody, markup);
+}
+
+let deviceHistoryRequest = 0;
+let historyDeviceId = '';
+
+async function openDeviceHistory(deviceId, mac) {
+  const request = ++deviceHistoryRequest;
+  historyDeviceId = deviceId;
+  const dialog = document.getElementById('deviceHistoryDialog');
+  const title = document.getElementById('deviceHistoryTitle');
+  const status = document.getElementById('deviceHistoryStatus');
+  const events = document.getElementById('deviceHistoryEvents');
+  const observations = document.getElementById('deviceHistoryObservations');
+  const identity = document.getElementById('deviceHistoryIdentity');
+  const form = document.getElementById('deviceUpstreamForm');
+  const select = document.getElementById('deviceUpstreamInput');
+  title.textContent = 'Device history';
+  identity.textContent = '';
+  status.textContent = 'Loading timeline…';
+  events.replaceChildren();
+  observations.hidden = form.hidden = true;
+  if (!dialog.open) dialog.showModal();
+  try {
+    const history = await apiJson(`/api/devices/history?${new URLSearchParams({deviceId, mac})}`);
+    if (request !== deviceHistoryRequest || !dialog.open) return;
+    title.textContent = history.name;
+    identity.textContent = [history.ip, history.observedMac || (deviceId ? 'Monitored record' : 'Address-only discovery')].join(' · ');
+    document.getElementById('deviceHistoryFirst').textContent = fmtTime(history.firstSeen);
+    document.getElementById('deviceHistoryLast').textContent = fmtTime(history.lastSeen);
+    document.getElementById('deviceHistoryPresence').textContent =
+      history.observed == null ? 'No linked inventory observations' : history.observed ? 'Observed' : 'Not observed';
+    observations.hidden = false;
+    if (history.deviceId) {
+      select.replaceChildren(new Option('No upstream dependency', ''));
+      for (const item of history.upstreamChoices) select.add(new Option(`${item.name} · ${item.ip}`, item.id));
+      if (history.upstreamDeviceId && !history.upstreamChoices.some(item => item.id === history.upstreamDeviceId)) {
+        select.add(new Option('Previously selected upstream (unavailable)', history.upstreamDeviceId));
+      }
+      select.value = history.upstreamDeviceId || '';
+      document.getElementById('deviceUpstreamFeedback').textContent = '';
+      form.querySelector('button').disabled = false;
+      form.hidden = false;
+    }
+    status.textContent = history.events.length ? 'Recent network events' : 'No network events recorded for this device.';
+    events.innerHTML = history.events.map(event => `<li>
+      <time datetime="${esc(event.timestamp)}">${esc(fmtTime(event.timestamp))}</time>
+      <strong>${esc(event.title)}</strong>
+      <p>${esc(event.message)}</p>
+    </li>`).join('');
+  } catch (error) {
+    if (request === deviceHistoryRequest) status.textContent = error.message;
+  }
+}
+
+async function saveDeviceUpstream(event) {
+  event.preventDefault();
+  const request = deviceHistoryRequest;
+  const feedback = document.getElementById('deviceUpstreamFeedback');
+  const upstreamDeviceId = document.getElementById('deviceUpstreamInput').value;
+  const button = event.currentTarget.querySelector('button');
+  button.disabled = true;
+  feedback.textContent = 'Saving upstream dependency…';
+  try {
+    const result = await apiJson('/api/devices/upstream', {
+      method: 'POST',
+      body: JSON.stringify({deviceId: historyDeviceId, upstreamDeviceId})
+    });
+    appState.activeAlerts = result.activeAlerts;
+    renderAlertsCenter();
+    if (request === deviceHistoryRequest) feedback.textContent = 'Upstream dependency saved.';
+  } catch (error) {
+    if (request === deviceHistoryRequest) feedback.textContent = error.message;
+  } finally {
+    if (request === deviceHistoryRequest) button.disabled = false;
+  }
+}
+
+let deviceConnectionRequest = 0;
+let deviceSnmpRequest = 0;
+let selectedConnectionIp = '';
+
+function openDeviceConnection(ip) {
+  const dialog = document.getElementById('deviceConnectionDialog');
+  selectedConnectionIp = ip;
+  document.getElementById('deviceConnectionTitle').textContent = 'Device connection';
+  document.getElementById('deviceConnectionAddress').textContent = ip;
+  for (const field of ['Observed', 'Monitored', 'Icmp', 'Tcp', 'Http']) {
+    document.getElementById(`deviceConnection${field}`).textContent = '—';
+  }
+  document.getElementById('deviceManagementLink').hidden = true;
+  resetDeviceSnmp();
+  if (!dialog.open) dialog.showModal();
+  loadDeviceConnection(ip, false);
+}
+
+function checkDeviceConnection() {
+  if (selectedConnectionIp) loadDeviceConnection(selectedConnectionIp, true);
+}
+
+async function loadDeviceConnection(ip, checkNow) {
+  const request = ++deviceConnectionRequest;
+  const setText = (name, value) => { document.getElementById(`deviceConnection${name}`).textContent = value; };
+  const button = document.getElementById('btnCheckDeviceConnection');
+  const management = document.getElementById('deviceManagementLink');
+  button.disabled = true;
+  setText('Feedback', checkNow ? 'Checking from the monitoring PC…' : 'Loading device details…');
+  try {
+    const endpoint = '/api/devices/connection';
+    const data = await (checkNow
+      ? apiJson(endpoint, {method: 'POST', body: JSON.stringify({ip})})
+      : apiJson(`${endpoint}?${new URLSearchParams({ip})}`));
+    if (request !== deviceConnectionRequest) return;
+    const formatCheck = check => {
+      const labels = {reply: 'Reply received', open: 'Connection accepted', refused: 'Connection refused', no_reply: 'No reply'};
+      return `${labels[check.status] || 'Unknown'}${Number.isFinite(check.latencyMs) ? ` · ${check.latencyMs} ms` : ''}`;
+    };
+    const sources = {dynamic: 'ARP cache', static: 'ARP cache', icmp: 'ICMP', dhcp: 'Router DHCP'};
+    setText('Title', data.name || data.ip);
+    setText('Address', `${data.ip} · ${data.monitored ? 'Monitored' : 'Discovered'}`);
+    setText('Observed', data.lastObservedAt ? `${fmtTime(data.lastObservedAt)}${sources[data.observationSource] ? ` · ${sources[data.observationSource]}` : ''}` : 'No inventory observation');
+    setText('Monitored', data.lastMonitorCheckAt ? fmtTime(data.lastMonitorCheckAt) : data.monitored ? 'Awaiting first check' : 'Not monitored');
+    setText('Icmp', data.icmp ? formatCheck(data.icmp) : 'Ready to check');
+    setText('Tcp', data.tcpPort ? `Port ${data.tcpPort}${data.tcp ? ` · ${formatCheck(data.tcp)}` : ''}` : 'No configured port');
+    const http = data.http;
+    const httpLabels = {
+      no_reply: 'No HTTP response',
+      tcp_unavailable: 'Management port unreachable',
+      certificate_untrusted: 'TLS certificate could not be verified',
+    };
+    setText('Http', http?.status === 'reply'
+      ? `HTTP ${http.statusCode} · ${http.latencyMs} ms`
+      : httpLabels[http?.status] || (data.managementUrl ? 'Ready to check' : 'No known web endpoint'));
+    if (data.managementUrl) management.href = data.managementUrl;
+    management.hidden = !data.managementUrl;
+    setText('Feedback', data.checkedAt ? `Checked ${fmtTime(data.checkedAt)}. Devices may ignore ICMP. A TCP refusal still indicates a response.` : 'Run an on-demand check from the monitoring PC.');
+  } catch (error) {
+    if (request === deviceConnectionRequest) setText('Feedback', error.message);
+  } finally {
+    if (request === deviceConnectionRequest) button.disabled = false;
+  }
+}
+
+function resetDeviceSnmp() {
+  deviceSnmpRequest++;
+  document.getElementById('deviceSnmp').open = false;
+  document.getElementById('deviceSnmpForm').reset();
+  document.getElementById('btnReadDeviceSnmp').disabled = false;
+  document.getElementById('deviceSnmpFeedback').textContent = 'Requires SNMP enabled on the device and access to the local dashboard.';
+  const results = document.getElementById('deviceSnmpValues');
+  results.replaceChildren();
+  results.hidden = true;
+}
+
+async function readDeviceSnmp(event) {
+  event.preventDefault();
+  const request = ++deviceSnmpRequest;
+  const input = document.getElementById('deviceSnmpCommunity');
+  const button = document.getElementById('btnReadDeviceSnmp');
+  const feedback = document.getElementById('deviceSnmpFeedback');
+  const results = document.getElementById('deviceSnmpValues');
+  const body = JSON.stringify({ip: selectedConnectionIp, community: input.value});
+  input.value = '';
+  button.disabled = true;
+  results.replaceChildren();
+  results.hidden = true;
+  feedback.textContent = 'Reading device information…';
+  try {
+    const data = await apiJson('/api/devices/connection/snmp', {method: 'POST', body});
+    if (request !== deviceSnmpRequest) return;
+    if (data.status !== 'reply') {
+      feedback.textContent = 'No SNMP values returned. Check device support, SNMP settings, and the community.';
+      return;
+    }
+    const values = data.values;
+    const seconds = values.uptimeSeconds;
+    const uptime = Number.isFinite(seconds)
+      ? `${Math.floor(seconds / 86400)}d ${Math.floor(seconds / 3600) % 24}h ${Math.floor(seconds / 60) % 60}m ${Math.floor(seconds) % 60}s`
+      : null;
+    for (const [label, value] of [
+      ['Device name', values.name], ['Interfaces', values.interfaceCount],
+      ['SNMP agent uptime', uptime], ['Description', values.description],
+    ]) {
+      if (value == null) continue;
+      const row = document.createElement('div');
+      const term = document.createElement('dt');
+      const definition = document.createElement('dd');
+      term.textContent = label;
+      definition.textContent = String(value);
+      row.append(term, definition);
+      results.append(row);
+    }
+    results.hidden = false;
+    feedback.textContent = `SNMP values read at ${fmtTime(data.checkedAt)}.`;
+  } catch (error) {
+    if (request === deviceSnmpRequest) feedback.textContent = error.message;
+  } finally {
+    if (request === deviceSnmpRequest) button.disabled = false;
+  }
+}
+
+const pendingDeviceFavorites = new Set();
+
+async function saveDeviceFavorite(assetKey) {
+  if (pendingDeviceFavorites.has(assetKey)) return;
+  pendingDeviceFavorites.add(assetKey);
+  try {
+    const result = await apiJson('/api/network/inventory/favorite', {
+      method: 'POST',
+      body: JSON.stringify({ asset_key: assetKey })
+    });
+    appState.networkInventory = result.inventory;
+    appState.devices = result.devices;
+    renderOverviewAndLanCardsAndList();
+    return result.favorite;
+  } finally {
+    pendingDeviceFavorites.delete(assetKey);
+  }
 }
 
 async function toggleDeviceFavorite(assetKey) {
   try {
-    await apiJson('/api/network/inventory/favorite', {
-      method: 'POST',
-      body: JSON.stringify({ asset_key: assetKey })
-    });
-    await loadInitialState();
+    await saveDeviceFavorite(assetKey);
   } catch (err) {
     alert(err.message);
   }
@@ -435,6 +671,19 @@ async function authorizeLanDevice(mac) {
   }
 }
 
+async function setDeviceReviewIgnored(mac, ignored) {
+  try {
+    const result = await apiJson('/api/network/inventory/review', {
+      method: 'POST',
+      body: JSON.stringify({mac, ignored})
+    });
+    appState.networkInventory = result.inventory;
+    renderOverviewAndLanCardsAndList();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 async function probeMonitoredDevice(deviceId) {
   try {
     await apiJson(`/api/devices/${encodeURIComponent(deviceId)}/probe`, {
@@ -459,28 +708,6 @@ function scanDevicePorts(ip, name) {
   }
 }
 
-async function triggerInlineLanScan() {
-  const btn = document.getElementById('btnScanLanInline');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '⏳ Scanning LAN...';
-  }
-  try {
-    await apiJson('/api/network/discover', {
-      method: 'POST',
-      body: JSON.stringify({})
-    });
-    await loadInitialState();
-  } catch (err) {
-    alert(`LAN scan error: ${err.message}`);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '🔍 Scan Local LAN Now';
-    }
-  }
-}
-
 let currentTriageMatrixFilter = 'all';
 
 function setTriageMatrixFilter(filter) {
@@ -496,26 +723,18 @@ function setTriageMatrixFilter(filter) {
 }
 
 function quickTraceDevice(ip) {
-  if (typeof navigateSidebar === 'function') {
-    navigateSidebar('toolkit');
-  } else {
-    scrollToToolkit();
-  }
-  const traceInput = document.getElementById('traceTargetInput');
-  if (traceInput) {
-    traceInput.value = ip;
-  }
-  if (typeof runTracerouteTool === 'function') {
-    runTracerouteTool();
-  }
+  scrollToToolkit();
+  switchToolkitTab('tracerouteTab');
+  setTracePreset(ip);
 }
 
-async function probeAllInfrastructureNow() {
-  const btn = document.getElementById('btnProbeAllInfra');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '⏳ Probing All APs & Switches...';
-  }
+async function probeAllInfrastructureNow(button) {
+  if (button.disabled) return;
+  const feedback = document.getElementById(button.getAttribute('aria-describedby'));
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Checking devices…';
+  feedback.textContent = 'Probing monitored devices…';
   try {
     const res = await apiJson('/api/devices/probe-all', {
       method: 'POST',
@@ -525,13 +744,13 @@ async function probeAllInfrastructureNow() {
     if (res.inventory) appState.networkInventory = res.inventory;
     if (res.activeAlerts) appState.activeAlerts = res.activeAlerts;
     await loadInitialState();
+    const count = res.devices?.length || 0;
+    feedback.textContent = count ? `Finished checking ${count} monitored ${count === 1 ? 'device' : 'devices'}.` : 'No monitored devices to check.';
   } catch (err) {
-    alert(`Probe error: ${err.message}`);
+    feedback.textContent = `Device check failed. ${err.message}`;
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '⚡ Probe All APs & Switches Now';
-    }
+    button.disabled = false;
+    button.textContent = originalLabel;
   }
 }
 
@@ -624,7 +843,7 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
       statusBadge.className = 'status-pill warning';
       statusBadge.textContent =
         noInternetDevices.length > 0
-          ? `🟠 ${noInternetDevices.length} ON LAN WITH NO INTERNET`
+          ? `🟠 MONITOR WAN DOWN · ${noInternetDevices.length} LAN DEVICES REACHABLE`
           : `🟡 ${degradedDevices.length} DEGRADED LINK`;
     }
     if (headerIcon) {
@@ -642,7 +861,7 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
     card.style.borderColor = 'var(--status-up-border)';
     if (statusBadge) {
       statusBadge.className = 'status-pill online';
-      statusBadge.textContent = `🟢 ALL ${totalInfra} APs & SWITCHES ONLINE & INTERNET READY`;
+      statusBadge.textContent = `🟢 ALL ${totalInfra} APs & SWITCHES REACHABLE`;
     }
     if (headerIcon) {
       headerIcon.style.background = 'var(--status-up-bg)';
@@ -685,7 +904,7 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
           const badgeHtml = isDown
             ? '<span class="status-pill offline" style="font-weight:800;">🔴 DEVICE DOWN / UNREACHABLE</span>'
             : isNoNet
-            ? '<span class="status-pill warning" style="font-weight:800;">🟠 CONNECTED TO LAN — NO INTERNET</span>'
+            ? '<span class="status-pill warning" style="font-weight:800;">🟠 LAN REACHABLE · MONITOR WAN DOWN</span>'
             : '<span class="status-pill warning" style="font-weight:800;">🟡 DEGRADED LINK / PACKET LOSS</span>';
 
           const devType = String(dev.type).toLowerCase();
@@ -756,7 +975,7 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
                       dev.ip
                     )}</span>
                     <span class="mono-chip" style="color:var(--text-muted);">MAC: ${esc(
-                      dev.mac || '—'
+                      dev.observedMac || '—'
                     )}</span>
                     <span style="font-size:0.76rem; color:var(--text-muted); font-weight:600;">📍 ${esc(
                       dev.location || dev.subnet || 'Office LAN'
@@ -771,17 +990,17 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
                 <div style="display:flex; gap:6px; flex-wrap:wrap;">
                   ${
                     dev.id
-                      ? `<button type="button" class="btn btn-primary btn-xs" onclick="probeMonitoredDevice('${esc(
+                      ? `<button type="button" class="btn btn-primary btn-xs" onclick="probeMonitoredDevice(${inlineString(
                           dev.id
-                        )}')">⚡ Re-Probe Now</button>`
+                        )})">⚡ Re-Probe Now</button>`
                       : ''
                   }
-                  <button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts('${esc(
+                  <button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts(${inlineString(
                     dev.ip
-                  )}', '${esc(dev.name)}')">🛡️ Nmap Port Audit</button>
-                  <button type="button" class="btn btn-secondary btn-xs" onclick="quickTraceDevice('${esc(
+                  )}, ${inlineString(dev.name)})">🛡️ Nmap Port Audit</button>
+                  <button type="button" class="btn btn-secondary btn-xs" onclick="quickTraceDevice(${inlineString(
                     dev.ip
-                  )}')">🚀 Traceroute</button>
+                  )})">🚀 Traceroute</button>
                 </div>
               </div>
 
@@ -802,9 +1021,9 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
                     <span><strong>Check Method:</strong> ${esc(
                       dev.probeMethod || 'Network + Ping Check'
                     )}</span>
-                    <span><strong>Dropped Data:</strong> ${
-                      dev.packetLossPct ?? 100
-                    }%</span>
+                    <span><strong>Unanswered checks:</strong> ${
+                      dev.packetLossPct == null ? '—' : dev.packetLossPct + '%'
+                    }</span>
                     <span><strong>Last Checked:</strong> ${esc(
                       fmtTime(dev.lastSeen)
                     )}</span>
@@ -885,10 +1104,10 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
               const netBadge = isDown
                 ? '<span class="status-pill offline">🔴 DOWN / OFFLINE</span>'
                 : isNoNet
-                ? '<span class="status-pill warning">🟠 ON LAN · NO INTERNET</span>'
+                ? '<span class="status-pill warning">🟠 LAN REACHABLE · MONITOR WAN DOWN</span>'
                 : dev.status === 'warning'
                 ? '<span class="status-pill warning">🟡 SLOW / UNSTABLE</span>'
-                : '<span class="status-pill online">🟢 ONLINE · INTERNET OK</span>';
+                : '<span class="status-pill online">🟢 REACHABLE</span>';
 
               const portsInfo =
                 dev.openPorts && dev.openPorts.length
@@ -912,14 +1131,14 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
                     dev.ip
                   )}</td>
                   <td class="mono" style="font-size:0.78rem; color:var(--text-muted);">${esc(
-                    dev.mac || '—'
+                    dev.observedMac || '—'
                   )}</td>
                   <td class="mono" style="font-size:0.76rem;">${esc(portsInfo)}</td>
                   <td class="mono">
                     ${dev.latencyMs != null ? `${dev.latencyMs} ms` : '—'}
                     <small style="color:var(--text-dim);">(${
-                      dev.packetLossPct ?? (isDown ? 100 : 0)
-                    }% loss)</small>
+                      dev.packetLossPct == null ? '—' : dev.packetLossPct + '% unanswered'
+                    })</small>
                   </td>
                   <td>${netBadge}</td>
                   <td>
@@ -942,14 +1161,14 @@ function renderDownedDevicesTriageBoard(monitoredRows) {
                       <div class="row-actions-group">
                         ${
                           dev.id
-                            ? `<button type="button" class="btn btn-secondary btn-xs" onclick="probeMonitoredDevice('${esc(
+                            ? `<button type="button" class="btn btn-secondary btn-xs" onclick="probeMonitoredDevice(${inlineString(
                                 dev.id
-                              )}')">⚡ Probe</button>`
+                              )})">⚡ Probe</button>`
                             : ''
                         }
-                        <button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts('${esc(
+                        <button type="button" class="btn btn-secondary btn-xs" onclick="scanDevicePorts(${inlineString(
                           dev.ip
-                        )}', '${esc(dev.name)}')">🛡️ Ports</button>
+                        )}, ${inlineString(dev.name)})">🛡️ Ports</button>
                       </div>
                     </div>
                   </td>

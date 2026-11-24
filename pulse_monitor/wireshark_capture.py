@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -82,11 +83,13 @@ def build_wireshark_display_filter(game_signatures: list[dict] | None = None) ->
         game_signatures = GAME_SIGNATURES
 
     domains: list[str] = []
+    exact_domains: list[str] = []
     ports: set[int] = set()
     for g in game_signatures:
         for d in g.get("domains", ()):
-            if d not in domains:
-                domains.append(d)
+            target = exact_domains if g.get("exactDomainsOnly") else domains
+            if d not in target:
+                target.append(d)
         for p in g.get("ports", ()):
             try:
                 ports.add(int(p))
@@ -94,11 +97,11 @@ def build_wireshark_display_filter(game_signatures: list[dict] | None = None) ->
                 pass
 
     clauses: list[str] = []
-    if domains:
-        dns_expr = " or ".join(f'dns.qry.name contains "{d}"' for d in domains)
-        sni_expr = " or ".join(f'tls.handshake.extensions_server_name contains "{d}"' for d in domains)
-        clauses.append(f"({dns_expr})")
-        clauses.append(f"({sni_expr})")
+    for field in ("dns.qry.name", "tls.handshake.extensions_server_name"):
+        checks = [f'{field} contains "{d}"' for d in domains]
+        checks.extend(f'{field} == "{d}"' for d in exact_domains)
+        if checks:
+            clauses.append(f"({' or '.join(checks)})")
     if ports:
         port_list = " ".join(str(p) for p in sorted(ports))
         clauses.append(f"(udp.port in {{{port_list}}} or tcp.port in {{{port_list}}})")
@@ -431,11 +434,14 @@ def dissect_raw_packet(
         else:
             client_ip, remote_ip = src_ip, dst_ip
 
-    if not client_ip:
+    if not client_ip or client_ip in infra:
         return None
 
     # 1. DNS Wire QNAME inspection
-    if 53 in (sport, dport) and app_payload:
+    if 53 in (sport, dport):
+        dns_offset = 2 if proto == 6 else 0
+        if dport != 53 or len(app_payload) <= dns_offset + 2 or app_payload[dns_offset + 2] & 0x80:
+            return None
         qname = extract_dns_qname_payload(app_payload, is_tcp=(proto == 6))
         if qname:
             sig = _match_sig_helper(domain=qname, matcher=matcher)
@@ -531,6 +537,7 @@ def dissect_raw_packet(
                 "port": 27036,
                 "protocol": "UDP",
                 "matchedIndicator": "UDP Broadcast :27036 (Steam Discovery)",
+                "frameSourceMac": raw[6:12].hex(":") if dlt == 1 else "",
                 "detectionMethod": "Wireshark LAN Broadcast",
                 "srcIp": src_ip,
                 "dstIp": dst_ip,
@@ -566,7 +573,7 @@ def dissect_raw_packet(
                 else (dport if dport in lan_game_ports else None)
             )
         if match_port is not None:
-            if len(app_payload) > 0 or ((tcp_flags & 0x12) == 0x12 and is_external_flow):
+            if app_payload:
                 sig = _match_sig_helper(port=match_port, matcher=matcher)
                 if sig:
                     return {
@@ -625,11 +632,13 @@ def parse_pcap_or_pcapng(raw_bytes: bytes) -> list[tuple[float, int, bytes]]:
         _m, _maj, _min, _tz, _sf, _snap, linktype = struct.unpack(endian + "IHHiIII", raw_bytes[:24])
         pos = 24
         packets: list[tuple[float, int, bytes]] = []
-        while pos + 16 <= len(raw_bytes):
+        while pos < len(raw_bytes):
+            if pos + 16 > len(raw_bytes):
+                raise ValueError("Capture ends in an incomplete .pcap packet header")
             ts_sec, ts_sub, incl_len, _orig_len = struct.unpack(endian + "IIII", raw_bytes[pos : pos + 16])
             pos += 16
-            if incl_len > 262144 or pos + incl_len > len(raw_bytes):
-                break
+            if pos + incl_len > len(raw_bytes):
+                raise ValueError("Capture ends in an incomplete .pcap packet")
             ts = float(ts_sec) + (ts_sub / 1_000_000_000.0 if ns_res else ts_sub / 1_000_000.0)
             packets.append((ts, int(linktype), raw_bytes[pos : pos + incl_len]))
             pos += incl_len
@@ -639,20 +648,31 @@ def parse_pcap_or_pcapng(raw_bytes: bytes) -> list[tuple[float, int, bytes]]:
     if magic == b"\x0a\x0d\x0d\x0a":
         if len(raw_bytes) < 28:
             raise ValueError("Truncated pcapng Section Header Block")
-        bom_le = raw_bytes[8:12] == b"\x4d\x3c\x2b\x1a"
-        bom_be = raw_bytes[8:12] == b"\x1a\x2b\x3c\x4d"
-        if not bom_le and not bom_be:
-            raise ValueError("Unsupported pcapng byte-order magic")
-        endian = "<" if bom_le else ">"
+        endian = "<"
         pos = 0
         if_dlts: list[int] = []
         packets = []
-        while pos + 12 <= len(raw_bytes):
+        while pos < len(raw_bytes):
+            if pos + 12 > len(raw_bytes):
+                raise ValueError("Capture ends in an incomplete .pcapng block header")
+            if raw_bytes[pos : pos + 4] == magic:
+                bom = raw_bytes[pos + 8 : pos + 12]
+                if bom == b"\x4d\x3c\x2b\x1a":
+                    endian = "<"
+                elif bom == b"\x1a\x2b\x3c\x4d":
+                    endian = ">"
+                else:
+                    raise ValueError("Unsupported pcapng byte-order magic")
             blk_type, blk_len = struct.unpack(endian + "II", raw_bytes[pos : pos + 8])
-            if blk_len < 12 or pos + blk_len > len(raw_bytes):
-                break
+            end = pos + blk_len
+            if blk_len < 12 or blk_len % 4 or end > len(raw_bytes):
+                raise ValueError("Invalid or incomplete .pcapng block")
+            if struct.unpack_from(endian + "I", raw_bytes, end - 4)[0] != blk_len:
+                raise ValueError("Mismatched .pcapng block lengths")
             body = raw_bytes[pos + 8 : pos + blk_len - 4]
             if blk_type == 0x0A0D0D0A:  # SHB resets interface list per section
+                if len(body) < 16:
+                    raise ValueError("Incomplete .pcapng section header")
                 if_dlts = []
             elif blk_type == 0x00000001 and len(body) >= 8:  # Interface Description Block (IDB)
                 link_type = struct.unpack(endian + "H", body[:2])[0]
@@ -748,9 +768,9 @@ _PcapIf._fields_ = [
 ]
 
 
-def _load_wpcap(wpcap_path: str):
+def _load_wpcap(wpcap_path: str) -> ctypes.CDLL:
     if not wpcap_path or not os.path.isfile(wpcap_path):
-        return None
+        raise FileNotFoundError(wpcap_path)
     dll = ctypes.CDLL(wpcap_path)
     dll.pcap_findalldevs.restype = ctypes.c_int
     dll.pcap_findalldevs.argtypes = [ctypes.POINTER(ctypes.POINTER(_PcapIf)), ctypes.c_char_p]
@@ -843,7 +863,7 @@ class _BpfProgram(ctypes.Structure):
     _fields_ = [("bf_len", ctypes.c_uint), ("bf_insns", ctypes.c_void_p)]
 
 
-def build_wireshark_bpf_filters(game_ports: set[int] | tuple[int, ...] | list[int]) -> list[str]:
+def build_wireshark_bpf_filters(game_ports: Iterable[int]) -> list[str]:
     """Return kernel BPF filter candidates (strict TLS-handshake-only first, then port-based fallback)."""
     extra_ports = sorted({int(p) for p in game_ports if int(p) not in (53, 80, 443, 8080, 8443, 37008)})
     game_terms = " or ".join(f"port {p}" for p in extra_ports)
@@ -867,7 +887,7 @@ def build_wireshark_bpf_filters(game_ports: set[int] | tuple[int, ...] | list[in
     return [strict, fallback_syn, fallback]
 
 
-def _apply_wpcap_bpf_filter(dll, handle: int, game_ports: set[int] | tuple[int, ...] | list[int]) -> bool:
+def _apply_wpcap_bpf_filter(dll, handle: int, game_ports: Iterable[int]) -> bool:
     """Compile and attach a kernel BPF capture filter on wpcap handle; return True if applied."""
     try:
         if not getattr(dll, "_pulse_bpf_bound", False):
@@ -927,7 +947,7 @@ class WiresharkCaptureEngine:
         self.recorder = PcapRingRecorder(pcap_path)
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._active = False
+        self._active_interfaces: set[str] = set()
         self._enabled = True
         self._selected_interfaces: list[str] = self._pick_default_interfaces()
         self._engine_name = (
@@ -978,9 +998,9 @@ class WiresharkCaptureEngine:
                     restart_needed = True
             if selected_interfaces is not None:
                 valid = {x["name"] for x in self.interfaces}
-                cleaned = [s for s in selected_interfaces if s in valid] if valid else list(selected_interfaces)
+                cleaned = [s for s in selected_interfaces if s in valid] or self._pick_default_interfaces()
                 if cleaned != self._selected_interfaces:
-                    self._selected_interfaces = cleaned or self._pick_default_interfaces()
+                    self._selected_interfaces = cleaned
                     restart_needed = True
             if enabled is not None and bool(enabled) != self._enabled:
                 self._enabled = bool(enabled)
@@ -1021,6 +1041,7 @@ class WiresharkCaptureEngine:
                 "timestamp": hit_ts,
                 "ip": client_ip,
                 "remoteIp": hit.get("remoteIp", ""),
+                "frameSourceMac": hit.get("frameSourceMac", ""),
                 "gameId": game_id,
                 "gameName": hit.get("gameName", ""),
                 "protocol": proto,
@@ -1058,6 +1079,7 @@ class WiresharkCaptureEngine:
         errbuf = ctypes.create_string_buffer(256)
         handle = dll.pcap_open_live(iface_name.encode("utf-8", "ignore"), 65535, 1, 250, errbuf)
         if not handle:
+            print(f"[wireshark-npcap] Cannot open {iface_name}: {errbuf.value.decode(errors='replace')}", flush=True)
             return
         dlt = int(dll.pcap_datalink(handle))
         hdr_ptr = ctypes.POINTER(_WinPcapPktHdr)()
@@ -1065,6 +1087,8 @@ class WiresharkCaptureEngine:
         from .game_detector import GameDetectorMixin, _NETSTAT_GAME_PORTS
 
         bpf_ok = _apply_wpcap_bpf_filter(dll, handle, _NETSTAT_GAME_PORTS)
+        with self._lock:
+            self._active_interfaces.add(iface_name)
         print(f"[wireshark-npcap] Capturing live packets on {iface_name} (dlt={dlt}, bpf={bpf_ok})", flush=True)
         try:
             while not self._stop.is_set() and not worker_stop.is_set():
@@ -1094,8 +1118,11 @@ class WiresharkCaptureEngine:
                 elif res == 0:
                     continue
                 else:
-                    time.sleep(0.25)
+                    break
         finally:
+            with self._lock:
+                if not worker_stop.is_set():
+                    self._active_interfaces.discard(iface_name)
             try:
                 dll.pcap_close(ctypes.c_void_p(handle))
             except Exception:
@@ -1141,7 +1168,11 @@ class WiresharkCaptureEngine:
             "-e",
             "tcp.flags",
             "-e",
+            "tcp.len",
+            "-e",
             "dns.qry.name",
+            "-e",
+            "dns.flags.response",
             "-e",
             "tls.handshake.extensions_server_name",
             "-e",
@@ -1160,6 +1191,7 @@ class WiresharkCaptureEngine:
             return
         with self._lock:
             self._tshark_procs.append(proc)
+            self._active_interfaces.add(iface_name)
         print(f"[wireshark-tshark] Live dissector running on {iface_name}", flush=True)
         from .game_detector import GameDetectorMixin, _NETSTAT_GAME_PORTS
 
@@ -1172,9 +1204,10 @@ class WiresharkCaptureEngine:
                     time.sleep(0.1)
                     continue
                 parts = line.rstrip("\r\n").split("|")
-                if len(parts) < 13:
+                if len(parts) < 15:
                     continue
-                ts_s, ip4_s, ip4_d, ip6_s, ip6_d, u_sp, u_dp, t_sp, t_dp, t_flags, dns_q, tls_sni, http_h = parts[:13]
+                (ts_s, ip4_s, ip4_d, ip6_s, ip6_d, u_sp, u_dp, t_sp, t_dp,
+                 t_flags, tcp_len, dns_q, dns_response, tls_sni, http_h) = parts[:15]
                 src_ip = ip4_s or ip6_s
                 dst_ip = ip4_d or ip6_d
                 with self._lock:
@@ -1195,8 +1228,12 @@ class WiresharkCaptureEngine:
                 except ValueError:
                     ts_epoch = time.time()
 
+                if dns_q and (dport != 53 or dns_response != "0"):
+                    continue
                 domain = (dns_q or tls_sni or http_h or "").strip().lower()
                 if domain:
+                    if not src_ok or src_ip in self.infra_ips:
+                        continue
                     sig = GameDetectorMixin._match_game_signature(domain=domain)
                     if sig:
                         proto = "DNS" if dns_q else ("TLS SNI" if tls_sni else "HTTP")
@@ -1207,8 +1244,8 @@ class WiresharkCaptureEngine:
                         )
                         self._emit_hit({
                             "tsEpoch": ts_epoch,
-                            "ip": client_ip,
-                            "remoteIp": remote_ip,
+                            "ip": src_ip,
+                            "remoteIp": dst_ip,
                             "gameId": sig["id"],
                             "gameName": sig["name"],
                             "domain": domain,
@@ -1230,19 +1267,19 @@ class WiresharkCaptureEngine:
                     elif dport in (19132, 27015, 27036):
                         flow_client, flow_remote = dst_ip, src_ip
                 remote_port = dport if flow_client == src_ip else sport
-                port_cand = (
-                    remote_port
-                    if (is_external_flow and remote_port in _NETSTAT_GAME_PORTS)
-                    else (sport if sport in (19132, 27015, 27036) else (dport if dport in (19132, 27015, 27036) else None))
-                )
+                if is_external_flow:
+                    port_cand = remote_port if remote_port in _NETSTAT_GAME_PORTS and (not u_sp or remote_port != 27036) else None
+                else:
+                    lan_ports = (27015,) if u_sp else (19132, 27015, 27036)
+                    port_cand = next((port for port in (sport, dport) if port in lan_ports), None)
                 if port_cand is not None and flow_client not in self.infra_ips:
                     if t_sp or t_dp:
                         try:
                             f_val = int(t_flags, 16) if t_flags.startswith("0x") else int(t_flags)
-                            if (f_val & 0x05) != 0 or (f_val & 0x12) == 0x02:
+                            if int(tcp_len or 0) <= 0 or (f_val & 0x05) != 0 or (f_val & 0x12) == 0x02:
                                 continue
                         except ValueError:
-                            pass
+                            continue
                     sig = GameDetectorMixin._match_game_signature(port=port_cand)
                     if sig:
                         self._emit_hit({
@@ -1257,6 +1294,11 @@ class WiresharkCaptureEngine:
                             "detectionMethod": "TShark Packet Flow",
                         })
         finally:
+            with self._lock:
+                if proc in self._tshark_procs:
+                    self._tshark_procs.remove(proc)
+                if not worker_stop.is_set():
+                    self._active_interfaces.discard(iface_name)
             try:
                 proc.terminate()
             except Exception:
@@ -1321,7 +1363,7 @@ class WiresharkCaptureEngine:
         with self._lock:
             procs = list(self._tshark_procs)
             self._tshark_procs.clear()
-            self._active = False
+            self._active_interfaces.clear()
         for proc in procs:
             try:
                 proc.terminate()
@@ -1342,24 +1384,19 @@ class WiresharkCaptureEngine:
         if not enabled:
             return
 
-        started_any = False
         for iface in ifaces:
             if use_tshark:
                 t = threading.Thread(target=self._run_tshark_interface, args=(iface, self._worker_stop), daemon=True)
                 t.start()
                 self._workers.append(t)
-                started_any = True
             elif use_wpcap:
                 t = threading.Thread(target=self._run_wpcap_interface, args=(iface, self._worker_stop), daemon=True)
                 t.start()
                 self._workers.append(t)
-                started_any = True
 
         tzsp_t = threading.Thread(target=self._run_tzsp_listener, args=(self._worker_stop,), daemon=True)
         tzsp_t.start()
         self._workers.append(tzsp_t)
-        with self._lock:
-            self._active = bool(started_any or self._tzsp_active)
 
     def start(self) -> None:
         self._stop.clear()
@@ -1373,7 +1410,8 @@ class WiresharkCaptureEngine:
         with self._lock:
             return {
                 "enabled": self._enabled,
-                "active": bool(self._active or self._tzsp_active),
+                "active": bool(self._active_interfaces or self._tzsp_active),
+                "activeInterfaceCount": len(self._active_interfaces),
                 "engine": self._engine_name,
                 "tsharkInstalled": bool(self.binaries.get("tsharkInstalled")),
                 "tsharkPath": self.binaries.get("tsharkPath", ""),

@@ -32,6 +32,61 @@ function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
+function inlineString(value) {
+  return esc(JSON.stringify(String(value ?? '')));
+}
+
+let pressedDashboardControl = null;
+let dashboardReleaseTimer;
+const deferredControlRenders = new Map();
+const renderedControlMarkup = new WeakMap();
+
+function deferDashboardControlRender(region, render) {
+  if (!pressedDashboardControl?.isConnected || !region.contains(pressedDashboardControl)) return false;
+  deferredControlRenders.set(region, render);
+  return true;
+}
+
+function renderDashboardControls(region, markup) {
+  if (renderedControlMarkup.get(region) === markup) {
+    deferredControlRenders.delete(region);
+    return;
+  }
+  if (deferDashboardControlRender(region, () => renderDashboardControls(region, markup))) return;
+  const focused = document.activeElement;
+  const action = region.contains(focused) ? focused.getAttribute('onclick') : null;
+  region.innerHTML = markup;
+  renderedControlMarkup.set(region, markup);
+  if (action) {
+    const replacement = [...region.querySelectorAll('[onclick]')].find(el => el.getAttribute('onclick') === action);
+    replacement?.focus({preventScroll: true});
+  }
+}
+
+function releaseDashboardControl(delay) {
+  clearTimeout(dashboardReleaseTimer);
+  dashboardReleaseTimer = setTimeout(() => {
+    pressedDashboardControl = null;
+    const renders = [...deferredControlRenders.values()];
+    deferredControlRenders.clear();
+    renders.forEach(render => render());
+  }, delay);
+}
+
+document.addEventListener('pointerdown', event => {
+  if (!event.isPrimary || event.button !== 0) return;
+  clearTimeout(dashboardReleaseTimer);
+  pressedDashboardControl = event.target.closest?.('button, a, summary, [data-topo-node-id], .topo-link-hit');
+}, true);
+document.addEventListener('pointerup', event => {
+  if (event.isPrimary) releaseDashboardControl(200);
+}, true);
+document.addEventListener('pointercancel', event => {
+  if (event.isPrimary) releaseDashboardControl(0);
+}, true);
+document.addEventListener('click', () => releaseDashboardControl(0), true);
+window.addEventListener('blur', () => releaseDashboardControl(0));
+
 function fmtTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -60,25 +115,33 @@ async function apiJson(url, options = {}) {
 // Combine monitored devices and discovered LAN inventory into unified list rows
 function buildUnifiedDeviceRows() {
   const invByIp = new Map();
+  const invByMac = new Map();
   for (const item of appState.networkInventory || []) {
-    if (item && item.ip && !invByIp.has(item.ip)) invByIp.set(item.ip, item);
+    if (!item?.ip) continue;
+    if (item.mac) invByMac.set(item.mac.toLowerCase(), item);
+    const previous = invByIp.get(item.ip);
+    if (!previous || (item.isOnline && !previous.isOnline)) invByIp.set(item.ip, item);
   }
 
   const rows = [];
-  const monitoredIps = new Set();
+  const mergedInventory = new Set();
 
   for (const dev of appState.devices || []) {
     const ip = dev.ip;
-    monitoredIps.add(ip);
-    const asset = invByIp.get(ip) || {};
+    const atAddress = invByIp.get(ip);
+    const match = dev.mac ? invByMac.get(dev.mac.toLowerCase()) : atAddress?.isOnline ? atAddress : null;
+    const asset = match?.ip === ip ? match : {};
+    if (asset.mac) mergedInventory.add(asset.mac);
     const mac = dev.mac || asset.mac || '';
+    const assetKey = mac ? `mac:${mac.toLowerCase()}` : `ip:${ip}`;
     const status = dev.status || 'unknown';
-    const online = dev.alive === true || status === 'online' || status === 'warning';
+    const online = dev.directlyReachable ?? (status === 'online' || status === 'warning');
     rows.push({
       id: dev.id,
       name: dev.name || ip,
       ip,
       mac,
+      observedMac: asset.isOnline ? (asset.observedMac ?? '') : '',
       vendor: dev.vendor || asset.vendor || (dev.type ? dev.type.toUpperCase() : 'Monitored Equipment'),
       location: dev.location || 'Office Network',
       subnet: dev.subnet || '',
@@ -89,9 +152,10 @@ function buildUnifiedDeviceRows() {
       port: dev.port || 80,
       monitored: true,
       online,
+      directlyReachable: dev.directlyReachable ?? online,
       status,
-      connectivityState: dev.connectivityState || (online ? 'ONLINE_WITH_INTERNET' : 'DEVICE_DOWN'),
-      hasInternet: dev.hasInternet !== undefined ? Boolean(dev.hasInternet) : online,
+      connectivityState: dev.connectivityState || (status === 'offline' ? 'DEVICE_DOWN' : 'UNKNOWN'),
+      hasInternet: dev.hasInternet ?? null,
       probeMethod: dev.probeMethod || '',
       openPorts: Array.isArray(dev.openPorts) ? dev.openPorts : [],
       diagnosisTitle: dev.diagnosisTitle || '',
@@ -100,22 +164,26 @@ function buildUnifiedDeviceRows() {
       fixSteps: Array.isArray(dev.fixSteps) ? dev.fixSteps : [],
       latencyMs: dev.latencyMs ?? dev.avgLatencyMs ?? null,
       avgLatencyMs: dev.avgLatencyMs ?? dev.latencyMs ?? null,
-      packetLossPct: dev.packetLossPct ?? 0,
-      jitterMs: dev.jitterMs ?? 0,
+      packetLossPct: dev.packetLossPct ?? null,
+      jitterMs: dev.jitterMs ?? null,
       favorite: Boolean(dev.favorite || asset.favorite),
       archived: Boolean(dev.archived || asset.archived),
-      favoriteKey: mac ? `mac:${mac.toLowerCase()}` : `ip:${ip}`,
+      assetKey,
+      favoriteKey: (dev.favorite && dev.favoriteKey) || (asset.favorite && asset.favoriteKey) || assetKey,
       authorized: true,
       isNew: false,
       firstSeen: asset.firstSeen || '',
+      lastProbeAt: dev.lastChecked || '',
+      probeIntervalSec: dev.probeIntervalSec,
       lastSeen: dev.lastChecked || asset.lastSeen || ''
     });
   }
 
   for (const asset of appState.networkInventory || []) {
-    if (!asset || !asset.ip || monitoredIps.has(asset.ip)) continue;
+    if (!asset || !asset.ip || mergedInventory.has(asset.mac)) continue;
     const online = Boolean(asset.isOnline);
     const mac = asset.mac || '';
+    const assetKey = mac ? `mac:${mac.toLowerCase()}` : `ip:${asset.ip}`;
     const vendorName =
       asset.vendor && !asset.vendor.toLowerCase().includes('unknown') ? asset.vendor : 'LAN Client';
     rows.push({
@@ -123,21 +191,26 @@ function buildUnifiedDeviceRows() {
       name: asset.name || asset.suggestedName || asset.ip,
       ip: asset.ip,
       mac,
+      observedMac: asset.observedMac ?? mac,
       vendor: vendorName,
-      location: asset.arpType ? `ARP (${asset.arpType})` : 'LAN / Wi-Fi',
+      location: asset.arpType === 'icmp' ? 'ICMP echo'
+        : asset.arpType === 'dhcp' ? 'Router DHCP'
+        : asset.arpType ? 'ARP cache' : 'LAN discovery',
       type: 'lan-client',
       port: null,
       monitored: false,
       online,
       status: online ? 'online' : 'offline',
       latencyMs: null,
-      packetLossPct: online ? 0 : 100,
+      packetLossPct: null,
       jitterMs: null,
       favorite: Boolean(asset.favorite),
       archived: Boolean(asset.archived),
-      favoriteKey: mac ? `mac:${mac.toLowerCase()}` : `ip:${asset.ip}`,
+      assetKey,
+      favoriteKey: asset.favoriteKey || assetKey,
       authorized: Boolean(asset.authorized),
-      isNew: Boolean(asset.isNew && !asset.authorized),
+      isNew: Boolean(!asset.authorized && !asset.reviewIgnored),
+      reviewIgnored: Boolean(!asset.authorized && asset.reviewIgnored),
       firstSeen: asset.firstSeen || '',
       lastSeen: asset.lastSeen || ''
     });

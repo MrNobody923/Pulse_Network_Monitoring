@@ -142,10 +142,30 @@
   box-shadow: 0 24px 64px rgba(2, 6, 23, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-.wizard-modal-box,
-.discover-modal-box {
+.wizard-modal-box {
   max-width: 760px;
 }
+
+.discover-modal-box {
+  width: min(760px, calc(100% - 24px));
+  max-width: none;
+  margin: auto;
+  padding: 0;
+  color: var(--text-main);
+}
+.discover-modal-box::backdrop { background: rgba(2, 6, 23, 0.55); }
+.discover-modal-box .modal-footer { flex-wrap: wrap; }
+.discovery-status,
+#discoverCoverage { font-size: 0.82rem; color: var(--text-muted); }
+.discovery-status:empty { display: none; }
+.discovery-results { max-height: 360px; overflow: auto; margin-top: 8px; }
+.discovery-results .device-list-table { min-width: 0; }
+.discovery-results td { overflow-wrap: anywhere; }
+.discovery-results th:last-child,
+.discovery-results td:last-child { text-align: center; }
+.discovery-results small { display: block; margin-top: 3px; color: var(--text-muted); }
+.discovery-results .star-btn { min-width: 38px; min-height: 38px; }
+#discoverCoverage summary { cursor: pointer; }
 
 .modal-header {
   padding: 18px 22px;

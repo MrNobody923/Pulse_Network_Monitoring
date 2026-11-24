@@ -5,7 +5,12 @@ from __future__ import annotations
 import uuid
 from collections import deque
 
+from typing import TYPE_CHECKING, cast
+
 from .config import utc_now, validate_ip, validate_port
+
+if TYPE_CHECKING:
+    from .engine import Monitor
 
 VALID_NODE_TYPES = {
     "cloud",
@@ -24,6 +29,7 @@ class TopologyMixin:
     """Persists custom network topology nodes/links and correlates live down/problem states."""
 
     def _topology_store(self) -> None:
+        self = cast("Monitor", self)
         with self._connect() as db:
             db.executescript(
                 """
@@ -112,6 +118,7 @@ class TopologyMixin:
         )
 
     def _raw_topology_nodes(self) -> list[dict]:
+        self = cast("Monitor", self)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM topology_nodes ORDER BY created_at ASC, name ASC"
@@ -119,6 +126,7 @@ class TopologyMixin:
         return [dict(row) for row in rows]
 
     def _raw_topology_links(self) -> list[dict]:
+        self = cast("Monitor", self)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM topology_links ORDER BY created_at ASC"
@@ -132,6 +140,7 @@ class TopologyMixin:
         devices_by_ip: dict[str, dict],
         inventory_by_ip: dict[str, dict],
     ) -> dict:
+        self = cast("Monitor", self)
         node_type = raw_node["node_type"]
         ip = raw_node.get("ip") or ""
         device_id = raw_node.get("device_id") or ""
@@ -200,7 +209,10 @@ class TopologyMixin:
             conn_state = mon_dev.get("connectivityState") or ""
             dev_status = mon_dev.get("status") or "unknown"
 
-            if dev_status == "offline" or conn_state == "DEVICE_DOWN":
+            if conn_state == "ARP_OBSERVED":
+                health_state = "unknown"
+                status_label = "ARP OBSERVED"
+            elif dev_status == "offline" or conn_state == "DEVICE_DOWN":
                 health_state = "down"
                 status_label = "DEVICE DOWN"
             elif conn_state == "ONLINE_NO_INTERNET":
@@ -223,7 +235,11 @@ class TopologyMixin:
                 wan_up = self._is_wan_internet_up()
                 alive = True
                 has_internet = wan_up
-                if wan_up:
+                if wan_up is None:
+                    health_state = "unknown"
+                    status_label = "LAN OBSERVED"
+                    diag_summary = "Inventory contains a recent LAN observation for this host."
+                elif wan_up:
                     health_state = "online"
                     status_label = "ONLINE (ARP)"
                     diag_summary = "Host seen active on LAN ARP scan."
@@ -267,6 +283,7 @@ class TopologyMixin:
         }
 
     def get_topology(self) -> dict:
+        self = cast("Monitor", self)
         raw_nodes = self._raw_topology_nodes()
         raw_links = self._raw_topology_links()
         hydrated_devices = self._hydrated_devices()
@@ -349,6 +366,7 @@ class TopologyMixin:
         }
 
     def add_topology_node(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
         if not isinstance(payload, dict):
             raise ValueError("Invalid topology node payload")
         name = str(payload.get("name") or "").strip()[:120]
@@ -467,6 +485,7 @@ class TopologyMixin:
                 pass
 
     def move_topology_node(self, node_id: str, payload: dict) -> dict:
+        self = cast("Monitor", self)
         try:
             x = max(40.0, min(2400.0, float(payload.get("x", 0))))
             y = max(40.0, min(1600.0, float(payload.get("y", 0))))
@@ -482,6 +501,7 @@ class TopologyMixin:
         return {"success": True, "id": node_id, "x": x, "y": y}
 
     def update_topology_node(self, node_id: str, payload: dict) -> dict:
+        self = cast("Monitor", self)
         existing = next((n for n in self._raw_topology_nodes() if n["id"] == node_id), None)
         if existing is None:
             raise ValueError("Topology node not found")
@@ -532,6 +552,7 @@ class TopologyMixin:
         return {"success": True, "topology": topo}
 
     def delete_topology_node(self, node_id: str, delete_monitored: bool = False) -> dict:
+        self = cast("Monitor", self)
         existing = next((n for n in self._raw_topology_nodes() if n["id"] == node_id), None)
         if existing is None:
             raise ValueError("Topology node not found")
@@ -559,6 +580,7 @@ class TopologyMixin:
         return {"success": True, "topology": topo}
 
     def add_topology_link(self, payload: dict) -> dict:
+        self = cast("Monitor", self)
         source_id = str(payload.get("sourceId") or "").strip()
         target_id = str(payload.get("targetId") or "").strip()
         if not source_id or not target_id or source_id == target_id:
@@ -611,6 +633,7 @@ class TopologyMixin:
         return {"success": True, "linkId": link_id, "topology": topo}
 
     def delete_topology_link(self, link_id: str) -> dict:
+        self = cast("Monitor", self)
         existing = next((l for l in self._raw_topology_links() if l["id"] == link_id), None)
         if existing is None:
             raise ValueError("Topology cable link not found")
@@ -628,6 +651,7 @@ class TopologyMixin:
 
     def auto_layout_topology(self) -> dict:
         """Arrange mapped network devices neatly into clean rows."""
+        self = cast("Monitor", self)
         nodes = self._raw_topology_nodes()
         if not nodes:
             return {"success": True, "topology": self.get_topology()}
@@ -666,6 +690,7 @@ class TopologyMixin:
 
     def clear_topology(self) -> dict:
         """Remove all nodes and cable links from the company topology map."""
+        self = cast("Monitor", self)
         with self._connect() as db:
             node_count = int(db.execute("SELECT COUNT(*) FROM topology_nodes").fetchone()[0] or 0)
             link_count = int(db.execute("SELECT COUNT(*) FROM topology_links").fetchone()[0] or 0)
@@ -689,6 +714,7 @@ class TopologyMixin:
 
     def import_monitored_to_topology(self) -> dict:
         """Import existing monitored infrastructure devices and wire up subnet hierarchy."""
+        self = cast("Monitor", self)
         devices = self.get_devices()
         existing = self._raw_topology_nodes()
         existing_ips = {n["ip"] for n in existing if n.get("ip")}
@@ -826,7 +852,8 @@ class TopologyMixin:
         return {"success": True, "added": added, "topology": topo}
 
     def ping_topology_pdu(self, source_id: object, target_id: object) -> dict:
-        """Test Ping: checks cable path and sends a live connection check to the target device."""
+        """Probe the target from Pulse and return any path drawn on the saved map."""
+        self = cast("Monitor", self)
         topo = self.get_topology()
         node_map = {n["id"]: n for n in topo["nodes"]}
         src_id = str(source_id or "").strip()
@@ -837,7 +864,6 @@ class TopologyMixin:
             src_id = dst_id
 
         dst_node = node_map[dst_id]
-        src_node = node_map[src_id]
 
         # Find shortest cabled path between src_id and dst_id via BFS
         adj: dict[str, list[str]] = {}
@@ -860,10 +886,10 @@ class TopologyMixin:
                     if nxt not in visited:
                         visited.add(nxt)
                         queue_bfs.append(cur_path + [nxt])
-            path_ids = found_path if found_path else [src_id, dst_id]
+            path_ids = found_path or []
 
         # Check intermediate hop health along cabled path (excluding src & dst)
-        failed_hop = next(
+        mapped_unhealthy = next(
             (node_map[nid] for nid in path_ids[1:-1] if node_map[nid]["healthState"] in {"down", "disconnected"}),
             None,
         )
@@ -874,38 +900,36 @@ class TopologyMixin:
         method = "ISP WAN Check"
         if dst_node["node_type"] == "cloud" and not dst_node.get("ip"):
             isp = self.probe_isp()
-            reachable = isp.get("overallHealth") != "OUTAGE"
+            reachable = any(probe["alive"] for probe in isp.get("probes", []) if probe.get("id") != "gateway")
             latency_ms = isp.get("tier1LatencyMs")
         elif dst_node.get("ip"):
             target_ip = dst_node["ip"]
-            target_port = int(dst_node.get("port") or 80)
             matched_dev = next((d for d in self.get_devices() if d["ip"] == target_ip), None)
-            if matched_dev:
-                res = self.probe_device(matched_dev)
-                self.latest_devices[target_ip] = res
-                self.enrich_fleet_diagnostics(list(self.latest_devices.values()))
-                reachable = bool(res.get("alive"))
-                latency_ms = res.get("latencyMs")
-                method = res.get("probeMethod") or "TCP + ICMP"
+            target_port = int((matched_dev or {}).get("port") or dst_node.get("port") or 80)
+            tcp_open, tcp_rst, tcp_ms = self._probe_tcp_socket(target_ip, target_port, 0.9)
+            icmp_ok, icmp_ms = self._probe_icmp(target_ip, timeout_ms=900)
+            reachable = tcp_open or tcp_rst or icmp_ok
+            latency_ms = icmp_ms if icmp_ok and icmp_ms is not None else tcp_ms if reachable else None
+            if icmp_ok:
+                method = "ICMP Echo Reply"
+            elif tcp_open or tcp_rst:
+                method = f"TCP/{target_port} {'accepted' if tcp_open else 'refused'}"
             else:
-                tcp_open, tcp_rst, tcp_ms = self._probe_tcp_socket(target_ip, target_port, 0.9)
-                icmp_ok, icmp_ms = self._probe_icmp(target_ip, timeout_ms=900)
-                reachable = tcp_open or tcp_rst or icmp_ok
-                latency_ms = icmp_ms if icmp_ok and icmp_ms is not None else tcp_ms
-                method = "ICMP Echo" if icmp_ok else "TCP Probe"
-
-        if not reachable and failed_hop:
-            msg = f"PING FAILED at {failed_hop['name']} ({failed_hop.get('ip') or 'No IP'}) — this device is OFFLINE."
-        elif reachable and dst_node["healthState"] == "no_internet":
-            msg = f"LOCAL OK ({latency_ms} ms), NO INTERNET at {dst_node['name']}."
-        elif reachable:
-            msg = f"PING OK: {src_node['name']} → {dst_node['name']} responded in {latency_ms} ms ({method})."
+                method = f"ICMP and TCP/{target_port}"
         else:
-            msg = f"NO RESPONSE: {src_node['name']} → {dst_node['name']} ({dst_node.get('ip') or 'internet'}) did not reply."
+            method = "No target address"
+
+        if reachable:
+            timing = f" in {latency_ms:g} ms" if latency_ms is not None else ""
+            msg = f"{dst_node['name']} responded to Pulse{timing} ({method})."
+        elif method == "No target address":
+            msg = f"Set an IP address for {dst_node['name']} to check its reachability."
+        else:
+            msg = f"Pulse received no response from {dst_node['name']} ({method})."
 
         self._record_event(
             "TOPOLOGY_PDU_PING",
-            "INFO" if reachable else "CRITICAL",
+            "INFO" if reachable else "WARNING",
             f"Test Ping {'OK' if reachable else 'Failed'}",
             msg,
             ip=dst_node.get("ip") or "",
@@ -917,8 +941,10 @@ class TopologyMixin:
             "reachable": reachable,
             "latencyMs": latency_ms,
             "method": method,
+            "probeOrigin": "monitor",
             "pathNodeIds": path_ids,
-            "failedAtNodeId": failed_hop["id"] if (not reachable and failed_hop) else None,
+            "failedAtNodeId": None,
+            "mappedUnhealthyNodeId": mapped_unhealthy["id"] if mapped_unhealthy else None,
             "message": msg,
             "topology": self.get_topology(),
         }

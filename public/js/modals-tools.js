@@ -16,7 +16,10 @@ function setTracePreset(host) {
   runTracerouteTool();
 }
 
+let tracerouteRequest = 0;
+
 async function runTracerouteTool() {
+  const request = ++tracerouteRequest;
   const host = document.getElementById('traceTargetInput').value.trim();
   const maxHops =
     parseInt(document.getElementById('traceHopsInput').value, 10) || 15;
@@ -28,6 +31,7 @@ async function runTracerouteTool() {
       method: 'POST',
       body: JSON.stringify({ host, maxHops })
     });
+    if (request !== tracerouteRequest) return;
     if (!res.hops || res.hops.length === 0) {
       area.innerHTML = `<div class="tool-empty-state"><p>${esc(
         res.error || 'No hops returned.'
@@ -57,7 +61,7 @@ async function runTracerouteTool() {
                 )}</td>
                 <td>${esc((h.role && h.role.label) || 'Transit Node')}</td>
                 <td class="mono">${
-                  h.latencyMs != null ? `${h.latencyMs} ms` : '*'
+                  esc(h.latencyDisplay || (h.latencyMs != null ? `${h.latencyMs} ms` : '*'))
                 }</td>
                 <td><span class="status-pill ${
                   h.status === 'success' ? 'online' : 'warning'
@@ -71,6 +75,7 @@ async function runTracerouteTool() {
       </div>
     `;
   } catch (err) {
+    if (request !== tracerouteRequest) return;
     area.innerHTML = `<div class="tool-empty-state"><p style="color:var(--accent-red);">${esc(
       err.message
     )}</p></div>`;
@@ -153,13 +158,13 @@ async function runPortCheckTool() {
         <span style="font-size:2rem;">${res.open ? '✅' : '🚫'}</span>
         <div>
           <h4>${esc(res.host)}:${res.port} is ${
-      res.open ? 'OPEN & RESPONDING' : 'CLOSED / FILTERED'
+      esc(String(res.state || 'unconfirmed').toUpperCase())
     }</h4>
           <p style="color:var(--text-muted); font-size:0.86rem;">
             ${
               res.open
-                ? `TCP handshake succeeded in ${res.latencyMs} ms.`
-                : esc(res.error || 'Connection timed out.')
+                ? (res.latencyMs == null ? 'Nmap confirmed the port is open.' : `TCP handshake succeeded in ${res.latencyMs} ms.`)
+                : esc(res.error || 'The monitor could not confirm the port state.')
             }
           </p>
         </div>
@@ -173,15 +178,51 @@ async function runPortCheckTool() {
 }
 
 // Modals & Wizards
+const modalOpeners = new WeakMap();
+
 function openModal(id) {
   const modal = document.getElementById(id);
-  if (modal) modal.classList.add('open');
+  if (!modal || modal.classList.contains('open')) return;
+  modalOpeners.set(modal, document.activeElement);
+  modal.classList.add('open');
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  const title = modal.querySelector('.modal-header h2, .modal-header h3');
+  if (title) {
+    if (!title.id) title.id = `${id}Title`;
+    modal.setAttribute('aria-labelledby', title.id);
+  }
+  modal.querySelector('.modal-close-btn')?.focus();
 }
 
 function closeModal(id) {
   const modal = document.getElementById(id);
-  if (modal) modal.classList.remove('open');
+  if (!modal?.classList.contains('open')) return;
+  modal.classList.remove('open');
+  const opener = modalOpeners.get(modal);
+  const focusTarget = opener?.getClientRects().length ? opener : opener?.closest('details')?.querySelector('summary');
+  focusTarget?.focus({preventScroll: true});
+  modalOpeners.delete(modal);
 }
+
+document.addEventListener('keydown', event => {
+  const modal = [...document.querySelectorAll('.modal-overlay.open')].at(-1);
+  if (!modal || event.defaultPrevented || document.querySelector('dialog[open]')) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeModal(modal.id);
+  } else if (event.key === 'Tab') {
+    const items = [...modal.querySelectorAll('button, input, select, textarea, a[href]')].filter(
+      el => !el.matches(':disabled') && el.tabIndex >= 0 && el.getClientRects().length
+    );
+    const first = items[0];
+    const last = items.at(-1);
+    if (!modal.contains(document.activeElement) || document.activeElement === (event.shiftKey ? first : last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+  }
+});
 
 async function submitAddDevice(event) {
   event.preventDefault();
@@ -212,11 +253,13 @@ function openRouterConfigForIp(ip) {
   const ipEl = document.getElementById('routerIpInput');
   const portEl = document.getElementById('routerPortInput');
   const snmpEl = document.getElementById('routerSnmpInput');
+  const wanIndexEl = document.getElementById('routerWanIndexInput');
   const stokEl = document.getElementById('routerStokInput');
   const passEl = document.getElementById('routerPasswordInput');
   if (ipEl) ipEl.value = ip || (target && target.ip) || '192.168.0.1';
   if (portEl) portEl.value = (target && target.port) || 80;
-  if (snmpEl) snmpEl.value = (target && target.snmpCommunity) || 'public';
+  if (snmpEl) snmpEl.value = '';
+  if (wanIndexEl) wanIndexEl.value = target?.wanInterfaceIndex ?? '';
   if (stokEl) stokEl.value = '';
   if (passEl) passEl.value = '';
   openModal('routerConfigModal');
@@ -229,13 +272,17 @@ function openRouterConfigForSelected() {
 
 async function submitRouterConfig(event) {
   event.preventDefault();
+  const tokenInput = document.getElementById('routerStokInput');
+  const passwordInput = document.getElementById('routerPasswordInput');
   const payload = {
     ip: document.getElementById('routerIpInput').value.trim(),
     port: parseInt((document.getElementById('routerPortInput') || {}).value, 10) || 80,
-    stok: document.getElementById('routerStokInput').value.trim(),
-    password: document.getElementById('routerPasswordInput').value,
-    snmpCommunity: ((document.getElementById('routerSnmpInput') || {}).value || 'public').trim()
+    wanInterfaceIndex: document.getElementById('routerWanIndexInput').value
   };
+  const snmpCommunity = document.getElementById('routerSnmpInput').value.trim();
+  if (snmpCommunity) payload.snmpCommunity = snmpCommunity;
+  if (tokenInput.value.trim()) payload.stok = tokenInput.value.trim();
+  if (passwordInput.value) payload.password = passwordInput.value;
   try {
     const res = await apiJson('/api/routers/config', {
       method: 'POST',
@@ -243,6 +290,8 @@ async function submitRouterConfig(event) {
     });
     if (res && res.routers) appState.routers = res.routers;
     appState.selectedRouterIp = payload.ip;
+    tokenInput.value = '';
+    passwordInput.value = '';
     closeModal('routerConfigModal');
     await loadInitialState();
   } catch (err) {
@@ -286,6 +335,8 @@ async function runDiagnosticWizard() {
                 ? 'online'
                 : f.status === 'WARNING'
                 ? 'warning'
+                : f.status === 'UNAVAILABLE'
+                ? 'new'
                 : 'offline'
             }">${esc(f.status)}</span>
             <strong style="margin-left:8px;">${esc(f.title)}</strong>
@@ -311,60 +362,100 @@ async function runDiagnosticWizard() {
   }
 }
 
-async function runNetworkDiscovery() {
+function openNetworkDiscovery() {
+  const dialog = document.getElementById('discoverDevicesModal');
+  if (!dialog.open) dialog.showModal();
+  document.getElementById('discoverDeviceSearch').value = '';
+  document.getElementById('discoverFavouriteStatus').textContent = '';
+  const scan = document.getElementById('btnRunLanDiscovery');
+  if (!scan.disabled) {
+    document.getElementById('discoverScanStatus').textContent = appState.lastDiscoveryAt
+      ? `Last LAN scan ${fmtTime(appState.lastDiscoveryAt)}`
+      : 'Run a LAN scan to look for devices.';
+  }
+  renderDiscoveryResults();
+}
+
+function renderDiscoveryResults() {
   const content = document.getElementById('discoverModalContent');
-  content.innerHTML =
-    '<div class="tool-empty-state"><div class="spinner-ring"></div><p>Scanning local wired &amp; Wi-Fi LAN subnets...</p></div>';
+  const query = document.getElementById('discoverDeviceSearch').value.trim().toLowerCase();
+  const devices = appState.networkInventory.filter(device => !device.archived);
+  const filtered = devices.filter(device =>
+    [device.name, device.suggestedName, device.ip, device.observedMac, device.vendor]
+      .some(value => String(value ?? '').toLowerCase().includes(query))
+  ).sort((a, b) => Number(b.isOnline) - Number(a.isOnline));
+  if (!filtered.length) {
+    content.innerHTML = `<p class="discovery-status">${query ? 'No devices match your search.' : 'No discovered devices to show.'}</p>`;
+    return;
+  }
+  const sources = {icmp: 'ICMP echo', dynamic: 'ARP cache', static: 'ARP cache', dhcp: 'Router DHCP'};
+  content.innerHTML = `
+    <p class="discovery-status">${filtered.length} of ${devices.length} discovered devices</p>
+    <div class="device-list-table-wrap discovery-results">
+      <table class="device-list-table">
+        <thead><tr><th scope="col">Device</th><th scope="col">Address</th><th scope="col">Favourite</th></tr></thead>
+        <tbody>${filtered.map(device => {
+          const name = device.suggestedName || device.name || device.ip;
+          const key = device.favoriteKey || (device.mac ? `mac:${device.mac.toLowerCase()}` : `ip:${device.ip}`);
+          return `<tr>
+            <td>${esc(name)}<small>${esc(sources[device.arpType] || 'LAN observation')} · ${esc(fmtTime(device.lastSeen))}</small></td>
+            <td class="mono">${esc(device.ip)}<small>${esc(device.observedMac || 'MAC unknown')}</small></td>
+            <td><button type="button" class="star-btn ${device.favorite ? 'active' : ''}"
+              data-favorite-key="${esc(key)}" data-inventory-mac="${esc(device.mac)}"
+              aria-label="Favourite ${esc(name)}" aria-pressed="${Boolean(device.favorite)}"
+              onclick="saveDiscoveryFavorite(this)" ${pendingDeviceFavorites.has(key) ? 'disabled' : ''}>${device.favorite ? '★' : '☆'}</button></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+}
+
+async function saveDiscoveryFavorite(button) {
+  const feedback = document.getElementById('discoverFavouriteStatus');
+  const key = button.dataset.favoriteKey;
+  button.disabled = true;
   try {
-    const res = await apiJson('/api/network/discover', {
-      method: 'POST',
-      body: JSON.stringify({})
-    });
-    await loadInitialState();
-    const list = res.inventory || res.devices || [];
-    content.innerHTML = `
-      <div style="margin-bottom:10px; font-size:0.85rem; color:var(--text-muted);">
-        Found <strong>${
-          res.totalDiscovered ?? list.length
-        }</strong> active hosts across <code>${esc(
-      (res.networks || []).join(', ')
-    )}</code>.
-      </div>
-      <div class="device-list-table-wrap" style="max-height:360px; overflow-y:auto;">
-        <table class="device-list-table">
-          <thead>
-            <tr>
-              <th style="width: 22%;">IP Address</th>
-              <th style="width: 24%;">MAC Address</th>
-              <th style="width: 38%;">Vendor / Name</th>
-              <th style="width: 16%;">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${list
-              .map(
-                d => `
-              <tr>
-                <td class="mono" style="color:var(--accent-cyan);">${esc(
-                  d.ip
-                )}</td>
-                <td class="mono">${esc(d.mac || '—')}</td>
-                <td>${esc(d.suggestedName || d.name || d.vendor)}</td>
-                <td><span class="status-pill ${
-                  d.isOnline !== false ? 'online' : 'offline'
-                }">${d.isOnline !== false ? 'ONLINE' : 'OFFLINE'}</span></td>
-              </tr>
-            `
-              )
-              .join('')}
-          </tbody>
-        </table>
-      </div>
-    `;
-  } catch (err) {
-    content.innerHTML = `<div class="tool-empty-state"><p style="color:var(--accent-red);">${esc(
-      err.message
-    )}</p></div>`;
+    const favorite = await saveDeviceFavorite(key);
+    if (favorite == null) return;
+    feedback.textContent = favorite ? 'Added to Favourites.' : 'Removed from Favourites.';
+    if (button.isConnected) {
+      const updated = appState.networkInventory.find(device => device.mac === button.dataset.inventoryMac);
+      if (updated) button.dataset.favoriteKey = updated.favoriteKey || key;
+      button.setAttribute('aria-pressed', String(favorite));
+      button.classList.toggle('active', favorite);
+      button.textContent = favorite ? '★' : '☆';
+    } else {
+      renderDiscoveryResults();
+    }
+  } catch (error) {
+    feedback.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runNetworkDiscovery() {
+  const button = document.getElementById('btnRunLanDiscovery');
+  const status = document.getElementById('discoverScanStatus');
+  button.disabled = true;
+  status.textContent = 'Scanning the configured local subnets…';
+  try {
+    const scan = await apiJson('/api/network/discover', {method: 'POST', body: '{}'});
+    appState.lastDiscoveryAt = scan.timestamp;
+    appState.networkInventory = scan.inventory;
+    appState.devices = scan.monitoredDevices;
+    renderOverviewAndLanCardsAndList();
+    status.textContent = `Observed ${scan.totalDiscovered} addresses at ${fmtTime(scan.timestamp)}.`;
+    const coverage = document.getElementById('discoverCoverage');
+    coverage.querySelector('ul').innerHTML = (scan.coverage || []).map(item =>
+      `<li><code>${esc(item.subnet)}</code> · ${esc(item.addressesObserved)} observed · ${esc(item.icmpReplies)} ICMP replies across ${esc(item.addressesProbed)} probed</li>`
+    ).join('');
+    coverage.hidden = !scan.coverage?.length;
+    renderDiscoveryResults();
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 

@@ -1,10 +1,11 @@
 // Pulse Network Monitor — Section 3: ISP Health, Live Animated Speedometer & ISP Diagnostics
 
 let speedTestInProgress = false;
+let speedTestRequestPending = false;
+let speedTestFailure = '';
 let currentGaugeMbps = 0;
 let targetGaugeMbps = 0;
 let gaugeAnimFrame = null;
-let speedTestVisualTimer = null;
 let lastCompletedSpeedTest = null;
 
 // Non-linear scale matching ticks: 0 (0%), 50 (25%), 250 (50%), 500 (75%), 1000+ (100%)
@@ -103,6 +104,11 @@ function handleSpeedTestProgress(data) {
 
   if (phase === 'error') {
     speedTestInProgress = false;
+    speedTestFailure = data.message || 'Speed test failed.';
+    if (appState.isp) {
+      appState.isp.speedTestRunning = false;
+      appState.isp.speedTestError = speedTestFailure;
+    }
     if (box) box.classList.remove('testing');
     setActiveSpeedCard(null);
     setSpeedGaugeTarget(0);
@@ -110,21 +116,22 @@ function handleSpeedTestProgress(data) {
       badge.textContent = 'TEST FAILED';
       badge.className = 'status-pill offline';
     }
-    if (labelEl) labelEl.textContent = data.message || 'Speed test failed';
+    if (labelEl) labelEl.textContent = 'The latest test did not finish.';
+    if (noteEl) noteEl.textContent = lastCompletedSpeedTest ? 'The readings below are from the last successful test.' : '';
     if (barEl) barEl.style.width = '0%';
     if (pctEl) pctEl.textContent = '0%';
+    renderIspSection();
     return;
   }
 
+  speedTestFailure = '';
+  if (appState.isp) appState.isp.speedTestError = null;
   if (phase !== 'complete') {
     speedTestInProgress = true;
     if (box) box.classList.add('testing');
   } else {
     speedTestInProgress = false;
-    if (speedTestVisualTimer) {
-      clearInterval(speedTestVisualTimer);
-      speedTestVisualTimer = null;
-    }
+    if (appState.isp) appState.isp.speedTestRunning = false;
     if (box) box.classList.remove('testing');
   }
 
@@ -136,6 +143,11 @@ function handleSpeedTestProgress(data) {
   if (labelEl && phaseMsg) labelEl.textContent = phaseMsg;
 
   if (phase === 'ping') {
+    if (dlEl) dlEl.textContent = '— Mbps';
+    if (ulEl) ulEl.textContent = '— Mbps';
+    if (pingEl) pingEl.textContent = '— ms';
+    if (jitterEl) jitterEl.textContent = '— ms';
+    if (ratingEl) ratingEl.textContent = 'Test in progress';
     if (badge) {
       badge.textContent = 'CHECKING PING';
       badge.className = 'status-pill warning';
@@ -182,12 +194,14 @@ function handleSpeedTestProgress(data) {
     const finalDl = Number(data.downloadMbps ?? data.currentMbps ?? 0);
     const finalUl = Number(data.uploadMbps ?? 0);
     lastCompletedSpeedTest = {
+      ...data,
       downloadMbps: finalDl,
       uploadMbps: finalUl,
       pingMs: data.pingMs,
       jitterMs: data.jitterMs,
       rating: data.rating || 'High-Speed Broadband'
     };
+    if (appState.isp) appState.isp.lastSpeedTest = lastCompletedSpeedTest;
     setSpeedGaugeTarget(finalDl);
     if (dlEl && finalDl > 0) dlEl.textContent = `${finalDl.toFixed(1)} Mbps`;
     if (ulEl && finalUl > 0) ulEl.textContent = `${finalUl.toFixed(1)} Mbps`;
@@ -199,9 +213,7 @@ function handleSpeedTestProgress(data) {
     }
     setActiveSpeedCard(null);
     if (typeof updateKumaLiveSpeed === 'function') {
-      updateKumaLiveSpeed(
-        (typeof appState !== 'undefined' && appState && appState.isp && appState.isp.liveThroughput) || null
-      );
+      updateKumaLiveSpeed();
     }
   }
 
@@ -220,13 +232,19 @@ function renderIspSection() {
   const dnsEl = document.getElementById('ispDnsTime');
 
   renderIspIdentity(isp);
-  if (isp.liveThroughput) {
-    if (Array.isArray(isp.liveThroughput.history) && isp.liveThroughput.history.length && !wanLiveSeeded) {
-      seedWanLiveHistory(isp.liveThroughput);
-    } else {
-      handleWanThroughput(isp.liveThroughput, false);
-    }
+  const testing = speedTestInProgress || (speedTestRequestPending && !speedTestFailure) || isp.speedTestRunning === true;
+  const failure = testing ? '' : (speedTestFailure || isp.speedTestError || '');
+  const speedTestButton = document.getElementById('btnRunSpeedTest');
+  if (speedTestButton) {
+    speedTestButton.disabled = isp.speedTestsEnabled !== true || testing;
+    speedTestButton.title = isp.speedTestsEnabled === true ? '' : 'Active bandwidth tests are disabled in the server settings';
+    document.getElementById('speedTestAvailability').textContent =
+      failure || (testing ? 'Measuring from the monitoring PC…' : isp.speedTestsEnabled === true
+        ? 'Measures the connection from the monitoring PC to Cloudflare.'
+        : 'Active speed tests are disabled in the server settings.');
+    document.getElementById('speedTestBrowserLink').hidden = !failure;
   }
+  renderLiveIspTelemetry();
 
   if (scoreEl) scoreEl.textContent = hasScore ? score : '—';
   if (circleEl) {
@@ -271,16 +289,26 @@ function renderIspSection() {
   const pingEl = document.getElementById('speedPingText');
   const jitterEl = document.getElementById('speedJitterText');
 
-  if (!speedTestInProgress) {
-    if (dlEl && st && st.downloadMbps != null) {
-      dlEl.textContent = `${Number(st.downloadMbps).toFixed(1)} Mbps`;
+  if (!testing) {
+    if (dlEl) dlEl.textContent = st?.downloadMbps != null ? `${Number(st.downloadMbps).toFixed(1)} Mbps` : '— Mbps';
+    if (failure) {
+      const badge = document.getElementById('speedGaugePhaseBadge');
+      badge.textContent = 'TEST FAILED';
+      badge.className = 'status-pill offline';
+      document.getElementById('speedGaugePhaseLabel').textContent = 'The latest test did not finish.';
+      document.getElementById('speedGaugePctText').textContent = '0%';
+      document.getElementById('speedGaugeProgressBar').style.width = '0%';
+      document.getElementById('speedGaugeSubNote').textContent =
+        st?.timestamp ? `Readings below were measured ${new Date(st.timestamp).toLocaleString()}.` : '';
+      if (targetGaugeMbps !== 0) setSpeedGaugeTarget(0);
+    } else if (st?.downloadMbps != null) {
       setSpeedGaugeTarget(st.downloadMbps);
       const badge = document.getElementById('speedGaugePhaseBadge');
       const pctEl = document.getElementById('speedGaugePctText');
       const barEl = document.getElementById('speedGaugeProgressBar');
       const labelEl = document.getElementById('speedGaugePhaseLabel');
       if (badge) {
-        badge.textContent = 'VERIFIED SPEED';
+        badge.textContent = 'LAST SPEED TEST';
         badge.className = 'status-pill online';
       }
       if (pctEl) pctEl.textContent = '100%';
@@ -290,27 +318,15 @@ function renderIspSection() {
           st.uploadMbps != null ? ` • ${Number(st.uploadMbps).toFixed(1)} Mbps Up` : ''
         }`;
       }
+      const note = document.getElementById('speedGaugeSubNote');
+      if (note && st.timestamp) {
+        note.textContent = `Measured from the monitoring PC to ${st.server || 'Cloudflare'} · ${new Date(st.timestamp).toLocaleString()}`;
+      }
     }
-    if (ulEl && st && st.uploadMbps != null) {
-      ulEl.textContent = `${Number(st.uploadMbps).toFixed(1)} Mbps`;
-    }
-    if (ratingEl && st && st.rating) {
-      ratingEl.textContent = st.rating;
-    }
-    if (pingEl) {
-      const pVal =
-        st && st.pingMs != null ? st.pingMs : isp.tier1LatencyMs;
-      pingEl.textContent = pVal != null ? `${pVal} ms` : '— ms';
-    }
-    if (jitterEl) {
-      const jVal =
-        st && st.jitterMs != null
-          ? st.jitterMs
-          : isp.jitterMs != null
-          ? isp.jitterMs
-          : null;
-      jitterEl.textContent = jVal != null ? `${jVal} ms` : '— ms';
-    }
+    if (ulEl) ulEl.textContent = st?.uploadMbps != null ? `${Number(st.uploadMbps).toFixed(1)} Mbps` : '— Mbps';
+    if (ratingEl) ratingEl.textContent = st?.rating || '';
+    if (pingEl) pingEl.textContent = st?.pingMs != null ? `${st.pingMs} ms` : '— ms';
+    if (jitterEl) jitterEl.textContent = st?.jitterMs != null ? `${st.jitterMs} ms` : '— ms';
   }
 
   // Render Major Internet Gateway Checks Table (merging pingGraph.stats fallback so latency is never stuck on Probing)
@@ -324,18 +340,17 @@ function renderIspSection() {
     tbody.innerHTML = probes
       .map(p => {
         const s = pgStats[p.id] || {};
-        const latVal = p.latencyMs != null ? p.latencyMs : s.currentMs;
-        const alive = p.alive !== undefined ? Boolean(p.alive) : latVal != null;
-        const lossVal = p.packetLoss != null ? p.packetLoss : (s.lossPct ?? (alive ? 0 : 100));
-        const latText = latVal != null ? `${latVal} ms` : (alive ? '—' : 'Timeout');
+        const latVal = p.alive === undefined ? s.currentMs : p.latencyMs;
+        const alive = p.alive ?? (latVal != null ? true : null);
+        const latText = latVal != null ? `${latVal} ms` : (alive === false ? 'Timeout' : '—');
         return `
           <tr>
             <td><strong>${esc(p.name)}</strong></td>
             <td class="mono" style="color:var(--accent-cyan);">${esc(p.host || p.ip)}</td>
             <td class="mono">${esc(latText)}</td>
-            <td class="mono">${lossVal}%</td>
-            <td><span class="status-pill ${alive ? 'online' : 'offline'}">${
-          alive ? 'ONLINE' : 'UNREACHABLE'
+            <td class="mono">${esc(p.method || s.probeMethod || '—')}</td>
+            <td><span class="status-pill ${alive == null ? 'warning' : alive ? 'online' : 'offline'}">${
+          alive == null ? 'CHECKING' : alive ? 'ONLINE' : 'UNREACHABLE'
         }</span></td>
           </tr>
         `;
@@ -380,50 +395,64 @@ function renderIspDiagnosticsBox(isp) {
     box.style.borderLeftColor = 'var(--accent-red)';
     if (badgeEl) {
       badgeEl.className = 'status-pill offline';
-      badgeEl.textContent = '🚨 ISP / WAN OUTAGE';
+      badgeEl.textContent = '🚨 CONNECTIVITY ISSUE';
     }
   } else if (verdict === 'WARNING') {
     box.style.borderColor = 'var(--status-warn-border)';
     box.style.borderLeftColor = 'var(--accent-amber)';
     if (badgeEl) {
       badgeEl.className = 'status-pill warning';
-      badgeEl.textContent = '⚠️ DEGRADED / BOTTLENECK';
+      badgeEl.textContent = '⚠️ DEGRADED PROBES';
     }
   } else {
     box.style.borderColor = 'var(--status-up-border)';
     box.style.borderLeftColor = 'var(--accent-green)';
     if (badgeEl) {
       badgeEl.className = 'status-pill online';
-      badgeEl.textContent = '🟢 ISP HEALTHY';
+      badgeEl.textContent = '🟢 PROBES HEALTHY';
     }
   }
 
   if (headlineEl) {
     headlineEl.textContent =
-      diag.headline || 'ISP Fiber Connection, Gateway & DNS Are Healthy & Fast';
+      diag.headline || 'Checking gateway, internet reachability and DNS…';
   }
   if (summaryEl) {
     const fmt = v => (v != null ? `${v} ms` : '—');
     summaryEl.textContent =
       diag.summary ||
-      `Local gateway ${fmt(isp.wanGatewayLatencyMs)}, ISP backbone ${fmt(
+      `Local gateway ${fmt(isp.wanGatewayLatencyMs)}, external probes ${fmt(
         isp.tier1LatencyMs
-      )} (${isp.packetLossPct ?? 0}% packet loss), DNS ${fmt(isp.dnsResolutionMs)}.`;
+      )}, DNS ${fmt(isp.dnsResolutionMs)}.`;
   }
   if (bottleneckEl) {
-    bottleneckEl.textContent = `Bottleneck Layer: ${
-      diag.bottleneckLayer || 'None — Local Router, ISP Fiber & DNS Operating Optimally'
-    }`;
+    bottleneckEl.hidden = !diag.bottleneckLayer;
+    bottleneckEl.textContent = diag.bottleneckLayer ? `Bottleneck: ${diag.bottleneckLayer}` : '';
   }
   if (listEl) {
-    const solutions =
-      Array.isArray(diag.solutions) && diag.solutions.length
-        ? diag.solutions
-        : [
-            'Keep Primary DNS set to 1.1.1.1 (Cloudflare) and Secondary DNS to 8.8.8.8 (Google) on the main router for fastest domain resolution.',
-            'Click "⚡ Test Internet Speed Now" or "🔄 Re-Check ISP & DNS" anytime to verify live ISP throughput.'
-          ];
+    const solutions = diag.solutions || [];
     listEl.innerHTML = solutions.map(s => `<li>${esc(s)}</li>`).join('');
+  }
+
+  const benchmark = isp.lastSpeedTest || lastCompletedSpeedTest;
+  const result = document.getElementById('ispDiagBenchmarkResult');
+  const measuredAt = document.getElementById('ispDiagBenchmarkTime');
+  const hasRates = Number.isFinite(benchmark?.downloadMbps) && Number.isFinite(benchmark?.uploadMbps);
+  result.textContent = hasRates
+    ? `Last bandwidth benchmark from this PC: ${benchmark.downloadMbps} Mbps down / ${benchmark.uploadMbps} Mbps up.`
+    : 'No bandwidth benchmark recorded.';
+  const timestamp = Date.parse(benchmark?.timestamp);
+  measuredAt.hidden = !hasRates || !Number.isFinite(timestamp);
+  if (!measuredAt.hidden) {
+    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+    const [unit, size] = seconds >= 86400 ? ['day', 86400]
+      : seconds >= 3600 ? ['hour', 3600]
+      : seconds >= 60 ? ['minute', 60] : ['second', 1];
+    const age = new Intl.RelativeTimeFormat(undefined, {numeric: 'auto'}).format(-Math.floor(seconds / size), unit);
+    const date = new Date(timestamp);
+    measuredAt.dateTime = date.toISOString();
+    measuredAt.title = date.toLocaleString();
+    measuredAt.textContent = `Measured ${age}.`;
   }
 }
 
@@ -439,7 +468,7 @@ async function recheckIspConnectionNow() {
       body: JSON.stringify({})
     });
     if (res.isp) {
-      appState.isp = res.isp;
+      applyIspSnapshot(res.isp);
       renderIspSection();
       renderPingGraphSection();
       renderExecutiveBanner();
@@ -485,7 +514,8 @@ function openIspTracerouteFromIsp() {
 }
 
 async function runSpeedTestNow() {
-  if (speedTestInProgress) return;
+  if (speedTestInProgress || appState.isp?.speedTestRunning || appState.isp?.speedTestsEnabled !== true) return;
+  speedTestRequestPending = true;
   const btn = document.getElementById('btnRunSpeedTest');
   const box = document.getElementById('speedLiveGaugeBox');
   if (btn) {
@@ -502,7 +532,7 @@ async function runSpeedTestNow() {
     phase: 'ping',
     currentMbps: 0,
     progressPct: 2,
-    message: 'Connecting to speed.cloudflare.com and identifying your ISP...'
+    message: 'Connecting the monitoring PC to Cloudflare…'
   });
 
   // All live gauge frames come from real server measurements streamed over SSE
@@ -525,15 +555,17 @@ async function runSpeedTestNow() {
     }
     await loadInitialState();
   } catch (err) {
-    handleSpeedTestProgress({ phase: 'error', message: `Speed test failed: ${err.message}` });
+    handleSpeedTestProgress({ phase: 'error', message: err.message });
   } finally {
+    speedTestRequestPending = false;
     speedTestInProgress = false;
     if (box) box.classList.remove('testing');
     setActiveSpeedCard(null);
     if (btn) {
-      btn.disabled = false;
+      btn.disabled = appState.isp?.speedTestsEnabled !== true || appState.isp?.speedTestRunning === true;
       btn.textContent = '⚡ Test Internet Speed Now';
     }
+    renderIspSection();
   }
 }
 
@@ -541,11 +573,11 @@ async function runSpeedTestNow() {
 // Real ISP identity (provider / ASN / public IP) and live throughput graph
 // ---------------------------------------------------------------------------
 
-let wanLiveHistory = [];
-let wanLiveSeeded = false;
+const liveIspFields = ['liveThroughput', 'routerWanThroughput'];
 
 function fmtMbps(v) {
-  const n = Number(v) || 0;
+  if (!Number.isFinite(v)) return '—';
+  const n = v;
   if (n >= 100) return `${Math.round(n)} Mbps`;
   if (n >= 1) return `${n.toFixed(1)} Mbps`;
   return `${(n * 1000).toFixed(0)} kbps`;
@@ -575,60 +607,99 @@ function renderIspIdentity(isp) {
     st && st.timestamp
       ? `${Number(st.downloadMbps).toFixed(0)}↓ / ${Number(st.uploadMbps).toFixed(0)}↑ · ${new Date(
           st.timestamp
-        ).toLocaleTimeString()}`
+        ).toLocaleString()}`
       : 'Never'
   );
   const nextEl = document.getElementById('ispNextTestAt');
   if (nextEl) {
-    if (isp.speedTestRunning) nextEl.textContent = 'Test running now…';
-    else if (isp.speedTestError) nextEl.textContent = `Last error: ${isp.speedTestError}`;
+    if (isp.speedTestsEnabled !== true) nextEl.textContent = 'Speed tests disabled';
+    else if (isp.speedTestRunning) nextEl.textContent = 'Test running now…';
+    else if (speedTestFailure || isp.speedTestError) nextEl.textContent = 'Last test failed';
     else if (isp.nextAutoTestAt)
       nextEl.textContent = `Next auto test ${new Date(isp.nextAutoTestAt * 1000).toLocaleTimeString()}`;
-    else nextEl.textContent = 'On-demand only (0 idle WAN load)';
+    else nextEl.textContent = 'On demand';
   }
 }
 
-function seedWanLiveHistory(live) {
-  if (wanLiveSeeded || !live.history.length) return;
-  wanLiveHistory = live.history.map(p => ({ rx: p.rx, tx: p.tx }));
-  wanLiveSeeded = true;
-  handleWanThroughput(live, false);
+function applyLiveIspTelemetry(incoming) {
+  const isp = appState.isp ||= {};
+  for (const key of liveIspFields) {
+    const sample = incoming[key];
+    const previous = isp[key];
+    if (!sample?.timestamp || (previous?.timestamp && sample.timestamp < previous.timestamp)) continue;
+    if (key === 'liveThroughput' && !Array.isArray(sample.history)) {
+      if (sample.timestamp === previous?.timestamp) continue;
+      const sameSource = sample.source === previous?.source;
+      const history = sameSource ? previous.history || [] : [];
+      sample.history = Number.isFinite(sample.rxMbps) && Number.isFinite(sample.txMbps)
+        ? [...history, {t: sample.timestamp, rx: sample.rxMbps, tx: sample.txMbps}].slice(-120)
+        : [];
+    }
+    isp[key] = sample;
+  }
 }
 
-function handleWanThroughput(d, push = true) {
-  if (!d) return;
-  if (push) {
-    wanLiveSeeded = true;
-    wanLiveHistory.push({ rx: d.rxMbps, tx: d.txMbps });
-    if (wanLiveHistory.length > 120) wanLiveHistory.shift();
+function applyIspSnapshot(incoming) {
+  if (!incoming) return;
+  const current = appState.isp || {};
+  const {liveThroughput, routerWanThroughput, ...snapshot} = incoming;
+  if (current.lastSpeedTest?.timestamp > (snapshot.lastSpeedTest?.timestamp || '')) {
+    snapshot.lastSpeedTest = current.lastSpeedTest;
   }
-  if (typeof updateKumaLiveSpeed === 'function') {
-    updateKumaLiveSpeed(d);
+  if (!current.probeTimestamp || snapshot.probeTimestamp >= current.probeTimestamp) {
+    appState.isp = {...current, ...snapshot};
+    if (!speedTestRequestPending && !gameEventStreamConnected && snapshot.speedTestRunning === false) {
+      speedTestInProgress = false;
+      speedTestFailure = snapshot.speedTestError || '';
+      document.getElementById('speedLiveGaugeBox')?.classList.remove('testing');
+      setActiveSpeedCard(null);
+    }
   }
+  applyLiveIspTelemetry({liveThroughput, routerWanThroughput});
+}
+
+function renderLiveIspTelemetry() {
+  renderGatewayHealth();
+  const isp = appState.isp || {};
+  const d = isp.liveThroughput || {};
+  const hostFresh = Date.now() - Date.parse(d.timestamp) < 6000;
   const rxEl = document.getElementById('wanLiveRx');
   const txEl = document.getElementById('wanLiveTx');
-  const utilEl = document.getElementById('wanLiveUtil');
+  const signalEl = document.getElementById('wanWifiSignal');
   const srcEl = document.getElementById('wanLiveSource');
-  const fmtMb = v => `${(Math.max(0, Number(v) || 0) / 8).toFixed(2)} MB/s`;
-  if (rxEl) rxEl.textContent = `${fmtMb(d.rxMbps)} (${fmtMbps(d.rxMbps)})`;
-  if (txEl) txEl.textContent = `${fmtMb(d.txMbps)} (${fmtMbps(d.txMbps)})`;
-
-  const st = (appState.isp && appState.isp.lastSpeedTest) || lastCompletedSpeedTest;
-  if (utilEl) {
-    utilEl.textContent =
-      st && st.downloadMbps
-        ? `${Math.min(100, (d.rxMbps / st.downloadMbps) * 100).toFixed(0)}%`
-        : '—';
+  if (rxEl) rxEl.textContent = fmtMbps(hostFresh ? d.rxMbps : null);
+  if (txEl) txEl.textContent = fmtMbps(hostFresh ? d.txMbps : null);
+  if (signalEl) {
+    const { signalPercent, rssiDbm } = hostFresh ? d.wifiSignal || {} : {};
+    signalEl.textContent = [
+      Number.isFinite(signalPercent) && `${signalPercent}%`,
+      Number.isFinite(rssiDbm) && `${rssiDbm} dBm`
+    ].filter(Boolean).join(' · ') || 'Unavailable';
   }
   if (srcEl) {
-    srcEl.textContent = `Measured from this server's network interface counters (${
-      d.source || 'OS'
-    }) · peak ${fmtMbps(d.peakRxMbps)}↓ / ${fmtMbps(d.peakTxMbps)}↑`;
+    srcEl.textContent = hostFresh && Number.isFinite(d.rxMbps)
+      ? `${d.source} · peak ${fmtMbps(d.peakRxMbps)} ↓ / ${fmtMbps(d.peakTxMbps)} ↑`
+      : 'Waiting for monitoring PC interface counters';
   }
-  drawWanLiveChart();
+  drawWanLiveChart(d.history || []);
+
+  const router = isp.routerWanThroughput;
+  const routerIp = appState.config?.routerConfig?.ip || appState.router?.ip;
+  const routerStatus = router && (!routerIp || router.routerIp === routerIp) ? router.status : 'sampling';
+  const routerFresh = routerStatus === 'live' && Date.now() - Date.parse(router.timestamp) < 8000;
+  const routerSource = document.getElementById('routerWanSource');
+  const routerRx = document.getElementById('routerWanRx');
+  const routerTx = document.getElementById('routerWanTx');
+  if (routerRx) routerRx.textContent = fmtMbps(routerFresh ? router.rxMbps : null);
+  if (routerTx) routerTx.textContent = fmtMbps(routerFresh ? router.txMbps : null);
+  if (routerSource) {
+    routerSource.textContent = routerFresh ? `${router.routerIp} · ${router.source}`
+      : routerStatus === 'unavailable' ? `WAN counters unavailable from ${router.routerIp}`
+      : routerStatus === 'live' ? 'Waiting for a fresh router sample' : 'Waiting for router counters…';
+  }
 }
 
-function drawWanLiveChart() {
+function drawWanLiveChart(pts = appState.isp?.liveThroughput?.history || []) {
   const canvas = document.getElementById('wanLiveCanvas');
   if (!canvas || !canvas.offsetParent) return;
   const dpr = window.devicePixelRatio || 1;
@@ -648,7 +719,6 @@ function drawWanLiveChart() {
   const gridColor = css.getPropertyValue('--border-subtle').trim() || 'rgba(148,163,184,0.3)';
   const textColor = css.getPropertyValue('--text-dim').trim() || '#94a3b8';
 
-  const pts = wanLiveHistory;
   const maxVal = Math.max(1, ...pts.map(p => Math.max(p.rx, p.tx))) * 1.15;
 
   ctx.strokeStyle = gridColor;

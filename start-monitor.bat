@@ -1,40 +1,34 @@
 @echo off
-title Pulse Network Monitoring System (Python)
-color 0B
-echo ========================================================
-echo   Starting Pulse Network Monitoring System
-echo   Router Target: http://192.168.0.1
-echo ========================================================
-echo.
+setlocal
 cd /d "%~dp0"
+title Vertex Sentry
 
-set "PYTHON_EXE="
-if exist ".venv\Scripts\python.exe" set "PYTHON_EXE=.venv\Scripts\python.exe"
-if "%PYTHON_EXE%"=="" (
-  where py >nul 2>nul
-  if %errorlevel%==0 set "PYTHON_EXE=py -3"
-)
-if "%PYTHON_EXE%"=="" (
-  where python >nul 2>nul
-  if %errorlevel%==0 set "PYTHON_EXE=python"
-)
+set "PYTHON_EXE=.venv\Scripts\python.exe"
+if exist "%PYTHON_EXE%" goto dependencies
 
-if "%PYTHON_EXE%"=="" (
-  echo [ERROR] Python was not found in PATH!
-  echo Please install Python 3.9+ from https://www.python.org/downloads/
-  pause
-  exit /b 1
+where py >nul 2>nul
+if not errorlevel 1 (
+    py -3 -m venv .venv
+) else (
+    python -m venv .venv
+)
+if errorlevel 1 (
+    echo Could not create the project environment. Install Python 3.10 or newer.
+    goto failed
 )
 
-echo [1/3] Starting Host Game & DNS Sensor in background...
-start "Pulse Host Game Sensor" /min %PYTHON_EXE% host_game_sensor.py
+:dependencies
+"%PYTHON_EXE%" -c "import django; assert (5, 2, 19) <= django.VERSION[:3] < (5, 3)" >nul 2>nul
+if errorlevel 1 (
+    "%PYTHON_EXE%" -m pip install -r requirements.txt
+    if errorlevel 1 goto failed
+)
 
-echo [2/3] Opening web dashboard in your default browser...
-start "" "http://localhost:3000"
+echo Starting Vertex Sentry. Press Ctrl+C to stop the server.
+"%PYTHON_EXE%" server.py
+if errorlevel 1 goto failed
+exit /b 0
 
-echo [3/3] Running Pulse Monitor server on http://localhost:3000...
-echo.
-echo Press Ctrl+C in this window to stop the server.
-echo.
-%PYTHON_EXE% server.py
+:failed
 pause
+exit /b 1

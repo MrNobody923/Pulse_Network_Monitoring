@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import gzip
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import subprocess
@@ -16,11 +18,30 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from http.client import HTTPResponse
+from urllib.response import addinfourl
 
 if os.name == "nt":
     import ctypes.wintypes
 
-from .config import ISP_TARGETS, ROUTER_PORTS, runtime_attr, utc_now
+from typing import TYPE_CHECKING, cast
+
+from .config import ISP_TARGETS, ROUTER_PORTS, manual_speed_tests_enabled, runtime_attr, utc_now
+from .router_game_control import RouterGameControl, router_clients
+
+if TYPE_CHECKING:
+    from .engine import Monitor
+
+
+def _router_link_mbps(value: object) -> float | None:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmg])?(?:b(?:it)?(?:ps|/s)?)?\s*", str(value), re.I)
+    if not match:
+        return None
+    multiplier = {"k": 0.001, "m": 1, "g": 1000, "": 1}[(match[2] or "").lower()]
+    speed = float(match[1]) * multiplier
+    if not 0 < speed <= 800_000:
+        return None
+    return int(speed) if speed.is_integer() else speed
 
 if os.name == "nt":
     class _IP_OPTION_INFORMATION(ctypes.Structure):
@@ -48,6 +69,7 @@ class ProbesMixin:
     """Executes active TCP/ICMP probes, router telemetry reads, and streaming speed tests."""
 
     def _initial_router_state(self) -> dict:
+        self = cast("Monitor", self)
         ip = self.config["router"].get("ip", "192.168.0.1")
         return {
             "model": "TP-Link BE3600 (Archer BE230)",
@@ -85,10 +107,12 @@ class ProbesMixin:
                 "avgMs": None,
                 "minMs": None,
                 "maxMs": None,
-                "lossPct": 0,
-                "uptimePct": 100.0,
-                "uptime24hPct": 100.0,
-                "uptime30dPct": 100.0,
+                "lossPct": None,
+                "uptimePct": None,
+                "uptime24hPct": None,
+                "uptime30dPct": None,
+                "samples24h": 0,
+                "samples30d": 0,
                 "lastStatus": None,
                 "heartbeats": [],
                 "statusLog": [],
@@ -100,8 +124,10 @@ class ProbesMixin:
             "healthScore": None,
             "status": "unknown",
             "wanGatewayLatencyMs": None,
+            "wanGatewayReachable": None,
+            "wanGatewayIp": None,
             "tier1LatencyMs": None,
-            "packetLossPct": 0,
+            "packetLossPct": None,
             "jitterMs": None,
             "dnsResolutionMs": None,
             "lastSpeedTest": None,
@@ -110,6 +136,9 @@ class ProbesMixin:
             "provider": None,
             "providerError": None,
             "liveThroughput": None,
+            "routerWanThroughput": None,
+            "probeTimestamp": None,
+            "probeFailurePct": None,
             "nextAutoTestAt": None,
             "probes": [],
             "history": {"latency": [], "timestamps": []},
@@ -247,6 +276,7 @@ class ProbesMixin:
 
     def _is_arp_neighbor_alive(self, ip: str, expected_mac: str = "") -> bool:
         """Check whether ip has a live dynamic L2 neighbor entry in the OS ARP cache (for firewall-shielded hosts)."""
+        self = cast("Monitor", self)
         if (
             getattr(self, "_skip_live_probe_in_test", False)
             or hasattr(self._probe_icmp, "assert_called")
@@ -263,7 +293,7 @@ class ProbesMixin:
         arp_ts: float = getattr(self, "_live_arp_cache_ts", 0.0)
         if arp_map is None or (now_m - arp_ts) >= 8.0:
             try:
-                entries = self._read_arp_entries(os_mod, subproc_mod)
+                entries = self._read_arp_entries(os_mod.name, subproc_mod.run)
                 arp_map = {
                     str(r_ip).strip(): str(r_mac).strip().lower().replace("-", ":")
                     for r_ip, r_mac, r_kind in entries
@@ -282,9 +312,14 @@ class ProbesMixin:
             return False
         return True
 
-    def _is_wan_internet_up(self) -> bool:
-        """Check whether the upstream ISP / WAN internet connection is currently reachable."""
+    def _is_wan_internet_up(self) -> bool | None:
+        """Return current monitor WAN reachability, or None before the first check."""
+        self = cast("Monitor", self)
         isp_health = str(self.isp_state.get("overallHealth") or "UNKNOWN").upper()
+        probes = self.isp_state.get("probes", [])
+        external_probes = [p for p in probes if p.get("id") != "gateway"]
+        if external_probes:
+            return any(p.get("alive") for p in external_probes)
         if isp_health in {"OFFLINE", "OUTAGE"}:
             return False
         wan_port = next(
@@ -293,11 +328,7 @@ class ProbesMixin:
         )
         if wan_port and wan_port.get("linkStatus") == "disconnected":
             return False
-        probes = self.isp_state.get("probes", [])
-        external_probes = [p for p in probes if p.get("id") != "gateway"]
-        if external_probes and not any(p.get("alive") for p in external_probes):
-            return False
-        return True
+        return None if isp_health == "UNKNOWN" else True
 
     @staticmethod
     def _encode_oid(oid_str: str) -> bytes:
@@ -332,14 +363,46 @@ class ProbesMixin:
         return bytes([tag]) + len_bytes + body
 
     @staticmethod
-    def _read_asn1_len(data: bytes, idx: int) -> tuple[int, int]:
-        first = data[idx]
-        idx += 1
-        if first < 0x80:
-            return first, idx
-        num_bytes = first & 0x7F
-        length = int.from_bytes(data[idx : idx + num_bytes], "big")
-        return length, idx + num_bytes
+    def _read_snmp_tlv(data: bytes) -> tuple[int, bytes, bytes]:
+        if len(data) < 2:
+            raise ValueError("Incomplete SNMP field")
+        tag, length = data[:2]
+        start = 2
+        if length >= 0x80:
+            length_bytes = length & 0x7F
+            start += length_bytes
+            if not 1 <= length_bytes <= 4 or start > len(data):
+                raise ValueError("Invalid SNMP field length")
+            length = int.from_bytes(data[2:start], "big")
+        end = start + length
+        if end > len(data):
+            raise ValueError("Incomplete SNMP field")
+        return tag, data[start:end], data[end:]
+
+    @classmethod
+    def _decode_snmp_value(
+        cls, raw: bytes, envelope: bytes, request_fields: bytes, oid: bytes
+    ) -> str | None:
+        tag, message, trailing = cls._read_snmp_tlv(raw)
+        if tag != 0x30 or trailing or not message.startswith(envelope):
+            return None
+        tag, response, trailing = cls._read_snmp_tlv(message[len(envelope):])
+        if tag != 0xA2 or trailing or not response.startswith(request_fields):
+            return None
+        tag, bindings, trailing = cls._read_snmp_tlv(response[len(request_fields):])
+        if tag != 0x30 or trailing:
+            return None
+        tag, binding, trailing = cls._read_snmp_tlv(bindings)
+        if tag != 0x30 or trailing or not binding.startswith(oid):
+            return None
+        tag, value, trailing = cls._read_snmp_tlv(binding[len(oid):])
+        if trailing:
+            return None
+        if tag == 0x04:
+            return value.decode("utf-8", "replace").strip()
+        if tag in (0x02, 0x41, 0x42, 0x43, 0x46) and 1 <= len(value) <= 9:
+            return str(int.from_bytes(value, "big", signed=tag == 0x02))
+        return None
 
     def _snmp_get_oids(
         self, ip: str, oids: dict[str, str], community: str = "public", timeout: float = 0.55
@@ -348,49 +411,38 @@ class ProbesMixin:
         if not community:
             return {}
         results: dict[str, str] = {}
-        comm_bytes = str(community).encode("ascii", "ignore")
+        community_tlv = self._tlv(0x04, community.encode("utf-8"))
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
         for label, oid in oids.items():
             try:
                 oid_tlv = self._encode_oid(oid)
-                if not oid_tlv:
-                    continue
-                varbind = self._tlv(0x30, oid_tlv + b"\x05\x00")
-                varbind_list = self._tlv(0x30, varbind)
-                req_id = b"\x02\x01\x01"
-                err_st = b"\x02\x01\x00\x02\x01\x00"
-                pdu = self._tlv(0xA0, req_id + err_st + varbind_list)
-                # Try SNMPv2c (version=1) first, then fallback to SNMPv1 (version=0)
-                for ver in (b"\x02\x01\x01", b"\x02\x01\x00"):
-                    pkt = self._tlv(
-                        0x30,
-                        ver + self._tlv(0x04, comm_bytes) + pdu,
-                    )
-                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                        sock.settimeout(timeout)
-                        sock.sendto(pkt, (ip, 161))
-                        raw, _ = sock.recvfrom(4096)
-                    # Extract trailing OctetString / TimeTicks / Integer after last OID occurrence
-                    idx = raw.find(oid_tlv)
-                    if idx < 0:
-                        continue
-                    pos = idx + len(oid_tlv)
-                    if pos + 2 > len(raw):
-                        continue
-                    val_tag = raw[pos]
-                    val_len, val_start = self._read_asn1_len(raw, pos + 1)
-                    val_bytes = raw[val_start : val_start + val_len]
-                    if val_tag in (0x80, 0x81, 0x82, 0x05):
-                        break
-                    if val_tag == 0x04:
-                        results[label] = val_bytes.decode("utf-8", "ignore").strip()
-                    elif val_tag in (0x02, 0x41, 0x42, 0x43):
-                        results[label] = str(int.from_bytes(val_bytes, "big"))
-                    break
-            except Exception:
+            except ValueError:
                 continue
+            if not oid_tlv:
+                continue
+            varbind = self._tlv(0x30, oid_tlv + b"\x05\x00")
+            varbind_list = self._tlv(0x30, varbind)
+            request_id = (secrets.randbits(30) | (1 << 30)).to_bytes(4, "big")
+            request_fields = self._tlv(0x02, request_id) + b"\x02\x01\x00\x02\x01\x00"
+            pdu = self._tlv(0xA0, request_fields + varbind_list)
+            for version in (b"\x02\x01\x01", b"\x02\x01\x00"):
+                envelope = version + community_tlv
+                try:
+                    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                        sock.settimeout(timeout)
+                        sock.connect((ip, 161))
+                        sock.send(self._tlv(0x30, envelope + pdu))
+                        raw = sock.recv(4096)
+                    value = self._decode_snmp_value(raw, envelope, request_fields, oid_tlv)
+                except (OSError, ValueError):
+                    continue
+                if value is not None:
+                    results[label] = value
+                    break
         return results
 
     def _get_cached_fingerprints(self) -> dict[str, dict]:
+        self = cast("Monitor", self)
         try:
             with self._connect() as db:
                 row = db.execute(
@@ -404,6 +456,7 @@ class ProbesMixin:
         return {}
 
     def _save_cached_fingerprints(self, updates: dict[str, dict]) -> None:
+        self = cast("Monitor", self)
         if not updates:
             return
         try:
@@ -418,7 +471,7 @@ class ProbesMixin:
             pass
 
     @staticmethod
-    def _read_http_body(resp: object, max_bytes: int = 16384) -> str:
+    def _read_http_body(resp: HTTPResponse | addinfourl, max_bytes: int = 16384) -> str:
         raw = resp.read(max_bytes)
         enc = str(resp.headers.get("Content-Encoding") or "").lower()
         if enc == "gzip" or raw[:2] == b"\x1f\x8b":
@@ -583,13 +636,13 @@ class ProbesMixin:
                             info["vendor"] = "TP-Link"
                             info["protocol"] = scheme
                             info["preferredPort"] = port
-                            if "httpd" in srv.lower() and "omadaeap.net" in cert_der:
+                            if "httpd" in srv.lower() and b"omadaeap.net" in cert_der:
                                 info["model"] = "TP-Link Omada EAP Access Point"
                                 info["role"] = "ap"
                             elif "httpd" in srv.lower():
                                 info["model"] = "TP-Link Omada EAP / Smart AP"
                                 info["role"] = "ap"
-                            elif 20001 in open_ports or "tplinkdeco.net" in cert_der:
+                            elif 20001 in open_ports or b"tplinkdeco.net" in cert_der:
                                 info["model"] = "TP-Link Deco Mesh System"
                                 info["role"] = "router"
                             elif "$.su." in combined:
@@ -681,6 +734,7 @@ class ProbesMixin:
         return info
 
     def probe_device(self, device: dict) -> dict:
+        self = cast("Monitor", self)
         ip = device["ip"]
         primary_port = int(device.get("port") or 80)
         dev_type = str(device.get("type") or "ap").lower()
@@ -691,11 +745,13 @@ class ProbesMixin:
                 candidate_ports.append(p)
 
         open_ports: list[int] = []
+        ports_checked: list[int] = []
         tcp_alive = False
         best_latency: float | None = None
         probe_method = "No Response (TCP + ICMP Timeout)"
 
         for idx, p in enumerate(candidate_ports):
+            ports_checked.append(p)
             is_open, is_rst_alive, lat = self._probe_tcp_socket(ip, p, timeout=0.55)
             if is_open:
                 open_ports.append(p)
@@ -721,7 +777,7 @@ class ProbesMixin:
         latency = (
             icmp_latency
             if icmp_alive and icmp_latency is not None
-            else (best_latency if best_latency is not None else (2.0 if arp_alive else None))
+            else best_latency
         )
 
         # Enrich with cached or live hardware identity when management ports respond or MAC changed
@@ -760,13 +816,14 @@ class ProbesMixin:
         elif tcp_alive:
             probe_method = "TCP Stack Active (RST)"
         elif arp_alive:
-            probe_method = "ARP Neighbor Active (Firewall Shielded)"
+            probe_method = "ARP cache observation"
 
         samples = self.history.setdefault(ip, [])
-        samples.append(latency if alive else None)
+        if not arp_alive:
+            samples.append(latency if alive else None)
         del samples[:-10]
         successes = [value for value in samples if value is not None]
-        loss = round((len(samples) - len(successes)) / len(samples) * 100)
+        loss = round((len(samples) - len(successes)) / len(samples) * 100) if samples else None
         average = round(sum(successes) / len(successes), 1) if successes else None
         jitter = (
             round(
@@ -775,25 +832,32 @@ class ProbesMixin:
                 1,
             )
             if len(successes) > 1
-            else 0
+            else None
         )
 
         wan_up = self._is_wan_internet_up()
-        has_internet = bool(alive and wan_up)
+        has_internet = wan_up if alive else False
 
         thresholds = self.config.get("thresholds", {})
         high_loss = int(thresholds.get("packetLossWarningPct", 5))
         high_latency = float(thresholds.get("highLatencyMs", 80))
 
-        if not alive:
+        if arp_alive:
+            status = "unknown"
+            connectivity_state = "ARP_OBSERVED"
+            has_internet = None
+        elif not alive:
             status = "offline"
             connectivity_state = "DEVICE_DOWN"
-        elif not wan_up:
+        elif wan_up is False:
             status = "warning"
             connectivity_state = "ONLINE_NO_INTERNET"
-        elif loss >= high_loss or (average is not None and average > high_latency):
+        elif (loss is not None and loss >= high_loss) or (average is not None and average > high_latency):
             status = "warning"
             connectivity_state = "DEGRADED_LINK"
+        elif wan_up is None:
+            status = "online"
+            connectivity_state = "ONLINE_WAN_UNKNOWN"
         else:
             status = "online"
             connectivity_state = "ONLINE_WITH_INTERNET"
@@ -808,10 +872,15 @@ class ProbesMixin:
             "httpProtocol": cached_fp.get("protocol") or ("https" if 443 in open_ports and 80 not in open_ports else "http"),
             "snmpSysName": (cached_fp.get("snmp") or {}).get("sysName", ""),
             "alive": alive,
+            "directlyReachable": tcp_alive or icmp_alive,
             "icmpAlive": icmp_alive,
+            "tcpReachable": tcp_alive,
+            "tcpPortsChecked": ports_checked,
             "openPorts": open_ports,
             "managementReachable": bool(open_ports),
             "probeMethod": probe_method,
+            "probeOrigin": "monitor",
+            "internetEvidence": "monitor_wan",
             "hasInternet": has_internet,
             "connectivityState": connectivity_state,
             "latencyMs": latency,
@@ -825,12 +894,15 @@ class ProbesMixin:
         # Sync live probe status back into discovered_devices so inventory and devices match
         try:
             with self._connect() as db:
-                if alive:
+                if alive and not arp_alive:
                     db.execute(
-                        "UPDATE discovered_devices SET is_online=1, last_seen=? WHERE ip=?",
+                        """UPDATE discovered_devices SET is_online=1, last_seen=? WHERE mac=(
+                               SELECT mac FROM discovered_devices WHERE ip=?
+                               ORDER BY is_online DESC, last_seen DESC LIMIT 1
+                           )""",
                         (now_iso, ip),
                     )
-                else:
+                elif not alive:
                     db.execute(
                         "UPDATE discovered_devices SET is_online=0 WHERE ip=?",
                         (ip,),
@@ -846,6 +918,7 @@ class ProbesMixin:
         self, dev: dict, peer_devices: list[dict]
     ) -> None:
         """Compute zero-guessing root-cause diagnosis & step-by-step fix instructions for IT team."""
+        self = cast("Monitor", self)
         ip = dev.get("ip", "")
         name = dev.get("name", ip)
         mac = dev.get("mac") or "Unknown MAC"
@@ -877,7 +950,12 @@ class ProbesMixin:
         )
         gateway_ip = self.config.get("router", {}).get("ip", "192.168.0.1")
 
-        if state == "DEVICE_DOWN":
+        if state == "ARP_OBSERVED":
+            dev["diagnosisTitle"] = "ARP entry observed"
+            dev["likelyFault"] = ""
+            dev["diagnosisSummary"] = f"The ARP cache contains {ip}. The device did not answer TCP or ICMP probes."
+            dev["fixSteps"] = []
+        elif state == "DEVICE_DOWN":
             if same_subnet_peers and len(online_subnet_peers) == 0 and len(same_subnet_peers) >= 2:
                 dev["diagnosisTitle"] = f"Multiple Devices Offline in {subnet}"
                 dev["likelyFault"] = "Main Switch or Cable Link Offline"
@@ -917,14 +995,19 @@ class ProbesMixin:
                 dev["fixSteps"] = [
                     f"Check the network cable and power light on {name} ({ip}, MAC {mac}) connected via {switch_label}.",
                     f"Look at the wall or ceiling plug for {ip} to make sure the cable did not come loose.",
-                    f"Unplug power for 10 seconds and plug back in, then click '⚡ Re-Probe Now'.",
+                    "Unplug power for 10 seconds and plug back in, then click '⚡ Re-Probe Now'.",
                 ]
+        elif state == "ONLINE_WAN_UNKNOWN":
+            dev["diagnosisTitle"] = "Device reachable on LAN"
+            dev["likelyFault"] = ""
+            dev["diagnosisSummary"] = f"{name} ({ip}) answered a local probe. The monitor is waiting for a WAN check."
+            dev["fixSteps"] = []
         elif state == "ONLINE_NO_INTERNET":
             dev["diagnosisTitle"] = f"Connected to Office Network — No Internet ({ip})"
             dev["likelyFault"] = "Main Internet Line Down (This Device Is OK)"
             dev["diagnosisSummary"] = (
                 f"{name} ({ip}) is online on the office network ({dev.get('latencyMs')} ms), "
-                f"but has NO INTERNET because Main Router ({gateway_ip}) cannot reach outside websites."
+                "and the monitor could not reach its external test targets."
             )
             dev["fixSteps"] = [
                 f"No need to restart {name} ({ip}) — its cable and power are working fine.",
@@ -964,11 +1047,12 @@ class ProbesMixin:
         scheme: str,
         path: str,
         timeout: float = 2.0,
+        data: bytes = b"operation=read",
     ) -> dict | None:
         url = f"{scheme}://{host}:{port}{path}"
         request = urllib.request.Request(
             url,
-            data=b"operation=read",
+            data=data,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "User-Agent": "Pulse/2.1",
@@ -984,6 +1068,7 @@ class ProbesMixin:
     def _probe_single_router(
         self, cfg: dict, is_primary: bool = False, previous_state: dict | None = None
     ) -> dict:
+        self = cast("Monitor", self)
         host = self._validate_ip(cfg.get("ip", "192.168.0.1"))
         port = self._validate_port(cfg.get("port", 80))
         use_https = bool(cfg.get("useHttps", False))
@@ -1021,6 +1106,10 @@ class ProbesMixin:
         state["latencyMs"] = latency_ms
         state["reachable"] = alive
         state["ip"] = host
+        if is_primary and self.isp_state.get("wanGatewayIp") == host:
+            external = [p for p in self.isp_state.get("probes", []) if p.get("id") != "gateway"]
+            if external:
+                state["wanInternetStatus"] = "CONNECTED" if any(p.get("alive") for p in external) else "DISCONNECTED"
         state["lastSeen"] = utc_now() if alive else None
         state["lastChecked"] = utc_now()
         state["clientCount"] = None
@@ -1028,7 +1117,7 @@ class ProbesMixin:
         state["snmp"] = {}
         state["hasPassword"] = bool(cfg.get("password"))
         state["hasToken"] = bool(cfg.get("stok"))
-        state["snmpCommunity"] = str(cfg.get("snmpCommunity") or "public")
+        state["wanInterfaceIndex"] = cfg.get("wanInterfaceIndex")
 
         if cfg.get("model"):
             state["model"] = str(cfg["model"])
@@ -1094,7 +1183,7 @@ class ProbesMixin:
                     "sysName": "1.3.6.1.2.1.1.5.0",
                     "ifNumber": "1.3.6.1.2.1.2.1.0",
                 },
-                community=state["snmpCommunity"],
+                community=str(cfg.get("snmpCommunity") or "public"),
                 timeout=0.35,
             )
             if snmp_data:
@@ -1119,20 +1208,19 @@ class ProbesMixin:
                     if index >= len(state["ports"]) or not isinstance(item, dict):
                         continue
                     port_state = state["ports"][index]
-                    speed = item.get("speed")
-                    speed_match = re.search(r"\d+", str(speed)) if speed is not None else None
-                    speed = int(speed_match.group()) if speed_match else None
+                    speed = _router_link_mbps(item.get("speed"))
                     link = str(item.get("link_status", item.get("status", ""))).lower()
-                    connected = link in {"up", "connected", "1", "on"}
+                    connected = link in {"up", "connected", "1", "on", "true"}
+                    disconnected = link in {"down", "disconnected", "0", "off", "false"}
                     port_state.update({
                         "speed": speed,
                         "speedText": f"{speed} Mbps" if speed else "Unavailable",
                         "duplex": str(item.get("duplex") or "Unknown"),
-                        "linkStatus": "connected" if connected else "disconnected",
+                        "linkStatus": "connected" if connected else "disconnected" if disconnected else "unknown",
                         "status": (
                             "optimal"
                             if connected and speed and speed >= 1000
-                            else ("warning" if connected else "disconnected")
+                            else ("warning" if connected and speed else "disconnected" if disconnected else "unknown")
                         ),
                     })
                 state["telemetryAvailable"] = True
@@ -1187,6 +1275,18 @@ class ProbesMixin:
                         dhcp_hosts[cip] = cname[:80]
                 if dhcp_hosts and hasattr(self, "_save_cached_hostnames"):
                     self._save_cached_hostnames(dhcp_hosts)
+            if is_primary:
+                control = RouterGameControl({
+                    **cfg, "ip": host, "port": admin_port, "useHttps": admin_scheme == "https",
+                }, self._luci_post)
+                clients = control.clients()
+                if clients is not None:
+                    state.update(routerClients=clients, routerClientSource="router", authenticated=True)
+                    state["denyListEnabled"] = control.deny_list_enabled()
+                elif isinstance(dhcp_payload, dict) and dhcp_payload.get("success") is True:
+                    leases = router_clients(dhcp_payload.get("data"))
+                    if leases is not None:
+                        state.update(routerClients=leases, routerClientSource="dhcp", authenticated=True)
 
         if previous_state:
             for idx, prev_port in enumerate(previous_state.get("ports", [])):
@@ -1196,6 +1296,7 @@ class ProbesMixin:
 
     def _resolve_router_configs(self) -> list[dict]:
         """Combine primary gateway, saved per-router credentials, and all monitored router devices."""
+        self = cast("Monitor", self)
         primary = dict(self.config.get("router", {}))
         primary_ip = str(primary.get("ip") or "192.168.0.1").strip()
         by_ip: dict[str, dict] = {}
@@ -1243,11 +1344,13 @@ class ProbesMixin:
         )
 
     def get_router_fleet(self) -> list[dict]:
+        self = cast("Monitor", self)
         with self.lock:
             return json.loads(json.dumps(getattr(self, "router_fleet", [])))
 
     def probe_routers_fleet(self) -> list[dict]:
         """Probe all gateways and secondary routers concurrently to collect live telemetry."""
+        self = cast("Monitor", self)
         configs = self._resolve_router_configs()
         if not configs:
             return []
@@ -1273,6 +1376,7 @@ class ProbesMixin:
         return fleet
 
     def probe_router(self) -> dict:
+        self = cast("Monitor", self)
         cfg = self.config["router"]
         with self.lock:
             prev_primary = dict(self.router_state)
@@ -1293,11 +1397,20 @@ class ProbesMixin:
         return state
 
     def probe_isp(self) -> dict:
+        self = cast("Monitor", self)
+        with self._isp_probe_lock:
+            return self._probe_isp()
+
+    def _probe_isp(self) -> dict:
+        self = cast("Monitor", self)
         now_dt = datetime.now().astimezone()
+        sample_epoch = now_dt.timestamp()
         now = now_dt.strftime("%H:%M:%S")
         now_full = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         probes = []
-        graph = self.isp_state["pingGraph"]
+        with self.lock:
+            graph = copy.deepcopy(self.isp_state["pingGraph"])
+            history = copy.deepcopy(self.isp_state["history"])
         global_log = graph.setdefault("statusLog", [])
 
         router_cfg = self.config.get("router", {})
@@ -1316,7 +1429,8 @@ class ProbesMixin:
             if icmp_ok and icmp_ms is not None:
                 tcp_alive, tcp_ms = False, None
             else:
-                _, tcp_alive, tcp_ms = self._probe_tcp_socket(t_host, t_port, 1.0)
+                tcp_open, tcp_responded, tcp_ms = self._probe_tcp_socket(t_host, t_port, 1.0)
+                tcp_alive = tcp_responded if target["id"] == "gateway" else tcp_open
             alive = icmp_ok or tcp_alive
             if icmp_ok and icmp_ms is not None:
                 latency = icmp_ms
@@ -1345,6 +1459,7 @@ class ProbesMixin:
         with ThreadPoolExecutor(max_workers=max(1, len(ISP_TARGETS))) as pool:
             target_results = list(pool.map(_probe_single_isp_target, ISP_TARGETS))
 
+        latency_changes = []
         for meta, alive, latency, method in target_results:
             t_id = meta["id"]
             t_name = meta["name"]
@@ -1365,6 +1480,9 @@ class ProbesMixin:
             stats = graph["stats"][t_id]
             prev_status = stats.get("lastStatus")
             curr_status = "UP" if alive else "DOWN"
+            previous_ms = stats.get("currentMs")
+            if t_id != "gateway" and latency is not None and previous_ms is not None and stats.get("probeMethod") == method:
+                latency_changes.append(abs(latency - previous_ms))
             stats["currentMs"] = latency
             stats["lossPct"] = 0 if alive else 100
             stats["probeMethod"] = method
@@ -1372,17 +1490,18 @@ class ProbesMixin:
             hb_msg = (
                 f"200 - OK • {method} reply from {t_host} ({t_ip}) in {latency} ms"
                 if alive
-                else f"Connection LOST • Timeout reaching {t_host} ({t_ip}:{t_port}) — 100% packet loss"
+                else f"No response from {t_host} ({t_ip}:{t_port}) over ICMP or TCP"
             )
             stats["heartbeats"].append({
                 "time": now,
                 "dateTime": now_full,
+                "sampleEpoch": sample_epoch,
                 "ms": latency,
                 "status": "online" if alive else "offline",
                 "message": hb_msg,
             })
             del stats["heartbeats"][:-60]
-            self._record_ping_sample(t_id, alive, latency)
+            self._record_ping_sample(t_id, alive, latency, timestamp=sample_epoch)
             heartbeats = stats["heartbeats"]
             values = [entry["ms"] for entry in heartbeats if entry["ms"] is not None]
             up_ratio = (
@@ -1392,20 +1511,15 @@ class ProbesMixin:
             )
             db_uptime = self._get_ping_uptime_stats(t_id)
             stats["uptimePct"] = round(up_ratio, 2)
-            stats["uptime24hPct"] = (
-                db_uptime["uptime24hPct"] if db_uptime["uptime24hPct"] is not None else round(up_ratio, 2)
-            )
-            stats["uptime30dPct"] = (
-                db_uptime["uptime30dPct"] if db_uptime["uptime30dPct"] is not None else round(up_ratio, 2)
-            )
-            stats["samples24h"] = db_uptime["samples24h"]
-            stats["samples30d"] = db_uptime["samples30d"]
+            stats.update(db_uptime)
             if values:
                 stats.update({
                     "avgMs": round(sum(values) / len(values), 1),
                     "minMs": min(values),
                     "maxMs": max(values),
                 })
+            else:
+                stats.update(avgMs=None, minMs=None, maxMs=None)
 
             t_log = stats.setdefault("statusLog", [])
             # Record state transitions (DOWN, recovery UP, initial check, or high latency spike)
@@ -1460,21 +1574,14 @@ class ProbesMixin:
             del values[:-40]
 
         wan = [probe for probe in probes if probe["id"] != "gateway"]
+        wan_alive = any(probe["alive"] for probe in wan)
         latencies = [
             probe["latencyMs"]
             for probe in wan
             if probe["alive"] and probe["latencyMs"] is not None
         ]
         latency = round(sum(latencies) / len(latencies), 1) if latencies else None
-        jitter = (
-            round(
-                sum(abs(latencies[i] - latencies[i - 1]) for i in range(1, len(latencies)))
-                / (len(latencies) - 1),
-                1,
-            )
-            if len(latencies) > 1
-            else 1.2
-        )
+        jitter = round(sum(latency_changes) / len(latency_changes), 1) if latency_changes else None
         dns_started = time.perf_counter()
         try:
             socket.getaddrinfo(
@@ -1500,13 +1607,7 @@ class ProbesMixin:
                 ),
             )
         )
-        overall = (
-            "EXCELLENT"
-            if score >= 90
-            else "GOOD"
-            if score >= 70
-            else ("DEGRADED" if score >= 30 else "OUTAGE")
-        )
+        overall = "EXCELLENT" if score >= 90 else "GOOD" if score >= 70 else "DEGRADED" if wan_alive else "OUTAGE"
         gw_latency = graph["stats"]["gateway"]["currentMs"]
         gw_alive = any(p["id"] == "gateway" and p["alive"] for p in probes)
 
@@ -1516,37 +1617,40 @@ class ProbesMixin:
             gw_alive=gw_alive,
             gw_latency=gw_latency,
             wan_latency=latency,
-            jitter_ms=jitter,
             loss_pct=loss,
             dns_ms=dns_ms,
-            last_speed=self.isp_state.get("lastSpeedTest"),
         )
 
-        self.isp_state.update({
+        history["latency"].append(latency)
+        history["timestamps"].append(now)
+        del history["latency"][:-30]
+        del history["timestamps"][:-30]
+        state_update = {
             "overallHealth": overall,
             "healthScore": score,
             "status": (
-                "online" if score >= 70 else "warning" if score >= 30 else "offline"
+                "online" if score >= 70 else "warning" if wan_alive else "offline"
             ),
             "wanGatewayLatencyMs": gw_latency,
+            "wanGatewayReachable": gw_alive,
+            "wanGatewayIp": router_ip,
             "tier1LatencyMs": latency,
             "packetLossPct": loss,
+            "probeFailurePct": loss,
+            "probeTimestamp": utc_now(),
             "jitterMs": jitter,
             "dnsResolutionMs": dns_ms,
             "probes": probes,
             "diagnosis": isp_diagnosis,
-        })
-        self.router_state["wanInternetStatus"] = (
-            "CONNECTED" if latencies else "DISCONNECTED"
-        )
+            "pingGraph": graph,
+            "history": history,
+        }
+        with self.lock:
+            self.isp_state.update(state_update)
+            if self.router_state.get("ip") == router_ip:
+                self.router_state["wanInternetStatus"] = "CONNECTED" if wan_alive else "DISCONNECTED"
         if hasattr(self, "_evaluate_isp_alert"):
             self._evaluate_isp_alert(overall, isp_diagnosis, probes)
-        if latency is not None:
-            history = self.isp_state["history"]
-            history["latency"].append(latency)
-            history["timestamps"].append(now)
-            del history["latency"][:-30]
-            del history["timestamps"][:-30]
         return self.get_isp_state()
 
     def _build_isp_diagnosis(
@@ -1557,17 +1661,14 @@ class ProbesMixin:
         gw_alive: bool,
         gw_latency: float | None,
         wan_latency: float | None,
-        jitter_ms: float | None,
         loss_pct: int,
         dns_ms: float | None,
-        last_speed: dict | None,
     ) -> dict:
-        """Analyze local gateway vs. WAN ISP backbone vs. DNS to diagnose ISP/speed issues & solutions."""
-        dl_mbps = (last_speed or {}).get("downloadMbps")
-        ul_mbps = (last_speed or {}).get("uploadMbps")
+        """Diagnose current gateway, WAN probe, and DNS measurements."""
+        self = cast("Monitor", self)
         gateway_ip = self.config.get("router", {}).get("ip", "192.168.0.1")
 
-        if overall == "OUTAGE" or wan_latency is None:
+        if overall == "OUTAGE":
             if not gw_alive:
                 return {
                     "verdict": "CRITICAL",
@@ -1600,9 +1701,13 @@ class ProbesMixin:
 
         issues: list[str] = []
         solutions: list[str] = []
-        bottleneck = "None — Router, Internet Line & Website Lookup Are All Fast"
+        bottleneck = None
 
-        if gw_latency is not None and gw_latency > 25:
+        if not gw_alive:
+            issues.append(f"Main Router ({gateway_ip}) did not answer the monitor")
+            bottleneck = "Gateway reachability"
+            solutions.append(f"Check whether {gateway_ip} permits ICMP or responds on its configured management port.")
+        elif gw_latency is not None and gw_latency > 25:
             issues.append(f"Slow local connection to Main Router ({gw_latency} ms)")
             bottleneck = f"Busy Office Wi-Fi or Cable Before Router ({gateway_ip})"
             solutions.append(
@@ -1610,52 +1715,38 @@ class ProbesMixin:
             )
 
         if loss_pct > 0:
-            issues.append(f"Internet connection drops ({loss_pct}% lost)")
-            bottleneck = "Unstable Internet Line / Dropped Data"
+            issues.append(f"{loss_pct}% of external targets did not respond")
+            bottleneck = "External reachability"
             solutions.append(
-                f"Detected {loss_pct}% dropped internet checks. Inspect the internet cable plugged into {gateway_ip} or restart the modem."
+                "Compare failures across multiple checks to distinguish a single unreachable target from a WAN problem."
             )
 
         if wan_latency is not None and wan_latency > 75:
             issues.append(f"Slow outside internet ping ({wan_latency} ms avg)")
-            if bottleneck.startswith("None"):
-                bottleneck = "Slow Response From Internet Provider Line"
+            if bottleneck is None:
+                bottleneck = "Latency to external targets"
             solutions.append(
-                f"Outside ping is {wan_latency} ms while your office router responds in {gw_latency or 1.5} ms — slowdown is outside the office. Use 'Check Internet Path' to see where."
+                f"Outside probes average {wan_latency} ms. Use 'Check Internet Path' to investigate the delay."
             )
 
         if dns_ms is None or dns_ms > 80:
-            issues.append(f"Slow website lookup ({dns_ms if dns_ms is not None else 'Timeout'} ms)")
-            if bottleneck.startswith("None"):
+            issues.append(f"Slow DNS lookup ({dns_ms} ms)" if dns_ms is not None else "DNS lookup failed")
+            if bottleneck is None:
                 bottleneck = "Slow Website Address Lookup (DNS)"
             solutions.append(
-                f"Website lookup took {dns_ms or 'N/A'} ms. Setting DNS on Main Router ({gateway_ip}) to 1.1.1.1 and 8.8.8.8 makes web pages open faster."
-            )
-
-        if dl_mbps is not None and dl_mbps < 35:
-            issues.append(f"Slow download speed ({round(dl_mbps / 8, 2)} MB/s / {dl_mbps} Mbps)")
-            solutions.append(
-                "Make sure your router internet port uses a full-speed 1000 Mbps cable and check for heavy office downloads."
+                "Use 'Test Website Lookup Speed' to compare the system resolver with the other DNS resolvers."
             )
 
         if not issues:
-            speed_note = (
-                f"measured speed is {round(dl_mbps / 8, 2)} MB/s Down / {round(ul_mbps / 8, 2)} MB/s Up."
-                if dl_mbps is not None and ul_mbps is not None
-                else "click '⚡ Test Internet Speed Now' anytime to test full speed."
-            )
             return {
                 "verdict": "OPTIMAL",
-                "headline": "Internet, Office Router & Website Lookup Are Healthy and Fast",
-                "bottleneckLayer": bottleneck,
+                "headline": "Gateway, internet reachability and DNS checks passed",
+                "bottleneckLayer": "None detected by current probes",
                 "summary": (
-                    f"Main Router ({gateway_ip}) responds in {gw_latency or '--'} ms, internet ping averages {wan_latency} ms "
-                    f"(0% loss), website lookup takes {dns_ms or '--'} ms, and {speed_note}"
+                    f"Main Router ({gateway_ip}) responds in {gw_latency if gw_latency is not None else '--'} ms, "
+                    f"external probes average {wan_latency} ms, and website lookup takes {dns_ms} ms."
                 ),
-                "solutions": [
-                    "Everything is working normally with fast lookup speeds (1.1.1.1 / 8.8.8.8).",
-                    "Click '⚡ Test Internet Speed Now' anytime to check full download and upload speed.",
-                ],
+                "solutions": [],
             }
 
         return {
@@ -1664,12 +1755,14 @@ class ProbesMixin:
             "bottleneckLayer": bottleneck,
             "summary": (
                 f"Found {len(issues)} issue(s): {'; '.join(issues)}. "
-                f"Office router takes {gw_latency or 1.5} ms while outside internet takes {wan_latency} ms."
+                f"Router latency: {f'{gw_latency} ms' if gw_latency is not None else 'unavailable'}. "
+                f"External latency: {f'{wan_latency} ms' if wan_latency is not None else 'unavailable'}."
             ),
             "solutions": solutions,
         }
 
     def _hydrate_ping_history(self) -> None:
+        self = cast("Monitor", self)
         graph = self.isp_state.get("pingGraph")
         if not graph:
             return
@@ -1682,19 +1775,17 @@ class ProbesMixin:
                 continue
             st = stats_map[tid]
             st["heartbeats"] = recent
+            st["currentMs"] = recent[-1]["ms"]
+            st["lossPct"] = 0 if recent[-1]["status"] == "online" else 100
             vals = [e["ms"] for e in recent if e["ms"] is not None]
             if vals:
-                st["currentMs"] = recent[-1]["ms"]
                 st["avgMs"] = round(sum(vals) / len(vals), 1)
                 st["minMs"] = min(vals)
                 st["maxMs"] = max(vals)
             db_uptime = self._get_ping_uptime_stats(tid)
             up_ratio = sum(e["status"] != "offline" for e in recent) / len(recent) * 100
             st["uptimePct"] = round(up_ratio, 2)
-            st["uptime24hPct"] = db_uptime["uptime24hPct"] if db_uptime["uptime24hPct"] is not None else round(up_ratio, 2)
-            st["uptime30dPct"] = db_uptime["uptime30dPct"] if db_uptime["uptime30dPct"] is not None else round(up_ratio, 2)
-            st["samples24h"] = db_uptime["samples24h"]
-            st["samples30d"] = db_uptime["samples30d"]
+            st.update(db_uptime)
             st["lastStatus"] = "UP" if recent[-1]["status"] == "online" else "DOWN"
             tail = recent[-40:]
             graph["timeseries"][tid] = [e["ms"] for e in tail]
@@ -1719,5 +1810,8 @@ class ProbesMixin:
             pass
 
     def get_isp_state(self) -> dict:
+        self = cast("Monitor", self)
         with self.lock:
-            return json.loads(json.dumps(self.isp_state))
+            state = json.loads(json.dumps(self.isp_state))
+        state["speedTestsEnabled"] = manual_speed_tests_enabled()
+        return state

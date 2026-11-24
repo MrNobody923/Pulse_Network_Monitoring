@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from threading import Lock
+from typing import TYPE_CHECKING
+
 from .config import (
     CONFIG_FILE,
     DATA_DIR,
@@ -15,7 +18,19 @@ from .config import (
 )
 from .engine import Monitor
 
-monitor = Monitor()
+if TYPE_CHECKING:
+    monitor: Monitor
+
+_monitor_lock = Lock()
+
+
+def __getattr__(name: str):
+    if name != "monitor":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _monitor_lock:
+        if name not in globals():
+            globals()[name] = Monitor()
+        return globals()[name]
 
 __all__ = [
     "CONFIG_FILE",

@@ -1,10 +1,10 @@
-.venv
-__pycache__
-*.pyc
-*.pyo
-.git
-.gitignore
-tests
-data/*.tmp
-data/*.bak
-
+# Only send application sources used by the Dockerfile.
+**
+!Dockerfile
+!requirements.txt
+!server.py
+!monitor.py
+!pulse_monitor/
+!pulse_monitor/**/*.py
+!public/
+!public/**

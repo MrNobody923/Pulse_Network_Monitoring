@@ -365,6 +365,12 @@
   flex-shrink: 0;
 }
 
+.kuma-big-status-pill.pending {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-text);
+  border-color: currentColor;
+}
+
 .kuma-big-status-pill.down {
   background: var(--status-down-bg);
   color: var(--status-down-text);

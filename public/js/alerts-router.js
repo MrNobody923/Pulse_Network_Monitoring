@@ -19,6 +19,7 @@ function renderAlertsCenter() {
   const critCount = alerts.filter(a => a.severity === 'CRITICAL').length;
   const warnCount = alerts.filter(a => a.severity === 'WARNING').length;
   const ackCount = alerts.filter(a => a.status === 'ACKNOWLEDGED').length;
+  const liveAlerts = alerts.filter(a => !a.isDrill);
 
   const setTxt = (id, v) => {
     const el = document.getElementById(id);
@@ -42,14 +43,16 @@ function renderAlertsCenter() {
 
   const healthEl = document.getElementById('opsHealthFeedback');
   if (healthEl) {
-    if (critCount > 0) {
-      healthEl.textContent = `${critCount} CRITICAL OUTAGE`;
+    const liveCritical = liveAlerts.filter(a => a.severity === 'CRITICAL').length;
+    const liveWarnings = liveAlerts.filter(a => a.severity === 'WARNING').length;
+    if (liveCritical > 0) {
+      healthEl.textContent = `${liveCritical} CRITICAL`;
       healthEl.style.color = 'var(--accent-red)';
-    } else if (warnCount > 0) {
-      healthEl.textContent = `${warnCount} DEGRADED WARNING`;
+    } else if (liveWarnings > 0) {
+      healthEl.textContent = `${liveWarnings} WARNING${liveWarnings === 1 ? '' : 'S'}`;
       healthEl.style.color = 'var(--accent-amber)';
     } else {
-      healthEl.textContent = '100% HEALTHY';
+      healthEl.textContent = liveAlerts.length ? 'NO CRITICAL OR WARNING ALERTS' : 'NO ACTIVE NETWORK ALERTS';
       healthEl.style.color = 'var(--accent-green)';
     }
   }
@@ -84,17 +87,19 @@ function renderAlertsCenter() {
 
   if (filtered.length === 0) {
     emptyEl.style.display = 'flex';
-    listEl.innerHTML = '';
+    emptyEl.querySelector('h4').textContent = alerts.length ? 'No alerts match this view' : 'No active alerts';
+    renderDashboardControls(listEl, '');
     return;
   }
 
   emptyEl.style.display = 'none';
-  listEl.innerHTML = filtered
-    .map(alert => {
+  const renderAlert = alert => {
       const isCrit = alert.severity === 'CRITICAL';
       const isInfo = alert.severity === 'INFO';
-      const catLabel =
-        alert.category === 'gaming'
+      const catLabel = alert.isDrill ? 'Simulation'
+          : alert.verificationUnavailable
+          ? 'Unconfirmed'
+          : alert.category === 'gaming'
           ? '🎮 Mobile Game Opened'
           : alert.category === 'router'
           ? '🔌 Router Cable'
@@ -102,8 +107,8 @@ function renderAlertsCenter() {
           ? '🌐 Internet WAN'
           : alert.type === 'HIGH_LATENCY_PACKET_LOSS'
           ? '🟡 Slow / Loss'
-          : '📡 Offline Device';
-      const fails = alert.consecutiveFailures && alert.consecutiveFailures > 1
+          : 'No probe reply';
+      const fails = !alert.verificationUnavailable && alert.consecutiveFailures && alert.consecutiveFailures > 1
         ? `<span class="status-pill new">Failed ${alert.consecutiveFailures}x</span>`
         : '';
       const lastProbe = alert.lastProbeResult
@@ -142,9 +147,10 @@ function renderAlertsCenter() {
             <p style="font-size:0.84rem; color:var(--text-muted);">${esc(
               alert.message
             )}</p>
+            ${alert.lastChecked ? `<p class="gateway-note">Last checked ${esc(fmtTime(alert.lastChecked))}</p>` : ''}
             ${
               alert.likelyFault
-                ? `<p style="font-size:0.78rem; color:var(--accent-amber); font-weight:700; margin-top:4px;">⚡ Cause: ${esc(
+                ? `<p style="font-size:0.78rem; color:var(--accent-amber); font-weight:700; margin-top:4px;">Possible cause: ${esc(
                     alert.likelyFault
                   )}</p>`
                 : ''
@@ -164,23 +170,48 @@ function renderAlertsCenter() {
             ${notes}
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
-            <button class="btn btn-secondary btn-xs" onclick="retestAlert('${esc(
+            <button type="button" class="btn btn-secondary btn-xs" onclick="openIncident(${inlineString(alert.key)})">Incident details</button>
+            ${alert.isDrill ? '' : `<button class="btn btn-secondary btn-xs" onclick="retestAlert(${inlineString(
               alert.key
-            )}', this)">🔄 Re-Test</button>
-            <button class="btn btn-secondary btn-xs" onclick="acknowledgeAlert('${esc(
+            )}, this)">🔄 Re-Test</button>`}
+            <button class="btn btn-secondary btn-xs" onclick="acknowledgeAlert(${inlineString(
               alert.key
-            )}')">👁️ Acknowledge</button>
-            <button class="btn btn-secondary btn-xs" onclick="promptAlertNote('${esc(
+            )})">👁️ Acknowledge</button>
+            <button class="btn btn-secondary btn-xs" onclick="promptAlertNote(${inlineString(
               alert.key
-            )}')">💬 Note</button>
-            <button class="btn btn-secondary btn-xs" onclick="dismissAlert('${esc(
+            )})">💬 Note</button>
+            <button class="btn btn-secondary btn-xs" onclick="dismissAlert(${inlineString(
               alert.key
-            )}', this)">✕ Dismiss</button>
+            )}, this)">✕ Dismiss</button>
           </div>
         </div>
       `;
-    })
-    .join('');
+  };
+  const groups = new Map();
+  for (const alert of filtered) {
+    const upstream = alert.upstreamIncident;
+    if (!upstream) continue;
+    if (!groups.has(upstream.key)) groups.set(upstream.key, {upstream, children: []});
+    groups.get(upstream.key).children.push(alert);
+  }
+  const visibleByKey = new Map(filtered.map(alert => [alert.key, alert]));
+  const renderedGroups = new Set();
+  const markup = filtered.map(alert => {
+    const groupKey = alert.upstreamIncident?.key || alert.key;
+    const group = groups.get(groupKey);
+    if (!group) return renderAlert(alert);
+    if (renderedGroups.has(groupKey)) return '';
+    renderedGroups.add(groupKey);
+    const root = visibleByKey.get(groupKey);
+    const count = group.children.length;
+    return `<section class="upstream-incident" aria-label="Upstream outage group">
+      <h3>Possible upstream cause · ${esc(group.upstream.name)} (${esc(group.upstream.ip)})</h3>
+      ${root ? renderAlert(root) : '<p class="gateway-note">The upstream alert is outside this filter.</p>'}
+      <p class="gateway-note">${count} downstream ${count === 1 ? 'alert' : 'alerts'} linked by confirmed dependencies</p>
+      ${group.children.map(renderAlert).join('')}
+    </section>`;
+  }).join('');
+  renderDashboardControls(listEl, markup);
 }
 
 async function triggerLiveAlertDrill() {
@@ -290,13 +321,191 @@ async function dismissAlert(key, btnEl) {
   }
 }
 
-// Section 1: Multi-Router Fleet & Cables / Ports
+function renderGatewayHealth() {
+  const isp = appState.isp || {};
+  const gateway = appState.router || {};
+  const wan = isp.routerWanThroughput;
+  const pc = isp.liveThroughput;
+  const fresh = (sample, maxAge) => sample && Date.now() - Date.parse(sample) < maxAge;
+  const probeFresh = fresh(isp.probeTimestamp, 30000);
+  const wanFresh = wan?.status === 'live' && wan.routerIp === gateway.ip && fresh(wan.timestamp, 8000);
+  const pcFresh = fresh(pc?.timestamp, 6000);
+  const measures = (fields) => fields.filter(([value]) => Number.isFinite(value))
+    .map(([value, suffix]) => `${value}${suffix}`).join(' · ');
+  const set = (id, text) => { document.getElementById(id).textContent = text || 'Unavailable'; };
+  const external = probeFresh ? (isp.probes || []).filter(probe => probe.id !== 'gateway') : [];
+  const replies = external.filter(probe => probe.alive === true).length;
+  const pingMatches = probeFresh && gateway.ip && isp.wanGatewayIp === gateway.ip;
+  const signal = pcFresh ? pc.wifiSignal : null;
+  const ports = fresh(gateway.lastChecked, 90000) ? (gateway.ports || []).filter(port => !port.simulation) : [];
+  const wanPort = ports.find(port => port.isWan);
+  const link = wan?.routerIp === gateway.ip && fresh(wan?.physicalLink?.timestamp, 25000) ? wan.physicalLink : null;
+  const lanPorts = ports.filter(port => !port.isWan);
+  const lanUp = lanPorts.filter(port => port.linkStatus === 'connected').length;
+  const lanDown = lanPorts.filter(port => port.linkStatus === 'disconnected').length;
+  set('gatewayConnectionStatus', !gateway.lastChecked ? 'Waiting for the first gateway check.'
+    : !gateway.reachable ? 'The gateway did not respond to the latest check.'
+    : gateway.authenticated ? 'Gateway reachable. Router admin connected.'
+    : gateway.hasToken || gateway.hasPassword
+      ? 'Gateway reachable. Router admin session unavailable. Check the connection in router settings.'
+      : 'Gateway reachable. Connect the router in Settings for supported client and port readings.');
+  set('gatewayWanStatus', external.length
+    ? `${replies ? 'Reachable' : 'No replies'} · ${replies}/${external.length} internet probes` : null);
+  set('gatewayWanTraffic', wanFresh ? `↓ ${fmtMbps(wan.rxMbps)} · ↑ ${fmtMbps(wan.txMbps)}` : null);
+  set('gatewayWanQuality', external.length ? measures([
+    [isp.tier1LatencyMs, ' ms latency'], [isp.packetLossPct, '% loss'], [isp.jitterMs, ' ms jitter'],
+  ]) : null);
+  set('gatewayWanLink', wanPort?.linkStatus === 'connected'
+    ? (wanPort.speed ? `Up · ${wanPort.speed} Mbps` : 'Up')
+    : wanPort?.linkStatus === 'disconnected' ? 'Down'
+    : link ? `${{up: 'Up', down: 'Down', initializing: 'Initializing'}[link.status]} · Router UPnP` : null);
+  set('gatewayLanStatus', pingMatches && typeof isp.wanGatewayReachable === 'boolean'
+    ? isp.wanGatewayReachable ? ['Reachable', measures([[isp.wanGatewayLatencyMs, ' ms']])].filter(Boolean).join(' · ') : 'No reply'
+    : null);
+  set('gatewayLanLink', pcFresh && Number.isFinite(pc.linkSpeedMbps) ? `${pc.linkSpeedMbps} Mbps · ${pc.source}` : null);
+  set('gatewayLanSignal', signal && measures([[signal.signalPercent, '%'], [signal.rssiDbm, ' dBm']]));
+  set('gatewayLanPorts', lanUp || lanDown
+    ? `${lanUp} up · ${lanDown} down${lanPorts.length > lanUp + lanDown ? ` · ${lanPorts.length - lanUp - lanDown} unknown` : ''}`
+    : null);
+}
+
+function renderGatewayClients() {
+  const gateway = appState.router || {};
+  const input = document.getElementById('gatewayClientSearch');
+  const query = input.value.trim().toLowerCase();
+  const source = gateway.routerClientSource;
+  const reported = Array.isArray(gateway.routerClients) && Date.now() - Date.parse(gateway.lastChecked) < 90000;
+  const clients = reported ? gateway.routerClients : (appState.networkInventory || []).filter(row => row.isOnline && !row.archived);
+  const rules = (appState.gameActivity?.blocks || []).filter(rule =>
+    rule.active && rule.scope === 'device_wifi_cut' && rule.controlStatus);
+  const enabled = reported && source === 'router' && gateway.denyListEnabled === true;
+  const visible = clients.filter(row => [row.name, row.ip, row.observedMac ?? row.mac].some(value =>
+    String(value ?? '').toLowerCase().includes(query)));
+  document.getElementById('gatewayClientSource').textContent = reported
+    ? `${clients.length} ${source === 'dhcp' ? 'router DHCP leases' : 'router-reported clients'} · ${fmtTime(gateway.lastChecked)}`
+    : `${clients.length} previously observed in LAN inventory. Connect the router admin session for its client list.`;
+  document.getElementById('gatewayAccessStatus').textContent = enabled
+    ? 'Device blocks use the router’s deny list.'
+    : !reported ? 'Access control requires the router admin session.'
+    : gateway.denyListEnabled === false ? 'Enable deny-list mode in the router to use device blocks here.'
+    : 'The router did not confirm deny-list access.';
+  const results = document.getElementById('gatewayClients');
+  const table = visible.length ? `<div class="device-list-table-wrap gateway-client-table">
+    <table class="device-list-table">
+      <thead><tr><th scope="col">Device</th><th scope="col">Address</th>${enabled ? '<th scope="col">Access</th>' : ''}</tr></thead>
+      <tbody>${visible.map(row => {
+        const mac = row.observedMac ?? row.mac;
+        const restricted = rules.some(rule => rule.mac === row.mac || rule.ip === row.ip);
+        return `<tr><td><strong>${esc(row.name || row.ip)}</strong>${!reported ? `<small>${esc(fmtTime(row.lastSeen))}</small>` : ''}</td>
+          <td class="mono">${esc(row.ip)}<small>${esc(mac || 'MAC unknown')}</small></td>
+          ${enabled ? `<td>${restricted ? 'Restriction recorded' : `<button type="button" class="btn btn-secondary btn-xs"
+            onclick="openGatewayBlock(${inlineString(row.ip)}, ${inlineString(row.mac)})">Block access</button>`}</td>` : ''}</tr>`;
+      }).join('')}</tbody>
+    </table></div>` : `<p class="gateway-note">${query ? 'No matching devices.' : 'No clients reported.'}</p>`;
+  if (results.dataset.content !== table) {
+    const scrollTop = results.querySelector('.gateway-client-table')?.scrollTop;
+    results.innerHTML = table;
+    results.dataset.content = table;
+    if (scrollTop && !query) results.querySelector('.gateway-client-table')?.scrollTo(0, scrollTop);
+  }
+  const rulesEl = document.getElementById('gatewayAccessRules');
+  const active = rules.length ? `<h4>Device access rules</h4>${rules.map(rule => `<div class="gateway-rule">
+    <div><strong>${esc(rule.deviceName || rule.ip)}</strong><small>${esc(rule.ip)} · ${rule.controlStatus === 'active'
+      ? `Blocked until ${esc(fmtTime(rule.expiresAt))}` : 'Restoration pending verification'}</small></div>
+    <button type="button" class="btn btn-secondary btn-xs" onclick="restoreGatewayAccess(${inlineString(rule.id)}, this)">Restore access</button>
+  </div>`).join('')}` : '';
+  if (rulesEl.dataset.content !== active) {
+    rulesEl.innerHTML = active;
+    rulesEl.dataset.content = active;
+  }
+}
+
+let gatewayBlockTarget;
+
+function openGatewayBlock(ip, mac) {
+  const dialog = document.getElementById('gatewayAccessDialog');
+  if (dialog.open || document.getElementById('btnSubmitGatewayBlock').disabled) return;
+  const gateway = appState.router || {};
+  const client = gateway.routerClients?.find(row => row.ip === ip && row.mac === mac);
+  if (gateway.routerClientSource !== 'router' || gateway.denyListEnabled !== true || !client) return;
+  gatewayBlockTarget = {ip, mac};
+  document.getElementById('gatewayAccessTarget').textContent = `${client.name} · ${ip} · ${mac}`;
+  document.getElementById('gatewayBlockFeedback').textContent = '';
+  document.getElementById('gatewayAccessDuration').value = '15';
+  dialog.showModal();
+}
+
+async function submitGatewayBlock(event) {
+  event.preventDefault();
+  const dialog = document.getElementById('gatewayAccessDialog');
+  const feedback = document.getElementById('gatewayBlockFeedback');
+  const button = document.getElementById('btnSubmitGatewayBlock');
+  if (!gatewayBlockTarget || button.disabled) return;
+  button.disabled = true;
+  feedback.textContent = 'Verifying the router rule…';
+  try {
+    const durationMinutes = Number(document.getElementById('gatewayAccessDuration').value);
+    const result = await apiJson('/api/router/access/block', {
+      method: 'POST', body: JSON.stringify({...gatewayBlockTarget, durationMinutes}),
+    });
+    applyGameActivitySnapshot(result.gameActivity);
+    renderGatewayClients();
+    if (result.success) {
+      dialog.close();
+      document.getElementById('gatewayRestoreFeedback').textContent = `Router confirmed the block until ${fmtTime(result.expiresAt)}.`;
+    } else {
+      feedback.textContent = result.error || result.enforcementDetails?.setupHint || 'Router did not confirm the block.';
+    }
+  } catch (error) {
+    feedback.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function restoreGatewayAccess(ruleId, button) {
+  button.disabled = true;
+  const feedback = document.getElementById('gatewayRestoreFeedback');
+  feedback.textContent = 'Verifying restoration…';
+  try {
+    const result = await apiJson('/api/router/access/restore', {method: 'POST', body: JSON.stringify({ruleId})});
+    applyGameActivitySnapshot(result.gameActivity);
+    renderGatewayClients();
+    feedback.textContent = result.success ? 'Router confirmed access was restored.' : result.error;
+  } catch (error) {
+    feedback.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshMainGateway() {
+  const button = document.getElementById('btnRefreshGateway');
+  const status = document.getElementById('gatewayRefreshStatus');
+  button.disabled = true;
+  status.textContent = 'Checking main gateway…';
+  try {
+    const data = await apiJson('/api/router/refresh', {method: 'POST', body: '{}'});
+    appState.router = data.router;
+    appState.routers = data.routers;
+    renderRouterSection();
+    status.textContent = `Checked ${fmtTime(data.router.lastChecked)}.`;
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Multi-router fleet and Ethernet ports
 function selectRouterForInspection(ip) {
   appState.selectedRouterIp = ip;
   renderRouterSection();
 }
 
 function renderRouterSection() {
+  renderGatewayHealth();
+  renderGatewayClients();
   const fleet =
     Array.isArray(appState.routers) && appState.routers.length
       ? appState.routers
@@ -312,7 +521,7 @@ function renderRouterSection() {
   const fleetContainer = document.getElementById('routerFleetContainer');
   if (fleetContainer) {
     if (fleet.length > 0) {
-      fleetContainer.innerHTML = `
+      renderDashboardControls(fleetContainer, `
         <div class="device-list-table-wrap">
           <table class="device-list-table">
             <thead>
@@ -339,9 +548,10 @@ function renderRouterSection() {
                     ? r.snmp && r.snmp.sysDescr
                       ? 'Switch/SNMP Stats'
                       : 'Port & CPU Details'
-                    : r.hasToken
-                    ? 'Login Expired'
-                    : 'Model & Ping OK';
+                    : !r.lastChecked ? 'Awaiting check'
+                    : !online ? 'Unavailable'
+                    : r.authenticated ? 'Hardware readings unavailable'
+                    : 'Router admin disconnected';
                   const telCls = r.telemetryAvailable ? 'online' : 'new';
                   return `
                     <tr style="${isSel ? 'background: rgba(56, 189, 248, 0.08);' : ''}">
@@ -361,13 +571,13 @@ function renderRouterSection() {
                       <td><span class="status-pill ${telCls}" style="font-size:0.66rem;">${esc(telLabel)}</span></td>
                       <td style="text-align: right;">
                         <div class="row-actions-group">
-                          <button type="button" class="btn btn-secondary btn-xs" onclick="selectRouterForInspection('${esc(r.ip)}')">Inspect</button>
-                          <button type="button" class="btn btn-secondary btn-xs" onclick="openRouterConfigForIp('${esc(r.ip)}')">Settings</button>
+                          <button type="button" class="btn btn-secondary btn-xs" onclick="selectRouterForInspection(${inlineString(r.ip)})">Inspect</button>
+                          <button type="button" class="btn btn-secondary btn-xs" onclick="openRouterConfigForIp(${inlineString(r.ip)})">Settings</button>
                           ${
                             !(typeof appState !== 'undefined' && appState.router && r.ip === appState.router.ip) &&
                             typeof appState !== 'undefined' &&
                             (appState.devices || []).some(d => d.ip === r.ip)
-                              ? `<button type="button" class="btn btn-secondary btn-xs" style="color:var(--danger,#ef4444);border-color:rgba(239,68,68,0.35);" onclick="removeRouterFromFleet('${esc(r.ip)}')" title="Remove pulled-out or decommissioned router/AP from fleet">Remove</button>`
+                              ? `<button type="button" class="btn btn-secondary btn-xs" style="color:var(--danger,#ef4444);border-color:rgba(239,68,68,0.35);" onclick="removeRouterFromFleet(${inlineString(r.ip)})" title="Remove pulled-out or decommissioned router/AP from fleet">Remove</button>`
                               : ''
                           }
                         </div>
@@ -379,9 +589,9 @@ function renderRouterSection() {
             </tbody>
           </table>
         </div>
-      `;
+      `);
     } else {
-      fleetContainer.innerHTML = '';
+      renderDashboardControls(fleetContainer, '');
     }
   }
 
@@ -390,12 +600,12 @@ function renderRouterSection() {
   const uptimeEl = document.getElementById('routerUptimeText');
 
   if (modelEl)
-    modelEl.textContent = router.model || 'TP-Link BE3600 (Archer BE230)';
-  if (ipEl) ipEl.textContent = router.ip || '192.168.0.1';
+    modelEl.textContent = router.model || 'Router model unavailable';
+  if (ipEl) ipEl.textContent = router.ip || '—';
   if (uptimeEl) {
     uptimeEl.textContent = router.reachable
       ? `Online & Reachable${router.latencyMs != null ? ` (${router.latencyMs} ms)` : ''}`
-      : 'Probing Gateway...';
+      : router.lastChecked ? 'No reply from router' : 'Waiting for router check';
     uptimeEl.style.color = router.reachable
       ? 'var(--accent-green)'
       : 'var(--accent-amber)';
@@ -406,9 +616,7 @@ function renderRouterSection() {
     const ports = router.ports || [];
     bay.innerHTML = ports
       .map((port, idx) => {
-        const isUnknown =
-          port.status === 'unknown' ||
-          (!port.simulation && !router.telemetryAvailable && port.linkStatus === 'unknown');
+        const isUnknown = port.linkStatus !== 'connected' && port.linkStatus !== 'disconnected';
         const st =
           port.status === 'warning'
             ? 'warning'
@@ -417,26 +625,15 @@ function renderRouterSection() {
             : isUnknown
             ? 'unknown'
             : 'optimal';
-        const ifName = port.isWan || idx === 0 ? 'Internet Port' : `LAN Port ${idx}`;
-        const wanUpOnlyL3 =
-          isUnknown && (port.isWan || idx === 0) && router.wanInternetStatus === 'CONNECTED';
-        const speedLabel = port.speed
+        const ifName = port.isWan ? 'WAN' : port.name || `LAN ${idx}`;
+        const speedLabel = port.linkStatus === 'connected' && port.speed
           ? `${port.speed} Mbps`
           : port.linkStatus === 'disconnected'
-          ? 'Unplugged'
-          : wanUpOnlyL3
-          ? 'Internet Active'
-          : isUnknown
-          ? 'Waiting for login'
-          : '1000 Mbps';
-        const duplexLabel =
-          port.duplex && port.duplex !== 'Unknown'
-            ? port.duplex
-            : port.linkStatus === 'disconnected'
-            ? 'Disconnected'
-            : isUnknown
-            ? 'Add router login in Settings to see port speed'
-            : '1000 Mbps Full Speed';
+          ? 'Link down'
+          : 'Speed unavailable';
+        const duplexLabel = isUnknown
+          ? router.authenticated ? 'Port readings unavailable' : 'Router admin session required'
+          : port.linkStatus === 'connected' && port.duplex && port.duplex !== 'Unknown' ? port.duplex : '';
         const ledClass =
           st === 'optimal'
             ? 'green'
@@ -444,8 +641,6 @@ function renderRouterSection() {
             ? 'amber'
             : st === 'disconnected'
             ? 'red'
-            : wanUpOnlyL3
-            ? 'cyan'
             : 'muted';
         const pillCls =
           st === 'optimal'
@@ -455,16 +650,8 @@ function renderRouterSection() {
             : st === 'disconnected'
             ? 'offline'
             : 'new';
-        const pillText =
-          st === 'optimal'
-            ? 'FULL SPEED'
-            : st === 'warning'
-            ? 'SLOW CABLE'
-            : st === 'disconnected'
-            ? 'UNPLUGGED'
-            : wanUpOnlyL3
-            ? 'INTERNET OK'
-            : 'CONNECTED';
+        const pillText = port.simulation ? 'SIMULATED' : isUnknown ? 'UNKNOWN'
+          : port.linkStatus === 'connected' ? 'LINK UP' : 'LINK DOWN';
         return `
           <div class="port-slot-card ${st}">
             <div class="port-slot-top">
@@ -476,7 +663,6 @@ function renderRouterSection() {
             </div>
             <div class="port-speed-val">${esc(speedLabel)}</div>
             <div class="port-duplex-val">${esc(duplexLabel)}</div>
-            <div class="port-desc-val">${esc(port.label || port.name)} · ${esc(port.description || '')}</div>
           </div>
         `;
       })
@@ -491,11 +677,11 @@ function renderRouterSection() {
   const memFill = document.getElementById('memMeterFill');
 
   if (cpuText) {
-    cpuText.textContent = cpuPct != null ? `${cpuPct}% (Normal)` : '— (Add router login token in Settings)';
+    cpuText.textContent = cpuPct != null ? `${cpuPct}%` : 'Unavailable';
   }
   if (cpuFill) cpuFill.style.width = `${cpuPct != null ? cpuPct : 0}%`;
   if (memText) {
-    memText.textContent = memPct != null ? `${memPct}% (Stable)` : '— (Add router login token in Settings)';
+    memText.textContent = memPct != null ? `${memPct}%` : 'Unavailable';
   }
   if (memFill) memFill.style.width = `${memPct != null ? memPct : 0}%`;
 }

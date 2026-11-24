@@ -24,66 +24,81 @@ const OVERVIEW_SECTION_IDS = [
 
 const WORKSPACE_SECTIONS_MAP = {
   overview: OVERVIEW_SECTION_IDS,
-  triage: ['overviewHeadlineCard', 'downedDevicesTriageCard'],
-  topology: ['overviewHeadlineCard', 'topologySection'],
-  devices: ['overviewHeadlineCard', 'lanAssetsSection'],
-  internet: ['overviewHeadlineCard', 'ispSection', 'routerSection'],
-  // Legacy alias: Chassis & Switchports now lives on the combined WAN/ISP page
-  router: ['overviewHeadlineCard', 'ispSection', 'routerSection'],
-  alerts: ['overviewHeadlineCard', 'notificationsCard'],
-  ping: ['overviewHeadlineCard', 'pingGraphSection'],
-  nmap: ['overviewHeadlineCard', 'nmapSection'],
-  toolkit: ['overviewHeadlineCard', 'toolkitSection'],
-  events: ['overviewHeadlineCard', 'eventsSection'],
-  gaming: ['overviewHeadlineCard', 'gamingSection']
+  triage: ['downedDevicesTriageCard'],
+  topology: ['topologySection'],
+  devices: ['lanAssetsSection'],
+  internet: ['ispSection', 'routerSection'],
+  alerts: ['notificationsCard'],
+  ping: ['pingGraphSection'],
+  nmap: ['nmapSection'],
+  toolkit: ['toolkitSection'],
+  events: ['eventsSection'],
+  gaming: ['gamingSection']
 };
 
 const WORKSPACE_META_MAP = {
   overview: {
-    tag: 'NETWORK OVERVIEW',
-    sub: 'Live Network Health, Connected Devices & Connection Speed Monitoring'
+    tag: 'Overview',
+    sub: 'Network health, device inventory, and internet response times'
   },
   triage: {
-    tag: 'WI-FI & SWITCH CHECK',
-    sub: 'Check Which Wi-Fi Points, Switches & Routers Are Down or Need Attention'
+    tag: 'Device Health',
+    sub: 'Connectivity checks for routers, access points, and switches'
   },
   topology: {
-    tag: 'NETWORK MAP (TOPOLOGY)',
-    sub: 'Visual Map of Your Company Network, Offline Devices & Event History'
+    tag: 'Network Map',
+    sub: 'Network links and device health'
   },
   devices: {
-    tag: 'ALL NETWORK DEVICES',
-    sub: 'All Company Routers, Wi-Fi Points, Switches & Connected Computers'
+    tag: 'Devices',
+    sub: 'Monitored and discovered devices'
   },
   internet: {
-    tag: 'INTERNET & ROUTERS',
-    sub: 'Real-Time Internet Speed, Ping, Website Lookup & Company Router Status'
+    tag: 'Internet & Routers',
+    sub: 'WAN traffic, ISP tests, and router port status'
   },
   alerts: {
-    tag: 'PROBLEMS & ALERTS',
-    sub: 'Shows What Is Down or Slow Right Now, With Plain-English Causes & Fixes'
+    tag: 'Alerts',
+    sub: 'Active incidents and alert history'
   },
   ping: {
-    tag: 'PING & UPTIME',
-    sub: 'Live Internet Response Time (Ping), Uptime History & Drop Log'
+    tag: 'Ping & Uptime',
+    sub: 'Response times and reachability history'
   },
   nmap: {
-    tag: 'PORT SECURITY CHECK',
-    sub: 'Check Devices for Open Ports, Risky Services & Simple Security Fixes'
+    tag: 'Port Checks',
+    sub: 'Review exposed services on managed devices'
   },
   toolkit: {
-    tag: 'CONNECTION TEST TOOLS',
-    sub: 'Trace Internet Path, Test Website Lookup Speed & Check Specific Ports'
+    tag: 'Connection Tools',
+    sub: 'Traceroute, DNS lookup, and TCP checks'
   },
   events: {
-    tag: 'LIVE NETWORK LOGS',
-    sub: 'Real-time stream of network outages, recoveries, new devices & scans'
+    tag: 'Event Log',
+    sub: 'Network changes, outages, and recoveries'
   },
   gaming: {
-    tag: 'MOBILE GAME DETECTOR',
-    sub: 'Real-Time Alerts When Connected Devices Open Mobile or Online Games'
+    tag: 'Game Detector',
+    sub: 'Detected game activity and device restrictions'
   }
 };
+
+const DEVICE_FILTERS = new Set(['all', 'connected', 'favorites', 'new', 'ignored', 'down', 'offline', 'disconnected', 'archived', 'monitored']);
+let currentWorkspace = 'overview';
+let dashboardSnapshotRequest = null;
+let lastDashboardUpdate = 0;
+let lastDashboardSample = 0;
+let snapshotFailed = false;
+let deviceLookupRows = [];
+
+function syncMobileSidebar() {
+  const sidebar = document.getElementById('appSidebar');
+  const button = document.getElementById('btnMobileMenu');
+  const open = sidebar.classList.contains('open');
+  sidebar.inert = window.matchMedia('(max-width: 960px)').matches && !open;
+  button.setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+}
 
 function toggleMobileSidebar() {
   const side = document.getElementById('appSidebar');
@@ -92,19 +107,29 @@ function toggleMobileSidebar() {
   const opening = !side.classList.contains('open');
   side.classList.toggle('open', opening);
   if (backdrop) backdrop.classList.toggle('open', opening);
+  syncMobileSidebar();
+  if (opening) side.querySelector('[aria-current="page"]')?.focus();
 }
 
-function closeMobileSidebar() {
+function closeMobileSidebar(restoreFocus = false) {
   const side = document.getElementById('appSidebar');
   const backdrop = document.getElementById('mobileNavBackdrop');
+  const wasOpen = side?.classList.contains('open');
   if (side) side.classList.remove('open');
   if (backdrop) backdrop.classList.remove('open');
+  syncMobileSidebar();
+  if (wasOpen && restoreFocus) document.getElementById('btnMobileMenu').focus();
 }
 
-function navigateSidebar(target, event) {
+function navigateSidebar(target, event, updateUrl = true) {
+  if (event && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
   if (event) event.preventDefault();
+  const mobileWasOpen = document.getElementById('appSidebar').classList.contains('open');
   closeMobileSidebar();
   if (target === 'router') target = 'internet';
+  if (!Object.hasOwn(WORKSPACE_SECTIONS_MAP, target)) target = 'overview';
+  currentWorkspace = target;
+  if (updateUrl) setWorkspaceHash(target);
   if (typeof resetSlaHoverTooltips === 'function') resetSlaHoverTooltips();
   const visibleIds = WORKSPACE_SECTIONS_MAP[target] || OVERVIEW_SECTION_IDS;
 
@@ -116,16 +141,23 @@ function navigateSidebar(target, event) {
   });
 
   document.querySelectorAll('#sidebarWorkspaceNav [data-nav]').forEach(link => {
-    link.classList.toggle('active', link.getAttribute('data-nav') === target);
+    const active = link.getAttribute('data-nav') === target;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
   });
 
   const meta = WORKSPACE_META_MAP[target] || WORKSPACE_META_MAP.overview;
   const tagEl = document.getElementById('headerActiveBreadcrumb');
   const subEl = document.getElementById('headerActiveSub');
-  if (tagEl) tagEl.textContent = meta.tag;
+  if (tagEl) {
+    tagEl.textContent = meta.tag;
+    if (mobileWasOpen) tagEl.focus({preventScroll: true});
+  }
   if (subEl) subEl.textContent = meta.sub;
+  document.title = `${meta.tag} | Vertex Sentry`;
 
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo({ top: 0, behavior: 'instant' });
 
   if (
     (target === 'overview' || target === 'internet' || target === 'ping') &&
@@ -154,10 +186,116 @@ function navigateSidebar(target, event) {
 }
 
 function selectSidebarDeviceFilter(filter, event) {
+  if (event && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return;
   if (event) event.preventDefault();
-  closeMobileSidebar();
+  const search = document.getElementById('deviceSearchInput');
+  if (search) search.value = '';
+  currentDeviceSearch = '';
+  selectDeviceFilter(filter, false, false);
   navigateSidebar('devices');
-  selectDeviceFilter(filter, true);
+}
+
+function setWorkspaceHash(target, replace = false) {
+  let hash = `#${target}`;
+  if (target === 'devices') {
+    if (currentDeviceFilter !== 'all') hash += `/${currentDeviceFilter}`;
+    const search = document.getElementById('deviceSearchInput')?.value.trim();
+    if (search) hash += '?' + new URLSearchParams({q: search});
+  }
+  if (window.location.hash !== hash) {
+    if (replace) window.history.replaceState(null, '', hash);
+    else window.history.pushState(null, '', hash);
+  }
+}
+
+function restoreWorkspace() {
+  const [fragment, query] = window.location.hash.slice(1).split('?');
+  const [section, filter] = fragment.split('/');
+  const legacyFilter = section.startsWith('filter-') ? section.slice(7) : '';
+  const path = window.location.pathname.slice(1);
+  const target = legacyFilter || section === 'lan-assets' ? 'devices' : section || path || 'overview';
+  if (target === 'devices') {
+    const restoredFilter = legacyFilter || filter;
+    const search = document.getElementById('deviceSearchInput');
+    const restoredSearch = new URLSearchParams(query).get('q')?.slice(0, 160) || '';
+    if (search) search.value = restoredSearch;
+    currentDeviceSearch = restoredSearch.trim().toLowerCase();
+    selectDeviceFilter(DEVICE_FILTERS.has(restoredFilter) ? restoredFilter : 'all', false, false);
+  }
+  navigateSidebar(target, null, false);
+}
+
+function renderDeviceLookup() {
+  const input = document.getElementById('deviceLookupInput');
+  const result = document.getElementById('deviceLookupResults');
+  const query = input.value.trim().toLowerCase();
+  const rows = buildUnifiedDeviceRows();
+  deviceLookupRows = rows.filter(row => query
+    ? [row.name, row.ip, row.mac, row.vendor].some(value => String(value || '').toLowerCase().includes(query))
+    : row.monitored && !row.archived
+  ).sort((a, b) => Number(b.ip === query) - Number(a.ip === query) || Number(a.archived) - Number(b.archived)).slice(0, 8);
+  if (!deviceLookupRows.length) {
+    result.textContent = query ? 'No matching devices.' : 'No monitored devices yet.';
+    return;
+  }
+  result.innerHTML = deviceLookupRows.map((row, index) => `
+    <button class="lookup-result" type="button" data-lookup-index="${index}">
+      <span><strong>${esc(row.name)}</strong><small class="mono">${esc(row.ip || row.mac || '—')}</small></span>
+      <span class="lookup-result-status">${row.archived ? 'Archived' : row.online ? 'Online' : row.status === 'unknown' ? 'Checking' : 'Offline'}</span>
+    </button>
+  `).join('');
+}
+
+function openDeviceLookup() {
+  const dialog = document.getElementById('deviceLookupDialog');
+  if (dialog.open) return;
+  document.getElementById('deviceLookupInput').value = '';
+  renderDeviceLookup();
+  dialog.showModal();
+}
+
+function openLookupDevice(index) {
+  const device = deviceLookupRows[index];
+  if (!device) return;
+  const search = document.getElementById('deviceSearchInput');
+  search.value = device.ip || device.mac || device.name;
+  currentDeviceSearch = search.value.toLowerCase();
+  selectDeviceFilter(device.archived ? 'archived' : 'all', false, false);
+  document.getElementById('deviceLookupDialog').close();
+  navigateSidebar('devices');
+  search.focus({preventScroll: true});
+}
+
+function renderTelemetryConnection() {
+  const state = document.getElementById('telemetryState');
+  const status = document.getElementById('liveStatusText');
+  const time = document.getElementById('telemetryUpdatedAt');
+  const fresh = lastDashboardUpdate > 0 && Date.now() - lastDashboardUpdate < 35000;
+  const mode = fresh ? (gameEventStreamConnected ? 'live' : 'polling')
+    : (!lastDashboardUpdate && !snapshotFailed ? 'connecting' : 'offline');
+  if (state.dataset.state !== mode) {
+    state.dataset.state = mode;
+    status.textContent = {live: 'Live updates', polling: 'Polling', offline: 'Connection lost', connecting: 'Connecting'}[mode];
+    document.getElementById('alertLiveTicker').textContent = status.textContent;
+    renderExecutiveBanner();
+  }
+  if (lastDashboardSample) {
+    const stamp = new Date(lastDashboardSample);
+    const formatted = `${fresh ? 'Updated' : 'Last update'} ${stamp.toLocaleTimeString()}`;
+    if (time.textContent !== formatted) {
+      time.textContent = formatted;
+      time.dateTime = stamp.toISOString();
+      time.title = stamp.toLocaleString();
+    }
+    time.hidden = false;
+  }
+}
+
+function noteDashboardUpdate(timestamp) {
+  lastDashboardUpdate = Date.now();
+  const sample = Date.parse(timestamp);
+  if (Number.isFinite(sample)) lastDashboardSample = Math.max(lastDashboardSample, sample);
+  renderTelemetryConnection();
 }
 
 function renderAll() {
@@ -179,32 +317,67 @@ function renderAll() {
   renderTimeline();
 }
 
-async function loadInitialState() {
-  try {
-    const data = await apiJson('/api/status');
-    appState = { ...appState, ...data };
+function loadInitialState() {
+  if (dashboardSnapshotRequest) return dashboardSnapshotRequest;
+  const revision = gameActivityRevision;
+  const refreshButton = document.getElementById('btnRefreshDashboard');
+  if (refreshButton) refreshButton.disabled = true;
+  dashboardSnapshotRequest = apiJson('/api/status').then(data => {
+    const { gameActivity, isp, ...state } = data;
+    appState = { ...appState, ...state };
+    applyIspSnapshot(isp);
+    if (revision === gameActivityRevision) applyGameActivitySnapshot(gameActivity);
+    snapshotFailed = false;
+    noteDashboardUpdate(data.timestamp);
     renderAll();
-  } catch (err) {
+    return true;
+  }).catch(err => {
+    snapshotFailed = true;
+    renderTelemetryConnection();
     console.error('Failed to load status:', err);
-  }
+    return false;
+  }).finally(() => {
+    dashboardSnapshotRequest = null;
+    if (refreshButton) refreshButton.disabled = false;
+  });
+  return dashboardSnapshotRequest;
+}
+
+async function refreshDashboardManually() {
+  const feedback = document.getElementById('dashboardRefreshFeedback');
+  feedback.textContent = 'Refreshing…';
+  feedback.textContent = await loadInitialState() ? 'Data refreshed' : 'Refresh failed. Try again.';
 }
 
 function initEventStream() {
   if (!window.EventSource) return;
   const es = new EventSource('/api/events');
+  es.addEventListener('open', () => {
+    gameEventStreamConnected = true;
+    renderTelemetryConnection();
+  });
+  es.addEventListener('error', () => {
+    gameEventStreamConnected = false;
+    renderTelemetryConnection();
+    refreshGameActivityAuto();
+  });
   es.addEventListener('snapshot', e => {
     try {
-      appState = { ...appState, ...JSON.parse(e.data) };
+      const { gameActivity, isp, ...state } = JSON.parse(e.data);
+      appState = { ...appState, ...state };
+      applyIspSnapshot(isp);
+      applyGameActivitySnapshot(gameActivity);
+      noteDashboardUpdate(state.timestamp);
       renderAll();
     } catch (_) {}
   });
   es.addEventListener('telemetry', e => {
     try {
-      const d = JSON.parse(e.data);
+      const { gameActivity, isp, ...d } = JSON.parse(e.data);
       appState = { ...appState, ...d };
-      if (d.gameActivity && typeof notifyUnseenActiveGames === 'function') {
-        notifyUnseenActiveGames(d.gameActivity);
-      }
+      applyIspSnapshot(isp);
+      applyGameActivitySnapshot(gameActivity);
+      noteDashboardUpdate(d.timestamp);
       if (typeof pushTerminalTick === 'function' && Array.isArray(d.devices)) {
         const up = d.devices.filter(x => x.alive).length;
         const down = d.devices.filter(x => x.status === 'offline').length;
@@ -228,7 +401,7 @@ function initEventStream() {
       if (d.routers) appState.routers = d.routers;
       if (d.activeAlerts) appState.activeAlerts = d.activeAlerts;
       if (d.alertStats) appState.alertStats = d.alertStats;
-      appState.lastDiscoveryAt = new Date().toISOString();
+      if (d.lastDiscoveryAt) appState.lastDiscoveryAt = d.lastDiscoveryAt;
       renderAll();
     } catch (_) {}
   });
@@ -246,16 +419,15 @@ function initEventStream() {
   es.addEventListener('isp_update', e => {
     try {
       const isp = JSON.parse(e.data);
-      appState.isp = isp;
+      applyIspSnapshot(isp);
+      noteDashboardUpdate(isp.probeTimestamp);
       if (typeof pushTerminalTick === 'function') {
         const live = isp.liveThroughput || {};
-        const rxMB = ((Number(live.rxMbps) || 0) / 8).toFixed(2);
-        const txMB = ((Number(live.txMbps) || 0) / 8).toFixed(2);
         pushTerminalTick(
           isp.overallHealth === 'OUTAGE' ? 'CRITICAL' : (isp.overallHealth === 'DEGRADED' ? 'WARNING' : 'LIVE'),
           'ISP_PING',
           '',
-          `Internet Ping: ${isp.tier1LatencyMs ?? '--'} ms | Router: ${isp.wanGatewayLatencyMs ?? '--'} ms | DNS: ${isp.dnsResolutionMs ?? '--'} ms | Speed: ${rxMB} MB/s ↓ / ${txMB} MB/s ↑ | Loss: ${isp.packetLossPct ?? 0}%`
+          `Internet response: ${isp.tier1LatencyMs ?? '--'} ms | Router: ${isp.wanGatewayLatencyMs ?? '--'} ms | DNS: ${isp.dnsResolutionMs ?? '--'} ms | Monitor traffic: ${fmtMbps(live.rxMbps)} ↓ / ${fmtMbps(live.txMbps)} ↑ | Unanswered probes: ${isp.probeFailurePct ?? '—'}%`
         );
       }
       renderExecutiveBanner();
@@ -274,13 +446,12 @@ function initEventStream() {
   es.addEventListener('game_detected', e => {
     try {
       const d = JSON.parse(e.data);
-      if (d.gameActivity) appState.gameActivity = d.gameActivity;
-      if (d.detection && typeof showGameDetectedToast === 'function') {
-        showGameDetectedToast(d.detection);
-      } else if (d.gameActivity && typeof notifyUnseenActiveGames === 'function') {
-        notifyUnseenActiveGames(d.gameActivity);
-      }
-      if (typeof renderGamingSection === 'function') renderGamingSection();
+      applyGameActivitySnapshot(d.gameActivity);
+      applyLiveGameDetection(d.detection, d.updated);
+      applyEndedGameSessions(d.endedSessionIds);
+      renderGamingSection();
+      if (d.gameActivity) renderGatewayClients();
+      if (d.detection && !d.updated && !d.gameActivity) refreshGameActivityAuto(true);
     } catch (_) {}
   });
   ['new_alert', 'resolved_alert', 'alert_updated', 'alert_dismissed'].forEach(evName => {
@@ -307,7 +478,16 @@ function initEventStream() {
   });
   es.addEventListener('wan_throughput', e => {
     try {
-      handleWanThroughput(JSON.parse(e.data));
+      const liveThroughput = JSON.parse(e.data);
+      applyLiveIspTelemetry({liveThroughput});
+      noteDashboardUpdate(liveThroughput.timestamp);
+      renderLiveIspTelemetry();
+    } catch (_) {}
+  });
+  es.addEventListener('router_wan_throughput', e => {
+    try {
+      applyLiveIspTelemetry({routerWanThroughput: JSON.parse(e.data)});
+      renderLiveIspTelemetry();
     } catch (_) {}
   });
   es.addEventListener('speedtest_progress', e => {
@@ -322,6 +502,7 @@ function initEventStream() {
       if (!appState.isp) appState.isp = {};
       appState.isp.lastSpeedTest = st;
       handleSpeedTestProgress({
+        ...st,
         phase: 'complete',
         currentMbps: st.downloadMbps,
         downloadMbps: st.downloadMbps,
@@ -512,26 +693,64 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  const hashTab = (window.location.hash || '').replace(/^#/, '');
-  const initialTab =
-    WORKSPACE_SECTIONS_MAP[hashTab]
-      ? hashTab
-      : window.location.pathname === '/triage'
-      ? 'triage'
-      : window.location.pathname === '/devices'
-      ? 'devices'
-      : window.location.pathname === '/events'
-      ? 'events'
-      : 'overview';
-  navigateSidebar(initialTab);
+  const sidebarMedia = window.matchMedia('(max-width: 960px)');
+  sidebarMedia.addEventListener('change', () => closeMobileSidebar());
+  document.getElementById('deviceLookupInput').addEventListener('input', renderDeviceLookup);
+  document.getElementById('deviceLookupInput').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && deviceLookupRows.length) {
+      event.preventDefault();
+      openLookupDevice(0);
+    }
+  });
+  document.getElementById('deviceLookupResults').addEventListener('click', event => {
+    const entry = event.target.closest('[data-lookup-index]');
+    if (entry) openLookupDevice(Number(entry.dataset.lookupIndex));
+  });
+  const settings = document.getElementById('headerSettings');
+  document.addEventListener('click', event => {
+    if (settings.open && (!settings.contains(event.target) || event.target.closest('#btnRouterConfig'))) settings.open = false;
+  });
+  document.addEventListener('keydown', event => {
+    if (event.defaultPrevented) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      openDeviceLookup();
+    } else if (event.key === 'Escape' && document.getElementById('appSidebar').classList.contains('open')) {
+      closeMobileSidebar(true);
+    } else if (event.key === 'Escape' && settings.open) {
+      settings.open = false;
+      settings.querySelector('summary').focus();
+    }
+  });
+  window.addEventListener('hashchange', restoreWorkspace);
+  restoreWorkspace();
   loadInitialState();
   if (typeof loadNmapCatalog === 'function') {
     loadNmapCatalog();
   }
   initEventStream();
-  setInterval(loadInitialState, 15000);
+  setInterval(() => { if (!document.hidden) loadInitialState(); }, 15000);
+  setInterval(renderTelemetryConnection, 2000);
+  let livePollInProgress = false;
+  setInterval(async () => {
+    if (document.hidden) return;
+    const hostAge = Date.now() - Date.parse(appState.isp?.liveThroughput?.timestamp);
+    if (gameEventStreamConnected && hostAge < 4000) return;
+    renderLiveIspTelemetry();
+    if (livePollInProgress) return;
+    livePollInProgress = true;
+    try {
+      applyLiveIspTelemetry(await apiJson('/api/isp/live'));
+      renderLiveIspTelemetry();
+    } catch (_) {
+      // Stale readouts stay blank until telemetry resumes.
+    } finally {
+      livePollInProgress = false;
+    }
+  }, 2000);
   setInterval(() => {
     if (
+      currentWorkspace === 'events' && !document.hidden && !gameEventStreamConnected &&
       typeof eventsAutoRefresh !== 'undefined' &&
       eventsAutoRefresh &&
       typeof refreshNetworkLogsNow === 'function'

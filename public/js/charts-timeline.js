@@ -75,14 +75,14 @@ function simulateKumaConnectionDrop() {
       dateTime: fmt(now),
       timestampMs: now.getTime(),
       targetId: 'cloudflare',
-      message: '200 - OK • Connection RESTORED to Cloudflare Anycast (1.1.1.1) — Responded in 13.2 ms'
+      message: '[Simulation] Connection RESTORED to Cloudflare Anycast (1.1.1.1) — Simulated response in 13.2 ms'
     },
     {
       status: 'DOWN',
       dateTime: fmt(dropTime),
       timestampMs: dropTime.getTime(),
       targetId: 'cloudflare',
-      message: 'Connection LOST • Timeout reaching Cloudflare Anycast (1.1.1.1:53) — 100% packet loss (Simulated Outage)'
+      message: '[Simulation] Connection LOST to Cloudflare Anycast (1.1.1.1:53) — Simulated timeout'
     }
   );
   renderPingGraphSection();
@@ -99,73 +99,25 @@ function formatKumaDateTime(isoOrStr) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function updateKumaLiveSpeed(live) {
+function updateKumaLiveSpeed() {
   const el = document.getElementById('kumaStatLiveSpeed');
   if (!el) return;
-  const periodEl = document.getElementById('kumaStatSpeedPeriod');
-  const titleEl = document.getElementById('kumaStatSpeedTitle');
-  if (titleEl) titleEl.textContent = 'Internet Speed';
-
-  const isp = (typeof appState !== 'undefined' && appState && appState.isp) || {};
-  const st =
-    (live && live.lastDownloadMbps != null
-      ? { downloadMbps: live.lastDownloadMbps, uploadMbps: live.lastUploadMbps }
-      : null) ||
-    isp.lastSpeedTest ||
-    (typeof lastCompletedSpeedTest !== 'undefined' ? lastCompletedSpeedTest : null);
-
-  const rxMbps = Math.max(0, Number(live && live.rxMbps) || 0);
-  const txMbps = Math.max(0, Number(live && live.txMbps) || 0);
-  const rxMB = (rxMbps / 8).toFixed(2);
-  const txMB = (txMbps / 8).toFixed(2);
-
-  // Active transfer threshold: real active download/upload activity (> 2 Mbps)
-  const isActiveTransfer = rxMbps >= 2.0 || txMbps >= 2.0;
-
-  if (st && st.downloadMbps != null && Number(st.downloadMbps) > 0) {
-    const dlMbps = Number(st.downloadMbps);
-    const ulMbps = Number(st.uploadMbps) || 0;
-    const dlMB = (dlMbps / 8).toFixed(1);
-    const ulMB = (ulMbps / 8).toFixed(1);
-
-    if (isActiveTransfer) {
-      if (periodEl) periodEl.textContent = '(Active Live Transfer)';
-      el.innerHTML = `
-        <div class="kuma-speed-readout">
-          <span class="kuma-speed-item">↓ ${rxMB} MB/s</span>
-          <span class="kuma-speed-item" style="color: var(--accent-amber);">↑ ${txMB} MB/s</span>
-        </div>
-        <div class="kuma-speed-sub" style="color: var(--accent-amber);">Active Live Transfer</div>
-      `;
-    } else {
-      if (periodEl) periodEl.textContent = '(Measured Line Speed)';
-      el.innerHTML = `
-        <div class="kuma-speed-readout">
-          <span class="kuma-speed-item">↓ ${dlMB} MB/s</span>
-          <span class="kuma-speed-item" style="color: var(--accent-green, #10b981);">↑ ${ulMB} MB/s</span>
-        </div>
-        <div class="kuma-speed-sub">${Math.round(dlMbps)}↓ · ${Math.round(ulMbps)}↑ Mbps</div>
-      `;
-    }
-    el.title = `Measured Line Speed: ${dlMB} MB/s (${dlMbps.toFixed(1)} Mbps) Down · ${ulMB} MB/s (${ulMbps.toFixed(1)} Mbps) Up\nCurrent Real-Time NIC Transfer: ${rxMB} MB/s (${rxMbps.toFixed(1)} Mbps) Down · ${txMB} MB/s (${txMbps.toFixed(1)} Mbps) Up`;
-  } else {
-    if (periodEl) periodEl.textContent = '(Live NIC Throughput)';
-    el.innerHTML = `
-      <div class="kuma-speed-readout">
-        <span class="kuma-speed-item">↓ ${rxMB} MB/s</span>
-        <span class="kuma-speed-item">↑ ${txMB} MB/s</span>
-      </div>
-      <div class="kuma-speed-sub">Measuring Internet Line...</div>
-    `;
-    el.title = `Current NIC Transfer: ${rxMB} MB/s Down · ${txMB} MB/s Up`;
+  const period = document.getElementById('kumaStatSpeedPeriod');
+  const test = appState.isp?.lastSpeedTest || lastCompletedSpeedTest;
+  if (period) period.textContent = test?.timestamp ? new Date(test.timestamp).toLocaleString() : '';
+  if (!test || !Number.isFinite(test.downloadMbps) || !Number.isFinite(test.uploadMbps)) {
+    el.textContent = 'Awaiting speed test';
+    return;
   }
+  el.innerHTML = `<div class="kuma-speed-readout"><span class="kuma-speed-item">↓ ${test.downloadMbps.toFixed(1)} Mbps</span>
+    <span class="kuma-speed-item">↑ ${test.uploadMbps.toFixed(1)} Mbps</span></div>`;
 }
 
 async function pingInternetNow() {
   const btn = document.getElementById('btnPingInternetNow');
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '⏳ Pinging...';
+    btn.textContent = 'Running probes…';
   }
   try {
     const res = await apiJson('/api/isp/probe', {
@@ -173,7 +125,7 @@ async function pingInternetNow() {
       body: JSON.stringify({})
     });
     if (res && res.isp) {
-      appState.isp = res.isp;
+      applyIspSnapshot(res.isp);
       renderPingGraphSection();
       if (typeof renderIspSection === 'function') renderIspSection();
       if (typeof renderExecutiveBanner === 'function') renderExecutiveBanner();
@@ -183,7 +135,7 @@ async function pingInternetNow() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = '⚡ Ping Internet Now';
+      btn.textContent = 'Run probes';
     }
   }
 }
@@ -198,11 +150,11 @@ function renderPingGraphSection() {
   let activeHeartbeats = [];
   let currentPingMs = null;
   let avgResponseMs = null;
-  let uptime24h = 100.0;
-  let uptime30d = 100.0;
-  let lossPct = 0;
-  let isUp = true;
-  let targetDesc = 'Live Check every 5s • Actual Internet Ping (excluding local router) & Speed in MB/s';
+  let uptime24h = null;
+  let uptime30d = null;
+  let lossPct = null;
+  let isUp = null;
+  let targetDesc = 'External reachability checks';
   let activeTargetLabel = 'Actual Internet Ping (External)';
 
   if (selectedKumaTarget !== 'all' && stats[selectedKumaTarget]) {
@@ -211,34 +163,33 @@ function renderPingGraphSection() {
     activeHeartbeats = (st.heartbeats || []).slice(-45).map(hb => ({ ...hb }));
     currentPingMs = st.currentMs;
     avgResponseMs = st.avgMs != null ? st.avgMs : st.currentMs;
-    uptime24h = st.uptime24hPct != null ? st.uptime24hPct : (st.uptimePct != null ? st.uptimePct : 100.0);
-    uptime30d = st.uptime30dPct != null ? st.uptime30dPct : uptime24h;
-    lossPct = st.lossPct ?? 0;
-    isUp = lossPct < 100 && (activeHeartbeats.length === 0 || activeHeartbeats[activeHeartbeats.length - 1].status !== 'offline');
+    uptime24h = st.uptime24hPct;
+    uptime30d = st.uptime30dPct;
+    lossPct = st.lossPct;
+    isUp = st.lastStatus == null ? null : st.lastStatus === 'UP';
     activeTargetLabel = `${tObj.name}${tObj.host || tObj.ip ? ` (${tObj.host || tObj.ip})` : ''}`;
     targetDesc = `Target: ${activeTargetLabel} • ${st.probeMethod || 'ICMP Echo'} • Live speed in MB/s`;
   } else {
     // External internet targets only (1.1.1.1, 8.8.8.8, google.com) — local gateway stays separate
     const internetTargets = targets.filter(t => t.id !== 'gateway');
-    const externalPool = internetTargets.length ? internetTargets : targets;
-    const primarySt = stats.cloudflare || stats.googledns || stats[externalPool[0]?.id] || Object.values(stats)[0] || {};
+    const externalPool = internetTargets;
+    const primarySt = externalPool
+      .map(t => stats[t.id])
+      .reduce((best, st) => (st?.heartbeats?.length || 0) > (best.heartbeats?.length || 0) ? st : best, {});
     const baseHeartbeats = (primarySt.heartbeats || []).slice(-45);
     const curVals = [];
     const avgVals = [];
     const up24Vals = [];
     const up30Vals = [];
-    let anyOnline = false;
 
     externalPool.forEach(t => {
       const s = stats[t.id];
       if (!s) return;
       if (s.currentMs != null) {
         curVals.push(s.currentMs);
-        anyOnline = true;
       }
       if (s.avgMs != null) avgVals.push(s.avgMs);
       if (s.uptime24hPct != null) up24Vals.push(s.uptime24hPct);
-      else if (s.uptimePct != null) up24Vals.push(s.uptimePct);
       if (s.uptime30dPct != null) up30Vals.push(s.uptime30dPct);
     });
 
@@ -250,27 +201,27 @@ function renderPingGraphSection() {
       : currentPingMs;
     uptime24h = up24Vals.length
       ? Number((up24Vals.reduce((a, b) => a + b, 0) / up24Vals.length).toFixed(2))
-      : 100.0;
+      : null;
     uptime30d = up30Vals.length
       ? Number((up30Vals.reduce((a, b) => a + b, 0) / up30Vals.length).toFixed(2))
-      : uptime24h;
-    lossPct = isp.packetLossPct ?? 0;
-    isUp = anyOnline || isp.overallHealth !== 'OUTAGE';
+      : null;
+    lossPct = isp.probeFailurePct ?? isp.packetLossPct;
+    if (isp.overallHealth && isp.overallHealth !== 'UNKNOWN') {
+      isUp = isp.overallHealth !== 'OUTAGE' && isp.overallHealth !== 'OFFLINE';
+    }
 
     // Align per-target samples at each heartbeat timestamp for Actual Internet Ping hover readout
-    const baseLen = baseHeartbeats.length;
-    activeHeartbeats = baseHeartbeats.map((hb, i) => {
-      const fromEnd = baseLen - 1 - i;
+    const heartbeatKey = hb => hb.sampleEpoch ?? hb.dateTime;
+    const heartbeatsByTarget = new Map(externalPool.map(t => [
+      t.id, new Map((stats[t.id]?.heartbeats || []).map(hb => [heartbeatKey(hb), hb]))
+    ]));
+    activeHeartbeats = baseHeartbeats.map(hb => {
       const sampleVals = [];
       const parts = [];
       let onlineCnt = 0;
       let offlineCnt = 0;
       externalPool.forEach(t => {
-        const s = stats[t.id];
-        const list = (s && s.heartbeats) || [];
-        const match =
-          list.find(x => x.dateTime === hb.dateTime && x.time === hb.time) ||
-          (list.length - 1 - fromEnd >= 0 ? list[list.length - 1 - fromEnd] : null);
+        const match = heartbeatsByTarget.get(t.id).get(heartbeatKey(hb));
         if (!match) return;
         if (match.status === 'online') {
           onlineCnt += 1;
@@ -278,7 +229,7 @@ function renderPingGraphSection() {
         } else {
           offlineCnt += 1;
         }
-        parts.push(`${t.name}: ${match.ms != null ? `${match.ms} ms` : 'DOWN'}`);
+        parts.push(`${t.name}: ${match.ms != null ? `${match.ms} ms` : match.status === 'online' ? 'UP' : 'DOWN'}`);
       });
       const avgSample = sampleVals.length
         ? Number((sampleVals.reduce((a, b) => a + b, 0) / sampleVals.length).toFixed(1))
@@ -332,7 +283,10 @@ function renderPingGraphSection() {
 
   const bigBadge = document.getElementById('kumaMainBigStatusBadge');
   if (bigBadge) {
-    if (!isUp) {
+    if (isUp == null) {
+      bigBadge.textContent = 'PROBING';
+      bigBadge.className = 'kuma-big-status-pill pending';
+    } else if (!isUp) {
       bigBadge.textContent = 'DOWN';
       bigBadge.className = 'kuma-big-status-pill down';
     } else if (lossPct > 0 || (currentPingMs != null && currentPingMs > 140)) {
@@ -351,14 +305,14 @@ function renderPingGraphSection() {
   };
   setTxt('kumaStatCurrentPing', currentPingMs != null ? `${currentPingMs} ms` : 'Probing...');
   setTxt('kumaStatAvgResponse', avgResponseMs != null ? `${avgResponseMs} ms` : 'Probing...');
-  setTxt('kumaStatUptime24h', `${uptime24h}%`);
-  setTxt('kumaStatUptime30d', `${uptime30d}%`);
-  setTxt('kumaStatPacketLoss', `${lossPct}% Loss`);
-  updateKumaLiveSpeed(isp.liveThroughput);
+  setTxt('kumaStatUptime24h', uptime24h == null ? '—' : `${uptime24h}%`);
+  setTxt('kumaStatUptime30d', uptime30d == null ? '—' : `${uptime30d}%`);
+  setTxt('kumaStatPacketLoss', lossPct == null ? '—' : `${lossPct}% Unanswered`);
+  updateKumaLiveSpeed();
 
   const lossEl = document.getElementById('kumaStatPacketLoss');
   if (lossEl) {
-    lossEl.style.color = lossPct > 0 ? 'var(--accent-red)' : 'var(--accent-green)';
+    lossEl.style.color = lossPct == null ? '' : lossPct > 0 ? 'var(--accent-red)' : 'var(--accent-green)';
   }
 
   // Render 4 Individual Target Heartbeat Cards
@@ -385,9 +339,9 @@ function renderPingGraphSection() {
             () => `<span class="kuma-bar" data-hb-status="pending" data-hb-target="${esc(tLabel)}" data-hb-color="${esc(tColor)}" data-hb-time="Pending" data-hb-ping="" data-hb-current="${esc(curStr)}" aria-label="Waiting for telemetry sample"></span>`
           )
         ].join('');
-        const up24 = st.uptime24hPct != null ? st.uptime24hPct : (st.uptimePct != null ? st.uptimePct : 100);
+        const up24 = st.uptime24hPct;
         return `
-          <div class="kuma-card" style="cursor:pointer;" onclick="selectKumaTarget('${esc(t.id)}')">
+          <div class="kuma-card" style="cursor:pointer;" onclick="selectKumaTarget(${inlineString(t.id)})">
             <div class="kuma-header">
               <div>
                 <strong style="color:${esc(tColor)};">● ${esc(t.name)}</strong>
@@ -395,7 +349,7 @@ function renderPingGraphSection() {
               </div>
               <div class="mono" style="font-size:0.82rem;">
                 <strong>${st.currentMs != null ? `${st.currentMs} ms` : '—'}</strong>
-                <span style="color:var(--text-dim); margin-left:6px;">(24h: ${up24}%)</span>
+                <span style="color:var(--text-dim); margin-left:6px;">(24h: ${up24 == null ? '—' : `${up24}%`})</span>
               </div>
             </div>
             <div class="kuma-bars">${barsHtml}</div>
@@ -420,7 +374,7 @@ function renderPingGraphSection() {
         return `
           <button type="button" class="legend-pill" style="opacity:${
             hidden ? 0.45 : 1
-          };" onclick="toggleChartSeries('${esc(t.id)}')">
+          };" onclick="toggleChartSeries(${inlineString(t.id)})">
             <span style="width:10px; height:10px; border-radius:50%; background:${esc(
               tColor
             )}; display:inline-block;"></span>
@@ -1358,7 +1312,7 @@ function renderTimeline() {
 }
 
 async function clearEventLogs() {
-  if (!window.confirm('Clear all terminal logs and event history?')) return;
+  if (!window.confirm('Clear all terminal logs and event history, including device timeline events?')) return;
   try {
     await apiJson('/api/network/events/clear', {
       method: 'POST',

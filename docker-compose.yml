@@ -4,8 +4,7 @@ services:
     container_name: pulse-network-monitor
     restart: unless-stopped
     ports:
-      - "3000:3000"
-      - "5354:5354/udp"
+      - "127.0.0.1:3000:3000"
       - "5140:5140/udp"
     volumes:
       - ./data:/app/data
@@ -17,8 +16,22 @@ services:
       - NET_RAW
       - NET_ADMIN
     environment:
+      - PULSE_BIND_HOST=0.0.0.0
+      - PULSE_ALLOWED_HOSTS
       - PULSE_LAN_SUBNETS=192.168.0.0/22
       - PULSE_ROUTER_IP=192.168.0.1
+      - PULSE_GAME_ENDPOINT_TOKEN
+      - PULSE_ALLOW_SPEED_TESTS
+      - PULSE_ALLOW_NETWORK_CHANGES
+      - PULSE_ENABLE_BACKGROUND_SCANS
+      - PULSE_ENABLE_DNS_FORWARDING
+      - PULSE_SWITCH_SNMP
+      - PULSE_SMTP_HOST
+      - PULSE_SMTP_PORT
+      - PULSE_SMTP_USER
+      - PULSE_SMTP_PASSWORD
+      - PULSE_ALERT_EMAIL_FROM
+      - PULSE_ALERT_EMAIL_TO
       - TZ=Asia/Manila
     # On a Linux Docker host, you can uncomment the line below (and remove `ports:`)
     # to run directly on the physical host interface for native Layer-2 ARP + NIC rx/tx counters:

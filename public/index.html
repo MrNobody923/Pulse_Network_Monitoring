@@ -3,12 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Pulse Network Monitor | Office &amp; Internet Connection Status</title>
+  <title>Vertex Sentry | Network Monitoring</title>
   <meta name="description" content="Simple, readable local network monitoring system for office routers, Wi-Fi access points, cable speeds, LAN assets, and internet health.">
   <meta name="theme-color" content="#091220">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <link rel="manifest" href="manifest.json">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/png" sizes="192x192" href="/vertex-sentry-192.png">
+  <link rel="apple-touch-icon" href="/vertex-sentry-192.png">
 
   <!-- Modern Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,62 +18,32 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 
   <!-- Modular Stylesheets -->
-  <link rel="stylesheet" href="css/base.css?v=20261118b">
-  <link rel="stylesheet" href="css/components.css?v=20261118b">
-  <link rel="stylesheet" href="css/isp-speedtest.css?v=20261117e">
-  <link rel="stylesheet" href="css/nmap-scanner.css?v=20261116h">
-  <link rel="stylesheet" href="css/topology.css?v=20261116h">
-  <link rel="stylesheet" href="css/modals.css?v=20261117f">
+  <link rel="stylesheet" href="/css/base.css?v=20261123-audit">
+  <link rel="stylesheet" href="/css/components.css?v=20261120-coverage">
+  <link rel="stylesheet" href="/css/isp-speedtest.css?v=20261118d">
+  <link rel="stylesheet" href="/css/nmap-scanner.css?v=20261120a">
+  <link rel="stylesheet" href="/css/topology.css?v=20261116h">
+  <link rel="stylesheet" href="/css/modals.css?v=20261119a">
 </head>
 <body>
+  <a class="skip-link" href="#mainContent" onclick="event.preventDefault(); document.getElementById('mainContent').focus()">Skip to main content</a>
   <div class="layout">
-    <div class="mobile-nav-backdrop" id="mobileNavBackdrop" onclick="closeMobileSidebar()"></div>
-    <!-- Left Navigation Sidebar (Pulse Network Monitor) -->
+    <div class="mobile-nav-backdrop" id="mobileNavBackdrop" onclick="closeMobileSidebar(true)"></div>
+    <!-- Left Navigation Sidebar -->
     <aside class="side" id="appSidebar">
-      <div class="brand">
-        <div class="brand-logo-icon" style="width: 34px; height: 34px; border-radius: 7px; flex-shrink: 0;">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="4" y1="14" x2="4" y2="10"></line>
-            <line x1="8" y1="17" x2="8" y2="7"></line>
-            <line x1="12" y1="20" x2="12" y2="4"></line>
-            <line x1="16" y1="17" x2="16" y2="7"></line>
-            <line x1="20" y1="14" x2="20" y2="10"></line>
-          </svg>
-        </div>
-        <div>
-          Pulse Monitor
-          <small>NETWORK OPERATIONS</small>
-        </div>
-      </div>
+      <a class="brand" href="#overview" onclick="navigateSidebar('overview', event)">
+        <img src="/vertex-sentry-192.png" width="42" height="42" alt="">
+        <span>Vertex Sentry</span>
+      </a>
+      <button type="button" class="btn btn-secondary mobile-sidebar-close" onclick="closeMobileSidebar(true)">Close navigation</button>
 
-      <div class="label">MAIN PAGES</div>
       <nav class="nav" id="sidebarWorkspaceNav" aria-label="Main navigation">
+        <div class="label nav-group-label">Monitor</div>
         <a href="#overview" class="active" data-nav="overview" onclick="navigateSidebar('overview', event)">
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
             Overview
           </span>
-        </a>
-        <a href="#triage" data-nav="triage" onclick="navigateSidebar('triage', event)">
-          <span>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><circle cx="12" cy="20" r="1"></circle></svg>
-            Wi-Fi &amp; Switch Check
-          </span>
-          <span class="side-badge" id="sideBadgeTriage">--</span>
-        </a>
-        <a href="#topology" data-nav="topology" onclick="navigateSidebar('topology', event)">
-          <span>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2.5"></circle><circle cx="5" cy="19" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><line x1="12" y1="7.5" x2="12" y2="12"></line><line x1="12" y1="12" x2="6.6" y2="17.1"></line><line x1="12" y1="12" x2="17.4" y2="17.1"></line></svg>
-            Network Map (Topology)
-          </span>
-          <span class="side-badge" id="sideBadgeTopology">0</span>
-        </a>
-        <a href="#lan-assets" data-nav="devices" onclick="navigateSidebar('devices', event)">
-          <span>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
-            All Network Devices
-          </span>
-          <span class="side-badge" id="sideBadgeDevices">0</span>
         </a>
         <a href="#internet" data-nav="internet" onclick="navigateSidebar('internet', event)">
           <span>
@@ -83,9 +55,30 @@
         <a href="#alerts" data-nav="alerts" onclick="navigateSidebar('alerts', event)">
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-            Problems &amp; Alerts
+            Alerts
           </span>
           <span class="side-badge" id="sideBadgeAlerts">0</span>
+        </a>
+        <a href="#devices" data-nav="devices" onclick="navigateSidebar('devices', event)">
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            Devices
+          </span>
+          <span class="side-badge" id="sideBadgeDevices">0</span>
+        </a>
+        <a href="#triage" data-nav="triage" onclick="navigateSidebar('triage', event)">
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><circle cx="12" cy="20" r="1"></circle></svg>
+            Device Health
+          </span>
+          <span class="side-badge" id="sideBadgeTriage">--</span>
+        </a>
+        <a href="#topology" data-nav="topology" onclick="navigateSidebar('topology', event)">
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2.5"></circle><circle cx="5" cy="19" r="2.5"></circle><circle cx="19" cy="19" r="2.5"></circle><line x1="12" y1="7.5" x2="12" y2="12"></line><line x1="12" y1="12" x2="6.6" y2="17.1"></line><line x1="12" y1="12" x2="17.4" y2="17.1"></line></svg>
+            Network Map
+          </span>
+          <span class="side-badge" id="sideBadgeTopology">0</span>
         </a>
         <a href="#ping" data-nav="ping" onclick="navigateSidebar('ping', event)">
           <span>
@@ -93,233 +86,277 @@
             Ping &amp; Uptime
           </span>
         </a>
-        <a href="#nmap" data-nav="nmap" onclick="navigateSidebar('nmap', event)">
-          <span>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-            Port Security Check
-          </span>
-          <span class="side-badge cyan" id="sideBadgeNmap">Check</span>
-        </a>
-        <a href="#toolkit" data-nav="toolkit" onclick="navigateSidebar('toolkit', event)">
-          <span>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
-            Connection Test Tools
-          </span>
-        </a>
         <a href="#events" data-nav="events" onclick="navigateSidebar('events', event)">
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-            Live Network Logs
+            Event Log
           </span>
           <span class="side-badge cyan" id="sideBadgeEvents">0</span>
         </a>
         <a href="#gaming" data-nav="gaming" onclick="navigateSidebar('gaming', event)">
           <span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="4"></rect><line x1="6" y1="12" x2="10" y2="12"></line><line x1="8" y1="10" x2="8" y2="14"></line><circle cx="15" cy="11" r="1"></circle><circle cx="17" cy="13" r="1"></circle></svg>
-            Mobile Game Detector
+            Game Detector
           </span>
           <span class="side-badge cyan" id="sideBadgeGaming">0</span>
         </a>
+        <div class="label nav-group-label">Diagnostics</div>
+        <a href="#toolkit" data-nav="toolkit" onclick="navigateSidebar('toolkit', event)">
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+            Connection Tools
+          </span>
+        </a>
+        <a href="#nmap" data-nav="nmap" onclick="navigateSidebar('nmap', event)">
+          <span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+            Port Checks
+          </span>
+        </a>
       </nav>
 
-      <div class="label" style="margin-top: 16px;">QUICK DEVICE FILTERS</div>
+      <details class="side-filters">
+        <summary>Device filters</summary>
       <nav class="nav nav-sub" id="sidebarFilterNav" aria-label="Device filter navigation">
-        <a href="#filter-all" class="active" data-side-filter="all" onclick="selectSidebarDeviceFilter('all', event)">
+        <a href="#devices/all" class="active" data-side-filter="all" onclick="selectSidebarDeviceFilter('all', event)">
           <span><span class="nav-led cyan"></span> All Devices</span>
           <span class="side-badge" id="sideFiltAll">0</span>
         </a>
-        <a href="#filter-connected" data-side-filter="connected" onclick="selectSidebarDeviceFilter('connected', event)">
+        <a href="#devices/connected" data-side-filter="connected" onclick="selectSidebarDeviceFilter('connected', event)">
           <span><span class="nav-led green"></span> Online Now</span>
           <span class="side-badge green" id="sideFiltConnected">0</span>
         </a>
-        <a href="#filter-favorites" data-side-filter="favorites" onclick="selectSidebarDeviceFilter('favorites', event)">
+        <a href="#devices/favorites" data-side-filter="favorites" onclick="selectSidebarDeviceFilter('favorites', event)">
           <span><span class="nav-led amber"></span> Favourites</span>
           <span class="side-badge amber" id="sideFiltFavorites">0</span>
         </a>
-        <a href="#filter-new" data-side-filter="new" onclick="selectSidebarDeviceFilter('new', event)">
-          <span><span class="nav-led cyan"></span> New Devices</span>
+        <a href="#devices/new" data-side-filter="new" onclick="selectSidebarDeviceFilter('new', event)">
+          <span><span class="nav-led cyan"></span> Needs Review</span>
           <span class="side-badge cyan" id="sideFiltNew">0</span>
         </a>
-        <a href="#filter-down" data-side-filter="down" onclick="selectSidebarDeviceFilter('down', event)">
+        <a href="#devices/down" data-side-filter="down" onclick="selectSidebarDeviceFilter('down', event)">
           <span><span class="nav-led red"></span> Down / Not Working</span>
           <span class="side-badge red" id="sideFiltDown">0</span>
         </a>
-        <a href="#filter-disconnected" data-side-filter="disconnected" onclick="selectSidebarDeviceFilter('disconnected', event)">
+        <a href="#devices/disconnected" data-side-filter="disconnected" onclick="selectSidebarDeviceFilter('disconnected', event)">
           <span><span class="nav-led amber"></span> Disconnected</span>
           <span class="side-badge amber" id="sideFiltDisconnected">0</span>
         </a>
-        <a href="#filter-archived" data-side-filter="archived" onclick="selectSidebarDeviceFilter('archived', event)">
+        <a href="#devices/archived" data-side-filter="archived" onclick="selectSidebarDeviceFilter('archived', event)">
           <span><span class="nav-led muted"></span> Archived</span>
           <span class="side-badge" id="sideFiltArchived">0</span>
         </a>
       </nav>
 
-      <div class="side-foot">
-        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-          <span class="live-indicator-dot"></span>
-          <span class="mono" style="font-size: 11px; font-weight: 700; color: #e2e8f0;">GHOST WATCH: PASSIVE</span>
-        </div>
-        <div style="font-size: 10.5px; color: #64748b;">Silent ARP, DNS &amp; Npcap · 0% WAN load</div>
-      </div>
+      </details>
     </aside>
 
     <!-- Main Workspace Area -->
     <div class="workspace">
       <!-- Top Network Operations Header Bar -->
       <header class="app-header">
-    <div class="header-container">
-      <div class="brand-section">
-        <button type="button" class="btn btn-secondary mobile-menu-btn" id="btnMobileMenu" onclick="toggleMobileSidebar()" aria-label="Open menu">
-          ☰
-        </button>
-        <div class="brand-title">
-          <h1>
-            <span>Pulse Network Monitor</span>
-            <span class="noc-breadcrumb-tag" id="headerActiveBreadcrumb">NETWORK OVERVIEW</span>
-          </h1>
-          <p id="headerActiveSub">Silent Ghost Watcher · Zero-Impact LAN, Router &amp; Game Telemetry</p>
+        <div class="header-container">
+          <div class="brand-section">
+            <button type="button" class="btn btn-secondary mobile-menu-btn" id="btnMobileMenu" onclick="toggleMobileSidebar()" aria-controls="appSidebar" aria-expanded="false" aria-label="Open navigation"><span aria-hidden="true" class="menu-glyph"></span></button>
+            <div class="brand-title">
+              <h1 id="headerActiveBreadcrumb" tabindex="-1">Overview</h1>
+              <p id="headerActiveSub">Network health, device inventory, and internet response times</p>
+            </div>
+          </div>
+
+          <div class="header-actions">
+            <button type="button" class="btn btn-secondary find-device-btn" onclick="openDeviceLookup()">
+              Find device <kbd aria-hidden="true">Ctrl K</kbd>
+            </button>
+            <button type="button" class="btn btn-secondary" onclick="runDiagnosticWizard()" id="btnWizard">Health check</button>
+            <button type="button" class="btn btn-primary" onclick="openModal('addDeviceModal')" id="btnAddDevice">Add device</button>
+            <details class="header-settings" id="headerSettings">
+              <summary class="btn btn-secondary">Settings</summary>
+              <div class="header-settings-panel">
+                <button type="button" class="btn btn-secondary" onclick="openRouterConfigForSelected()" id="btnRouterConfig">Router settings</button>
+                <button type="button" class="btn btn-secondary" id="btnCvdToggle"><span id="cvdModeLabel">Colors: Auto</span></button>
+                <button type="button" class="btn btn-secondary" id="btnThemeToggle">Switch theme <span id="themeIcon" aria-hidden="true"></span></button>
+              </div>
+            </details>
+          </div>
+
+          <div class="telemetry-bar">
+            <div class="telemetry-state" id="telemetryState" data-state="connecting" role="status">
+              <span class="telemetry-dot" aria-hidden="true"></span>
+              <span id="liveStatusText">Connecting</span>
+            </div>
+            <time id="telemetryUpdatedAt" hidden></time>
+            <button type="button" class="telemetry-refresh" id="btnRefreshDashboard" onclick="refreshDashboardManually()">Refresh data</button>
+            <span id="dashboardRefreshFeedback" role="status"></span>
+          </div>
         </div>
-      </div>
+      </header>
 
-      <div class="header-actions">
-        <!-- Live Monitoring Status Badge -->
-        <div class="brand-badge" title="Passive Ghost Mode — watches ARP, DNS, and Npcap headers silently with 0% impact on company internet speed">
-          <span class="live-indicator-dot" id="liveDot"></span>
-          <span id="liveStatusText">GHOST WATCH · 0% WAN LOAD</span>
+      <dialog class="device-lookup" id="deviceLookupDialog" aria-labelledby="deviceLookupTitle">
+        <div class="device-lookup-head">
+          <h2 id="deviceLookupTitle">Find a device</h2>
+          <form method="dialog"><button type="submit" class="btn btn-secondary" aria-label="Close device search">Close</button></form>
         </div>
+        <label class="device-lookup-label" for="deviceLookupInput">Name, IP address, MAC address, or vendor</label>
+        <input type="search" id="deviceLookupInput" class="form-control" autocomplete="off" autofocus>
+        <div class="device-lookup-results" id="deviceLookupResults" aria-live="polite"></div>
+      </dialog>
 
-        <!-- Automated Network Health Check -->
-        <button class="btn btn-wizard" onclick="runDiagnosticWizard()" id="btnWizard" title="Run an automatic check of your router, cables, and internet connection">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-          Run Health Check
-        </button>
+      <dialog class="device-lookup device-connection" id="deviceConnectionDialog" aria-labelledby="deviceConnectionTitle" onclose="resetDeviceSnmp()">
+        <div class="device-lookup-head">
+          <h2 id="deviceConnectionTitle">Device connection</h2>
+          <form method="dialog"><button type="submit" class="btn btn-secondary">Close</button></form>
+        </div>
+        <p class="device-lookup-label" id="deviceConnectionAddress"></p>
+        <dl class="device-connection-data">
+          <div><dt>Last observation</dt><dd id="deviceConnectionObserved">&mdash;</dd></div>
+          <div><dt>Last monitor check</dt><dd id="deviceConnectionMonitored">&mdash;</dd></div>
+          <div><dt>ICMP ping</dt><dd id="deviceConnectionIcmp">&mdash;</dd></div>
+          <div><dt>TCP connection</dt><dd id="deviceConnectionTcp">&mdash;</dd></div>
+          <div><dt>Management web service</dt><dd id="deviceConnectionHttp">&mdash;</dd></div>
+        </dl>
+        <p class="device-connection-feedback" id="deviceConnectionFeedback" role="status"></p>
+        <div class="device-connection-actions">
+          <button type="button" class="btn btn-primary" id="btnCheckDeviceConnection" onclick="checkDeviceConnection()" disabled>Check now</button>
+          <a class="btn btn-secondary" id="deviceManagementLink" target="_blank" rel="noopener noreferrer" hidden>Open management page</a>
+        </div>
+        <details class="device-snmp" id="deviceSnmp">
+          <summary>Read device information via SNMP</summary>
+          <form id="deviceSnmpForm" onsubmit="readDeviceSnmp(event)" autocomplete="off">
+            <label class="device-lookup-label" for="deviceSnmpCommunity">Read-only SNMP v1/v2c community</label>
+            <div class="device-snmp-input">
+              <input class="form-control" id="deviceSnmpCommunity" type="password" maxlength="128" required>
+              <button type="submit" class="btn btn-secondary" id="btnReadDeviceSnmp">Read device</button>
+            </div>
+            <p class="device-connection-feedback" id="deviceSnmpFeedback" role="status">Requires SNMP enabled on the device and access to the local dashboard.</p>
+          </form>
+          <dl class="device-connection-data" id="deviceSnmpValues" hidden></dl>
+        </details>
+      </dialog>
 
-        <!-- Router Settings -->
-        <button class="btn btn-secondary" onclick="openModal('routerConfigModal')" id="btnRouterConfig">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-            <line x1="6" y1="6" x2="6.01" y2="6"></line>
-            <line x1="6" y1="18" x2="6.01" y2="18"></line>
-          </svg>
-          Router Settings
-        </button>
+      <dialog class="device-lookup device-connection" id="deviceHistoryDialog" aria-labelledby="deviceHistoryTitle">
+        <div class="device-lookup-head">
+          <h2 id="deviceHistoryTitle">Device history</h2>
+          <form method="dialog"><button type="submit" class="btn btn-secondary">Close</button></form>
+        </div>
+        <p class="device-lookup-label" id="deviceHistoryIdentity"></p>
+        <dl class="device-connection-data" id="deviceHistoryObservations" hidden>
+          <div><dt>First inventory observation</dt><dd id="deviceHistoryFirst">—</dd></div>
+          <div><dt>Last inventory observation</dt><dd id="deviceHistoryLast">—</dd></div>
+          <div><dt>Discovery status</dt><dd id="deviceHistoryPresence">—</dd></div>
+        </dl>
+        <form id="deviceUpstreamForm" onsubmit="saveDeviceUpstream(event)" hidden>
+          <label class="device-lookup-label" for="deviceUpstreamInput">Confirmed upstream device</label>
+          <p class="device-connection-feedback" id="deviceUpstreamHelp">Choose the monitored device this device relies on. Alerts can then group current outages along this connection.</p>
+          <div class="device-snmp-input">
+            <select class="form-control" id="deviceUpstreamInput" aria-describedby="deviceUpstreamHelp"></select>
+            <button type="submit" class="btn btn-secondary">Save</button>
+          </div>
+          <p class="device-connection-feedback" id="deviceUpstreamFeedback" role="status"></p>
+        </form>
+        <p class="device-connection-feedback" id="deviceHistoryStatus" role="status"></p>
+        <ol id="deviceHistoryEvents" class="device-history-events"></ol>
+      </dialog>
 
-        <!-- Add Device Button -->
-        <button class="btn btn-primary" onclick="openModal('addDeviceModal')" id="btnAddDevice">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-          + Add Device
-        </button>
+      <dialog class="device-lookup device-connection" id="incidentDialog" aria-labelledby="incidentTitle">
+        <div class="device-lookup-head">
+          <h2 id="incidentTitle" tabindex="-1">Incident details</h2>
+          <form method="dialog"><button class="btn btn-secondary">Close</button></form>
+        </div>
+        <p id="incidentFeedback" class="device-connection-feedback" role="status"></p>
+        <div id="incidentDetails"></div>
+        <div class="device-connection-actions" id="incidentActions"></div>
+        <textarea class="form-control" id="incidentHandoff" aria-label="Incident summary" readonly hidden></textarea>
+      </dialog>
+      <dialog class="device-lookup device-connection" id="operationsDialog" aria-labelledby="operationsTitle">
+        <div class="device-lookup-head">
+          <h2 id="operationsTitle">Maintenance &amp; notifications</h2>
+          <form method="dialog"><button class="btn btn-secondary">Close</button></form>
+        </div>
+        <form class="device-snmp" id="maintenanceForm" onsubmit="saveMaintenanceWindow(event)">
+          <label class="device-lookup-label" for="maintenanceScope">Equipment</label>
+          <select class="form-control" id="maintenanceScope"></select>
+          <label class="device-lookup-label" for="maintenanceStarts">Starts (local time)</label>
+          <input class="form-control" type="datetime-local" id="maintenanceStarts" required>
+          <label class="device-lookup-label" for="maintenanceEnds">Ends (local time)</label>
+          <input class="form-control" type="datetime-local" id="maintenanceEnds" required>
+          <label class="device-lookup-label" for="maintenanceReason">Reason</label>
+          <input class="form-control" id="maintenanceReason" maxlength="240" required>
+          <button type="submit" class="btn btn-primary">Schedule maintenance</button>
+        </form>
+        <p id="operationsFeedback" class="device-connection-feedback" role="status"></p>
+        <h3>Scheduled and active windows</h3>
+        <ol id="maintenanceWindows" class="device-history-events"></ol>
+        <h3>Incident notifications</h3>
+        <p id="notificationMode" class="gateway-note"></p>
+        <ol id="incidentNotices" class="device-history-events"></ol>
+      </dialog>
+      <dialog class="device-lookup device-connection" id="switchPortsDialog" aria-labelledby="switchPortsTitle">
+        <div class="device-lookup-head">
+          <h2 id="switchPortsTitle">Switch port health</h2>
+          <form method="dialog"><button class="btn btn-secondary">Close</button></form>
+        </div>
+        <p id="switchPortsFeedback" class="device-connection-feedback" role="status"></p>
+        <div class="device-list-table-wrap" id="switchPortsTable"></div>
+        <form class="device-snmp" id="switchPortsForm" onsubmit="readSwitchPorts(event)" autocomplete="off">
+          <label class="device-lookup-label" for="switchCommunity">One-time read-only SNMP community</label>
+          <input class="form-control" type="password" id="switchCommunity" maxlength="128">
+          <label class="device-lookup-label" for="switchIndices">IF-MIB interface indices, comma-separated</label>
+          <input class="form-control" id="switchIndices" placeholder="1, 2, 3, 4">
+          <p class="gateway-note">Use the indices reported by the switch. They may differ from the labels on its case. Leave both fields blank to use a server-configured profile.</p>
+          <button type="submit" class="btn btn-secondary">Read switch ports</button>
+        </form>
+      </dialog>
 
-        <!-- Color-Blind Safe Display Toggle -->
-        <button class="btn btn-secondary" id="btnCvdToggle" title="Switch to a color-blind safe color palette" style="padding: 6px 10px; font-size: 0.74rem;">
-          <span id="cvdModeLabel">Colors: Auto</span>
-        </button>
-
-        <!-- Light / Dark Theme Switcher -->
-        <button class="theme-toggle-btn" id="btnThemeToggle" title="Toggle Light / Dark Mode">
-          <span id="themeIcon">☀️</span>
-        </button>
-      </div>
-    </div>
-  </header>
-
-  <!-- Main Content Layout -->
-  <main class="main-wrapper">
+  <main class="main-wrapper" id="mainContent" tabindex="-1">
 
     <!-- Top Network Summary Banner -->
-    <section class="overview-headline-card" id="overviewHeadlineCard">
+    <section class="overview-headline-card checking" id="overviewHeadlineCard">
       <div class="overview-left">
-        <div class="overview-icon" id="overviewIcon">OK</div>
+        <span class="overview-icon" id="overviewIcon">Checking</span>
         <div class="overview-text">
-          <h2 id="overviewTitle">Network Healthy — All Devices &amp; Internet Running Normally</h2>
-          <p id="overviewDesc">Checking main router, Wi-Fi access points, network switches, and live internet connection...</p>
+          <h2 id="overviewTitle">Waiting for network checks</h2>
+          <p id="overviewDesc">The first readings will appear as the monitor checks your devices.</p>
         </div>
       </div>
 
       <div class="overview-quick-badges">
         <div class="quick-badge-item" id="overviewInternetBadge">
-          <span>Internet Line:</span> <strong>Checking...</strong>
+          <span>Internet health</span> <strong>&mdash;</strong>
         </div>
         <div class="quick-badge-item" id="overviewCablesBadge">
-          <span>Router Ports:</span> <strong>Checking...</strong>
+          <span>Router ports</span> <strong>&mdash;</strong>
         </div>
         <div class="quick-badge-item" id="overviewApsBadge">
-          <span>Key Devices:</span> <strong>21 Monitored</strong>
+          <span>Monitored devices</span> <strong>&mdash;</strong>
         </div>
         <div class="quick-badge-item" id="overviewPingBadge">
-          <span>Average Ping:</span> <strong>-- ms</strong>
+          <span>External latency</span> <strong>&mdash;</strong>
         </div>
       </div>
     </section>
 
-    <!-- OVERVIEW PAGE DEVICE SUMMARY CARDS (7 Cards Requested) -->
-    <section class="overview-kpi-strip" id="overviewKpiStrip" aria-label="Overview Network Device Summary Cards">
-      <button type="button" class="kpi-card active" data-overview-filter="all" onclick="selectDeviceFilter('all', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">All Devices Connected</span>
-          <span class="nav-led cyan"></span>
-        </div>
-        <strong class="kpi-value" id="ovCardAll">0</strong>
-        <small class="kpi-sub">Routers, Wi-Fi points &amp; computers</small>
-      </button>
-
-      <button type="button" class="kpi-card" data-overview-filter="connected" onclick="selectDeviceFilter('connected', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">Connected Currently</span>
-          <span class="nav-led green"></span>
-        </div>
-        <strong class="kpi-value green" id="ovCardConnected">0</strong>
-        <small class="kpi-sub">Responding on the network</small>
-      </button>
-
-      <button type="button" class="kpi-card" data-overview-filter="favorites" onclick="selectDeviceFilter('favorites', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">Favourites</span>
-          <span class="nav-led amber"></span>
-        </div>
-        <strong class="kpi-value amber" id="ovCardFavorites">0</strong>
-        <small class="kpi-sub">Starred important devices</small>
-      </button>
-
-      <button type="button" class="kpi-card" data-overview-filter="new" onclick="selectDeviceFilter('new', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">New Devices</span>
-          <span class="nav-led cyan"></span>
-        </div>
-        <strong class="kpi-value cyan" id="ovCardNew">0</strong>
-        <small class="kpi-sub">Newly found on network</small>
-      </button>
-
-      <button type="button" class="kpi-card" data-overview-filter="down" onclick="selectDeviceFilter('down', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">Down</span>
-          <span class="nav-led red"></span>
-        </div>
-        <strong class="kpi-value red" id="ovCardDown">0</strong>
-        <small class="kpi-sub">Important devices not responding</small>
-      </button>
-
-      <button type="button" class="kpi-card" data-overview-filter="disconnected" onclick="selectDeviceFilter('disconnected', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">Disconnected</span>
-          <span class="nav-led amber"></span>
-        </div>
-        <strong class="kpi-value amber" id="ovCardDisconnected">0</strong>
-        <small class="kpi-sub">Devices currently offline</small>
-      </button>
-
-      <button type="button" class="kpi-card" data-overview-filter="archived" onclick="selectDeviceFilter('archived', true)">
-        <div class="kpi-top">
-          <span class="kpi-label">Archived Devices</span>
-          <span class="nav-led muted"></span>
-        </div>
-        <strong class="kpi-value" id="ovCardArchived">0</strong>
-        <small class="kpi-sub">Hidden / retired devices</small>
-      </button>
+    <section class="overview-kpi-strip" id="overviewKpiStrip" aria-label="Device summary">
+      <a class="kpi-card" href="#devices/all" data-overview-filter="all" onclick="selectSidebarDeviceFilter('all', event)">
+        <span class="kpi-top"><span class="kpi-label">All devices</span><span class="nav-led cyan" aria-hidden="true"></span></span>
+        <strong class="kpi-value" id="ovCardAll">&mdash;</strong>
+        <span class="kpi-link">View devices <span aria-hidden="true">&rarr;</span></span>
+      </a>
+      <a class="kpi-card" href="#devices/connected" data-overview-filter="connected" onclick="selectSidebarDeviceFilter('connected', event)">
+        <span class="kpi-top"><span class="kpi-label">Online</span><span class="nav-led green" aria-hidden="true"></span></span>
+        <strong class="kpi-value" id="ovCardConnected">&mdash;</strong>
+        <span class="kpi-link">View devices <span aria-hidden="true">&rarr;</span></span>
+      </a>
+      <a class="kpi-card" href="#devices/down" data-overview-filter="down" onclick="selectSidebarDeviceFilter('down', event)">
+        <span class="kpi-top"><span class="kpi-label">Monitored devices down</span><span class="nav-led red" aria-hidden="true"></span></span>
+        <strong class="kpi-value" id="ovCardDown">&mdash;</strong>
+        <span class="kpi-link">View devices <span aria-hidden="true">&rarr;</span></span>
+      </a>
+      <a class="kpi-card" href="#devices/disconnected" data-overview-filter="disconnected" onclick="selectSidebarDeviceFilter('disconnected', event)">
+        <span class="kpi-top"><span class="kpi-label">Discovered devices offline</span><span class="nav-led amber" aria-hidden="true"></span></span>
+        <strong class="kpi-value" id="ovCardDisconnected">&mdash;</strong>
+        <span class="kpi-link">View devices <span aria-hidden="true">&rarr;</span></span>
+      </a>
     </section>
 
     <!-- DEPLOYED ACCESS POINTS & SWITCHES — DOWNED & NO-INTERNET TRIAGE BOARD -->
@@ -339,7 +376,7 @@
         </div>
 
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-          <button type="button" class="btn btn-primary" id="btnProbeAllInfra" onclick="probeAllInfrastructureNow()" style="font-size: 0.8rem; padding: 7px 14px;">
+          <button type="button" class="btn btn-primary" id="btnProbeAllInfra" onclick="probeAllInfrastructureNow(this)" aria-describedby="triageProbeFeedback" style="font-size: 0.8rem; padding: 7px 14px;">
             ⚡ Check All APs &amp; Switches Now
           </button>
           <button type="button" class="btn btn-secondary" id="btnSyncInfra" onclick="syncInfrastructureDevicesNow()" style="font-size: 0.8rem; padding: 7px 14px;" title="Import discovered Wi-Fi Access Points and Network Switches from your device list">
@@ -348,6 +385,7 @@
         </div>
       </div>
 
+      <p class="gateway-note" id="triageProbeFeedback" role="status"></p>
       <!-- 5-Box Infrastructure Communication Summary -->
       <div class="lan-summary-cards" style="grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); margin-bottom: 16px;">
         <div class="lan-stat-card" style="cursor: default;">
@@ -431,23 +469,20 @@
             </svg>
           </div>
           <div>
-            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-              <h2>Ping &amp; Uptime Monitor — Real Internet Ping &amp; Speed (MB/s)</h2>
-              <span class="status-pill online" id="pingGraphLiveBadge">● Live Check (5s)</span>
-            </div>
-            <p>Checks your real internet response time (ping), uptime history, connection drops, and live download/upload speed in Megabytes per second (MB/s).</p>
+            <h2>Ping &amp; Uptime</h2>
+            <p>Router and external probe history</p>
           </div>
         </div>
 
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
           <button type="button" class="btn btn-primary" id="btnPingInternetNow" onclick="pingInternetNow()" style="font-size: 0.8rem; padding: 6px 12px;">
-            ⚡ Ping Internet Now
+            Run probes
           </button>
           <button type="button" class="btn btn-secondary" onclick="simulateKumaConnectionDrop()" style="font-size: 0.78rem; padding: 6px 12px;" title="Simulate a connection drop &amp; recovery in the Ping &amp; Uptime log">
-            🧪 Test Drop Alert
+            Simulate outage
           </button>
           <button type="button" class="btn btn-secondary" onclick="openTracerouteGoogle()" style="font-size: 0.8rem; padding: 6px 12px;">
-            🚀 Check Internet Path
+            Trace internet path
           </button>
         </div>
       </div>
@@ -456,19 +491,19 @@
       <div class="alert-filter-bar" style="margin-bottom: 14px;">
         <div class="filter-tab-pills" id="kumaMonitorTargetTabs">
           <button type="button" class="filter-tab active" data-kuma-target="all" onclick="selectKumaTarget('all')">
-            🌐 Real Internet Ping (All)
+            External probes
           </button>
           <button type="button" class="filter-tab" data-kuma-target="cloudflare" onclick="selectKumaTarget('cloudflare')">
-            ☁️ Cloudflare (1.1.1.1)
+            Cloudflare (1.1.1.1)
           </button>
           <button type="button" class="filter-tab" data-kuma-target="googledns" onclick="selectKumaTarget('googledns')">
-            🔍 Google (8.8.8.8)
+            Google DNS (8.8.8.8)
           </button>
           <button type="button" class="filter-tab" data-kuma-target="google" onclick="selectKumaTarget('google')">
-            🌍 Google Website (google.com)
+            Google (google.com)
           </button>
           <button type="button" class="filter-tab" data-kuma-target="gateway" onclick="selectKumaTarget('gateway')">
-            🔌 Main Office Router (192.168.0.1)
+            Main router
           </button>
         </div>
       </div>
@@ -480,11 +515,11 @@
             <!-- 45 heartbeat pills rendered dynamically -->
           </div>
           <div class="kuma-hero-sub">
-            <span id="kumaMainTargetDesc">Checks every 30 seconds across your main network &amp; internet targets</span>
+            <span id="kumaMainTargetDesc">External reachability checks</span>
             <span class="mono" id="kumaMainLastCheckTime">Live</span>
           </div>
         </div>
-        <div class="kuma-big-status-pill" id="kumaMainBigStatusBadge">UP</div>
+        <div class="kuma-big-status-pill pending" id="kumaMainBigStatusBadge">PROBING</div>
       </div>
 
       <!-- 6 Key Ping, Uptime & Live Speed (MB/s) Stat Boxes -->
@@ -496,11 +531,10 @@
         </div>
 
         <div class="kuma-stat-box">
-          <div class="kuma-stat-title" id="kumaStatSpeedTitle">Internet Speed</div>
-          <div class="kuma-stat-period" id="kumaStatSpeedPeriod">(Line · Live MB/s)</div>
+          <div class="kuma-stat-title" id="kumaStatSpeedTitle">Last ISP speed test</div>
+          <div class="kuma-stat-period" id="kumaStatSpeedPeriod"></div>
           <div class="kuma-stat-value" id="kumaStatLiveSpeed" style="width: 100%; color: var(--accent-cyan);">
-            <div class="kuma-speed-readout" id="kumaSpeedMain">-- MB/s</div>
-            <div class="kuma-speed-sub" id="kumaSpeedSub">Measuring...</div>
+            Awaiting speed test
           </div>
         </div>
 
@@ -513,19 +547,19 @@
         <div class="kuma-stat-box">
           <div class="kuma-stat-title">Uptime</div>
           <div class="kuma-stat-period">(24-hour)</div>
-          <div class="kuma-stat-value" id="kumaStatUptime24h" style="color: var(--accent-green);">100%</div>
+          <div class="kuma-stat-value" id="kumaStatUptime24h">—</div>
         </div>
 
         <div class="kuma-stat-box">
           <div class="kuma-stat-title">Uptime</div>
           <div class="kuma-stat-period">(30-day)</div>
-          <div class="kuma-stat-value" id="kumaStatUptime30d" style="color: var(--accent-green);">100%</div>
+          <div class="kuma-stat-value" id="kumaStatUptime30d">—</div>
         </div>
 
         <div class="kuma-stat-box">
-          <div class="kuma-stat-title">Connection Drops</div>
-          <div class="kuma-stat-period">(Lost Data)</div>
-          <div class="kuma-stat-value" id="kumaStatPacketLoss" style="color: var(--accent-green);">0% Loss</div>
+          <div class="kuma-stat-title">Unanswered Checks</div>
+          <div class="kuma-stat-period">(Latest round)</div>
+          <div class="kuma-stat-value" id="kumaStatPacketLoss">—</div>
         </div>
       </div>
 
@@ -596,17 +630,17 @@
             <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
               <h2 style="font-size: 1.18rem; margin: 0;">Network Problems &amp; Alerts</h2>
               <span class="status-pill online" id="notifCountBadge">0 Active</span>
-              <span class="alert-live-ticker" id="alertLiveTicker">● LIVE MONITORING</span>
+              <span class="alert-live-ticker" id="alertLiveTicker">Connecting</span>
             </div>
-            <p style="font-size: 0.84rem; margin-top: 3px;">Shows what is currently down or slow on your network, with plain-English causes and one-click re-testing</p>
+            <p style="font-size: 0.84rem; margin-top: 3px;">Reachability, performance, and link alerts from monitored equipment.</p>
           </div>
         </div>
 
         <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-          <button class="btn btn-primary" onclick="probeAllInfrastructureNow()" style="font-size: 0.78rem; padding: 5px 12px;" id="btnAlertsProbeAll" title="Re-check all devices right now to clear resolved alerts">
+          <button class="btn btn-primary" onclick="probeAllInfrastructureNow(this)" aria-describedby="alertsProbeFeedback" style="font-size: 0.78rem; padding: 5px 12px;" id="btnAlertsProbeAll" title="Re-check all devices right now to clear resolved alerts">
             ⚡ Re-Check All Now
           </button>
-          <button class="btn btn-secondary" onclick="openModal('discoverDevicesModal'); runNetworkDiscovery();" style="font-size: 0.78rem; padding: 5px 12px;" id="btnOpenDiscover" title="Scan ARP for real local routers and APs">
+          <button class="btn btn-secondary" onclick="openNetworkDiscovery()" style="font-size: 0.78rem; padding: 5px 12px;" id="btnOpenDiscover">
             🔍 Discover LAN Devices
           </button>
           <button class="btn btn-secondary" onclick="triggerLiveAlertDrill()" style="font-size: 0.78rem; padding: 5px 12px;" id="btnTestDrill" title="Simulate an instant real-time alert drill">
@@ -615,9 +649,12 @@
           <button class="btn btn-secondary" onclick="acknowledgeAllAlerts(this)" style="font-size: 0.78rem; padding: 5px 12px;" id="btnDismissAll" title="Mark all ongoing issues acknowledged">
             👁️ Acknowledge All
           </button>
+          <button type="button" class="btn btn-secondary" id="btnIncidentDetails" onclick="openIncidentList()">Incident details</button>
+          <button type="button" class="btn btn-secondary" onclick="openOperations()">Maintenance &amp; notifications</button>
         </div>
       </div>
 
+      <p class="gateway-note" id="alertsProbeFeedback" role="status"></p>
       <!-- Real-Time Operations Metrics Ribbon -->
       <div class="alert-ops-ribbon" id="alertOpsRibbon">
         <div class="ops-metric-item">
@@ -638,7 +675,7 @@
         </div>
         <div class="ops-metric-item highlight">
           <div class="ops-label">OVERALL STATUS</div>
-          <div class="ops-val" id="opsHealthFeedback" style="color: var(--accent-green); font-size: 1.05rem;">100% HEALTHY</div>
+          <div class="ops-val" id="opsHealthFeedback" style="font-size: 1.05rem;">WAITING FOR DATA</div>
         </div>
       </div>
 
@@ -663,8 +700,7 @@
         <div class="empty-alerts-state" id="emptyAlertsState">
           <span class="empty-icon">🛡️</span>
           <div>
-            <h4>All Clear — No Active Warnings</h4>
-            <p>Your connections, cables, and access points are operating within healthy parameters.</p>
+            <h4>No active alerts</h4>
           </div>
         </div>
         <div class="alert-items-list" id="alertItemsList"></div>
@@ -690,13 +726,13 @@
               <span class="status-pill online" id="deviceCountBadge">Checking...</span>
               <span class="daily-scan-badge" id="dailyScanBadge">🕒 Daily Auto-Scan Active (Every 24h)</span>
             </div>
-            <p>Full list of your company routers, Wi-Fi points, switches, and connected computers. Scans your network daily to find new devices.</p>
+            <p>Review monitored equipment and devices discovered on your LAN.</p>
           </div>
         </div>
 
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-          <button class="btn btn-secondary" id="btnScanLanInline" onclick="triggerInlineLanScan()" style="font-size: 0.82rem; padding: 6px 14px;">
-            🔍 Scan Local LAN Now
+          <button class="btn btn-secondary" id="btnScanLanInline" onclick="openNetworkDiscovery()" style="font-size: 0.82rem; padding: 6px 14px;">
+            Discover LAN devices
           </button>
           <a class="btn btn-secondary" href="/api/network/inventory/export" style="font-size: 0.82rem; padding: 6px 14px; text-decoration: none;">
             📥 Export CSV
@@ -738,11 +774,11 @@
 
         <button type="button" class="kpi-card" data-lan-filter="new" onclick="selectDeviceFilter('new', false)">
           <div class="kpi-top">
-            <span class="kpi-label">New Devices</span>
+            <span class="kpi-label">Needs Review</span>
             <span class="kpi-icon">✨</span>
           </div>
           <strong class="kpi-value cyan" id="lanCardNew">0</strong>
-          <small class="kpi-sub">New devices found in daily scan</small>
+          <small class="kpi-sub">Discovered devices awaiting review</small>
         </button>
 
         <button type="button" class="kpi-card" data-lan-filter="favorites" onclick="selectDeviceFilter('favorites', false)">
@@ -759,18 +795,19 @@
       <div class="alert-filter-bar" style="margin-top: 14px; margin-bottom: 14px;">
         <div class="filter-tab-pills" id="deviceFilterTabs">
           <button class="filter-tab active" data-dev-filter="all" onclick="selectDeviceFilter('all', false)">All (<span id="devTabAll">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="connected" onclick="selectDeviceFilter('connected', false)">🟢 Connected Currently (<span id="devTabConnected">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="favorites" onclick="selectDeviceFilter('favorites', false)">⭐ Favourites (<span id="devTabFavorites">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="new" onclick="selectDeviceFilter('new', false)">✨ New Devices (<span id="devTabNew">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="down" onclick="selectDeviceFilter('down', false)">🚨 Down (<span id="devTabDown">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="offline" onclick="selectDeviceFilter('offline', false)">📴 Offline (<span id="devTabOffline">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="disconnected" onclick="selectDeviceFilter('disconnected', false)">🔌 Disconnected (<span id="devTabDisconnected">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="archived" onclick="selectDeviceFilter('archived', false)">📦 Archived (<span id="devTabArchived">0</span>)</button>
-          <button class="filter-tab" data-dev-filter="monitored" onclick="selectDeviceFilter('monitored', false)">📡 Monitored Equipment (<span id="devTabMonitored">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="connected" onclick="selectDeviceFilter('connected', false)">Online (<span id="devTabConnected">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="favorites" onclick="selectDeviceFilter('favorites', false)">Favourites (<span id="devTabFavorites">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="new" onclick="selectDeviceFilter('new', false)">Needs review (<span id="devTabNew">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="ignored" onclick="selectDeviceFilter('ignored', false)">Ignored (<span id="devTabIgnored">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="down" onclick="selectDeviceFilter('down', false)">Down (<span id="devTabDown">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="offline" onclick="selectDeviceFilter('offline', false)">Offline (<span id="devTabOffline">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="disconnected" onclick="selectDeviceFilter('disconnected', false)">Discovered offline (<span id="devTabDisconnected">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="archived" onclick="selectDeviceFilter('archived', false)">Archived (<span id="devTabArchived">0</span>)</button>
+          <button class="filter-tab" data-dev-filter="monitored" onclick="selectDeviceFilter('monitored', false)">Monitored (<span id="devTabMonitored">0</span>)</button>
         </div>
 
         <div class="filter-search-box" style="display: flex; gap: 8px; align-items: center;">
-          <input type="text" id="deviceSearchInput" placeholder="Search list by name, IP, MAC, vendor..." oninput="handleDeviceSearch(this.value)">
+          <input type="search" id="deviceSearchInput" maxlength="160" aria-label="Search device list" placeholder="Search by name, IP, MAC, or vendor" oninput="handleDeviceSearch(this.value)">
         </div>
       </div>
 
@@ -812,21 +849,24 @@
             </svg>
           </div>
           <div>
-            <h2>Company Internet Connection &amp; Speed (ISP)</h2>
-            <p>Checks your external internet line (Fiber/Modem) to ensure your Internet Service Provider is delivering fast, reliable connection into the office.</p>
+            <h2>Internet connection &amp; speed</h2>
+            <p>Monitor reachability and measure speed from the monitoring PC.</p>
           </div>
         </div>
 
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <button type="button" class="btn btn-secondary" onclick="document.getElementById('routerSection').focus()">Go to gateway &amp; routers</button>
           <button type="button" class="btn btn-secondary" id="btnRecheckIsp" onclick="recheckIspConnectionNow()" style="font-size: 0.82rem; padding: 8px 14px;">
             🔄 Re-Check Internet Now
           </button>
-          <button type="button" class="btn btn-primary" id="btnRunSpeedTest" onclick="runSpeedTestNow()">
+          <button type="button" class="btn btn-primary" id="btnRunSpeedTest" onclick="runSpeedTestNow()" aria-describedby="speedTestAvailability" disabled>
             ⚡ Test Internet Speed Now
           </button>
         </div>
       </div>
 
+      <p class="gateway-note" id="speedTestAvailability" role="status">Checking speed test availability…</p>
+      <a id="speedTestBrowserLink" href="https://speed.cloudflare.com/" target="_blank" rel="noopener" hidden>Measure from this browser instead</a>
       <!-- Live ISP Uplink: real ISP identity + real-time measured throughput -->
       <div class="isp-live-panel">
         <div class="isp-identity-grid">
@@ -843,7 +883,7 @@
             <strong class="mono" id="ispPublicIp">—</strong>
           </div>
           <div class="isp-id-item">
-            <span>Nearest Server</span>
+            <span>Connection Location</span>
             <strong id="ispEdgeLocation">—</strong>
           </div>
           <div class="isp-id-item">
@@ -856,15 +896,28 @@
         <div class="wan-live-box">
           <div class="wan-live-head">
             <div>
+              <div class="wan-live-title">Main router WAN traffic</div>
+              <small id="routerWanSource">Waiting for router counters…</small>
+            </div>
+            <div class="wan-live-readouts">
+              <div><span>↓ Download</span><strong class="mono" id="routerWanRx">—</strong></div>
+              <div><span>↑ Upload</span><strong class="mono" id="routerWanTx">—</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="wan-live-box">
+          <div class="wan-live-head">
+            <div>
               <div class="wan-live-title">
-                <span class="live-dot"></span> Live Internet Speed (updates every second)
+                <span class="live-dot"></span> Live traffic on the monitoring PC
               </div>
               <small id="wanLiveSource">Waiting for live speed data…</small>
             </div>
             <div class="wan-live-readouts">
               <div><span>↓ Download</span><strong class="mono" id="wanLiveRx">—</strong></div>
               <div><span>↑ Upload</span><strong class="mono" id="wanLiveTx">—</strong></div>
-              <div><span>Cable Load</span><strong class="mono" id="wanLiveUtil">—</strong></div>
+              <div><span>Monitor Wi-Fi signal</span><strong class="mono" id="wanWifiSignal">—</strong></div>
             </div>
           </div>
           <canvas id="wanLiveCanvas" height="90"></canvas>
@@ -893,7 +946,7 @@
 
           <div class="isp-status-badge warning" id="ispStatusBadge">CHECKING…</div>
           <div style="font-size: 0.84rem; color: var(--text-muted); margin-top: 10px;">
-            Website Lookup Speed (DNS): <strong id="ispDnsTime">—</strong>
+            System DNS Lookup: <strong id="ispDnsTime">—</strong>
           </div>
         </div>
 
@@ -941,7 +994,7 @@
               <div class="speed-progress-track">
                 <div class="speed-progress-fill" id="speedGaugeProgressBar" style="width: 0%;"></div>
               </div>
-              <div class="speed-gauge-sub" id="speedGaugeSubNote">Tests real download and upload speed to Cloudflare's internet servers. Runs automatically every hour.</div>
+              <div class="speed-gauge-sub" id="speedGaugeSubNote">The test measures download and upload speed from the monitoring PC.</div>
             </div>
           </div>
 
@@ -958,12 +1011,12 @@
               <small style="color: var(--text-dim); font-size: 0.72rem; margin-top: 2px;" id="speedUploadSub">Fast file sharing &amp; backups</small>
             </div>
             <div class="speed-metric-item" id="speedCardPing">
-              <span>Internet Delay (Ping)</span>
+              <span>Test latency</span>
               <strong id="speedPingText">-- ms</strong>
               <small style="color: var(--text-dim); font-size: 0.72rem; margin-top: 2px;">Internet server ping</small>
             </div>
             <div class="speed-metric-item" id="speedCardJitter">
-              <span>Connection Stability</span>
+              <span>Test jitter</span>
               <strong id="speedJitterText">-- ms</strong>
               <small style="color: var(--text-dim); font-size: 0.72rem; margin-top: 2px;" id="speedLossSub">Jitter &amp; packet stability</small>
             </div>
@@ -977,7 +1030,7 @@
                   <th>Internet Gateway</th>
                   <th>IP / Host</th>
                   <th>Response Time</th>
-                  <th>Connection Loss</th>
+                  <th>Probe Method</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -992,8 +1045,8 @@
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px;">
               <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                 <span style="font-size: 1.15rem;">🩺</span>
-                <strong style="font-size: 0.92rem; color: var(--text-main);" id="ispDiagHeadline">Checking Company Internet &amp; Router Speed...</strong>
-                <span class="status-pill online" id="ispDiagVerdictBadge">OPTIMAL</span>
+                <strong style="font-size: 0.92rem; color: var(--text-main);" id="ispDiagHeadline">Checking gateway, internet reachability and DNS…</strong>
+                <span class="status-pill new" id="ispDiagVerdictBadge">PROBING</span>
               </div>
               <div style="display: flex; gap: 6px; flex-wrap: wrap;">
                 <button type="button" class="btn btn-secondary btn-xs" onclick="openDnsBenchmarkFromIsp()">🌐 Test Website Lookup Speed</button>
@@ -1003,11 +1056,12 @@
             <p id="ispDiagSummary" style="font-size: 0.81rem; color: var(--text-muted); margin: 0 0 8px 0; line-height: 1.45;">
               Comparing your main router (192.168.0.1) against external internet servers (1.1.1.1 / 8.8.8.8) and website lookup speed...
             </p>
-            <div style="font-size: 0.78rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 4px;" id="ispDiagBottleneck">
-              Bottleneck Layer: None — All Layers Healthy
-            </div>
+            <div style="font-size: 0.78rem; color: var(--accent-cyan); font-weight: 700; margin-bottom: 4px;" id="ispDiagBottleneck" hidden></div>
+            <p style="font-size: 0.81rem; color: var(--text-muted); margin: 0 0 8px 0;" id="ispDiagBenchmark">
+              <span id="ispDiagBenchmarkResult">No bandwidth benchmark recorded.</span>
+              <time id="ispDiagBenchmarkTime" hidden></time>
+            </p>
             <ul id="ispDiagSolutionsList" style="margin: 4px 0 0 0; padding-left: 18px; font-size: 0.8rem; color: var(--text-main); line-height: 1.5;">
-              <li>Keep Primary DNS set to 1.1.1.1 (Cloudflare) and Secondary DNS to 8.8.8.8 (Google) for lowest lookup latency.</li>
             </ul>
           </div>
         </div>
@@ -1015,7 +1069,7 @@
     </section>
 
     <!-- SECTION 1: MAIN ROUTER CABLES & PORT SPEEDS -->
-    <section class="glass-card router-section" id="routerSection" style="display: none;">
+    <section class="glass-card router-section" id="routerSection" tabindex="-1" style="display: none;">
       <div class="card-header">
         <div class="card-title-group">
           <div class="card-icon">
@@ -1028,8 +1082,8 @@
             </svg>
           </div>
           <div>
-            <h2>Company Routers &amp; Cable Port Speeds</h2>
-            <p>Shows all routers on your network, whether their cable ports are running at full speed, and router workload.</p>
+            <h2>Gateway &amp; routers</h2>
+            <p>WAN and LAN health, connected devices, and Ethernet ports.</p>
           </div>
         </div>
 
@@ -1037,11 +1091,69 @@
           <button type="button" class="btn btn-secondary" onclick="openRouterConfigForSelected()">
             ⚙️ Configure Selected Router
           </button>
-          <button type="button" class="btn btn-secondary" onclick="loadInitialState()">
-            🔄 Refresh Ports
+          <button type="button" class="btn btn-secondary" id="btnRefreshGateway" onclick="refreshMainGateway()">
+            Refresh main gateway
           </button>
         </div>
       </div>
+
+      <p id="gatewayConnectionStatus" class="gateway-note"></p>
+      <p id="gatewayRefreshStatus" class="gateway-note" role="status"></p>
+      <div class="gateway-health-grid">
+        <article class="gateway-panel">
+          <h3>WAN health</h3>
+          <dl class="gateway-metrics">
+            <div><dt>Internet reachability</dt><dd id="gatewayWanStatus">Unavailable</dd></div>
+            <div><dt>Router WAN traffic</dt><dd id="gatewayWanTraffic">Unavailable</dd></div>
+            <div><dt>Internet probe quality</dt><dd id="gatewayWanQuality">Unavailable</dd></div>
+            <div><dt>WAN Ethernet link</dt><dd id="gatewayWanLink">Unavailable</dd></div>
+          </dl>
+        </article>
+        <article class="gateway-panel">
+          <h3>LAN health</h3>
+          <dl class="gateway-metrics">
+            <div><dt>PC to gateway</dt><dd id="gatewayLanStatus">Unavailable</dd></div>
+            <div><dt>Monitoring PC link</dt><dd id="gatewayLanLink">Unavailable</dd></div>
+            <div><dt>Monitoring PC Wi-Fi signal</dt><dd id="gatewayLanSignal">Unavailable</dd></div>
+            <div><dt>Router LAN ports</dt><dd id="gatewayLanPorts">Unavailable</dd></div>
+          </dl>
+        </article>
+      </div>
+      <section class="gateway-panel gateway-client-panel" aria-labelledby="gatewayClientsTitle">
+        <div class="gateway-clients-header">
+          <div>
+            <h3 id="gatewayClientsTitle">Connected devices</h3>
+            <p id="gatewayClientSource" class="gateway-note">Waiting for gateway data.</p>
+          </div>
+          <label class="form-group">Search clients
+            <input type="search" class="form-control" id="gatewayClientSearch" placeholder="Name, IP or MAC" oninput="renderGatewayClients()">
+          </label>
+        </div>
+        <p id="gatewayAccessStatus" class="gateway-note"></p>
+        <div id="gatewayClients"></div>
+        <div id="gatewayAccessRules"></div>
+      </section>
+      <dialog class="device-lookup" id="gatewayAccessDialog" aria-labelledby="gatewayAccessTitle">
+        <div class="device-lookup-head">
+          <h2 id="gatewayAccessTitle">Block device access</h2>
+          <form method="dialog"><button class="btn btn-secondary">Close</button></form>
+        </div>
+        <p id="gatewayAccessTarget" class="device-lookup-label"></p>
+        <form onsubmit="submitGatewayBlock(event)">
+          <label class="form-group">Restore access after
+            <select id="gatewayAccessDuration" class="form-control">
+              <option value="5">5 minutes</option>
+              <option value="15" selected>15 minutes</option>
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+            </select>
+          </label>
+          <p class="gateway-note">This interrupts the device’s network access. Keep Vertex Sentry running so it can restore access when the block expires.</p>
+          <p id="gatewayBlockFeedback" class="gateway-note" role="status"></p>
+          <button type="submit" class="btn btn-primary" id="btnSubmitGatewayBlock">Block access</button>
+        </form>
+      </dialog>
+      <p id="gatewayRestoreFeedback" class="gateway-note" role="status"></p>
 
       <!-- Discovered & Monitored Multi-Router Fleet Table -->
       <div id="routerFleetContainer" style="margin-bottom: 16px;"></div>
@@ -1072,20 +1184,20 @@
         <div class="resource-meter-box">
           <div class="meter-header">
             <span>Router CPU Usage</span>
-            <strong class="mono" id="cpuValText">10% (Normal • 4 Cores)</strong>
+            <strong class="mono" id="cpuValText">Unavailable</strong>
           </div>
           <div class="meter-track">
-            <div class="meter-fill cpu" id="cpuMeterFill" style="width: 10%;"></div>
+            <div class="meter-fill cpu" id="cpuMeterFill" style="width: 0%;"></div>
           </div>
         </div>
 
         <div class="resource-meter-box">
           <div class="meter-header">
             <span>Router Memory Usage</span>
-            <strong class="mono" id="memValText">61% (Stable)</strong>
+            <strong class="mono" id="memValText">Unavailable</strong>
           </div>
           <div class="meter-track">
-            <div class="meter-fill memory" id="memMeterFill" style="width: 61%;"></div>
+            <div class="meter-fill memory" id="memMeterFill" style="width: 0%;"></div>
           </div>
         </div>
       </div>
@@ -1130,7 +1242,7 @@
               <span class="status-pill new" id="nmapEngineBadge">🛡️ Security Port Check</span>
               <span class="daily-scan-badge" id="nmapTargetSelectedLabel">Target: 192.168.0.1</span>
             </div>
-            <p>Checks any router, switch, or computer on your network for open doors (ports), spots risky services that should be locked down, and shows plain steps on how to fix them.</p>
+            <p>Check selected TCP ports from this monitor and review service evidence and exposure.</p>
           </div>
 
           <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
@@ -1152,10 +1264,10 @@
             <div class="tool-input-group">
               <label for="nmapProfileSelect">What to Check:</label>
               <select id="nmapProfileSelect" class="form-control" onchange="onNmapProfileChange(this.value)">
-                <option value="quick_audit">Quick Security Check (25 Most Common Ports)</option>
-                <option value="at_risk_only">High-Risk Services Only (27 Risky Ports)</option>
-                <option value="full_office">Complete Office &amp; Server Check (All 46 Ports)</option>
-                <option value="web_admin">Router &amp; Admin Web Pages (14 Admin Ports)</option>
+                <option value="quick_audit">Quick Security Check</option>
+                <option value="at_risk_only">High-Risk Service Ports</option>
+                <option value="full_office">Office &amp; Server Ports</option>
+                <option value="web_admin">Router &amp; Admin Web Ports</option>
                 <option value="database_storage">Shared Files &amp; Databases (File Shares, SQL, Redis)</option>
                 <option value="custom">Custom Port Numbers (e.g. 20-25, 80, 443)</option>
               </select>
@@ -1170,7 +1282,7 @@
               </select>
             </div>
 
-            <button type="submit" class="btn btn-primary" style="height: 40px;">
+            <button type="submit" id="btnSubmitNmapScan" class="btn btn-primary" style="height: 40px;">
               🔍 Run Check Now
             </button>
           </div>
@@ -1216,7 +1328,7 @@
         <div>
           <h4 style="color: var(--text-main); font-size: 1.05rem; margin-bottom: 6px;">Ready to Audit Open &amp; At-Risk Network Ports</h4>
           <p style="color: var(--text-dim); font-size: 0.88rem; max-width: 680px; margin: 0 auto 14px;">
-            Select any LAN device chip above or enter an IP address and click <strong>"🛡️ Start Nmap Port &amp; Risk Scan"</strong> to inspect open ports, identify cleartext or high-risk services, grab server banners, and generate a complete security posture report.
+            Select a LAN device or enter an IP address, choose a port profile, and click <strong>Run Check Now</strong>.
           </p>
           <button type="button" class="btn btn-primary" onclick="runNmapPortScan()">
             ⚡ Scan Main Router (192.168.0.1) Now
@@ -1230,17 +1342,14 @@
           Target: 192.168.0.1 · Profile: Quick Security Audit
         </div>
 
-        <!-- Posture Ring + 6 KPI Summary Cards -->
         <div class="nmap-summary-grid">
           <div class="nmap-posture-card">
-            <div class="nmap-grade-ring" id="nmapGradeRing">
-              <span class="nmap-grade-letter" id="nmapGradeLetter">A</span>
-              <span class="nmap-grade-score" id="nmapGradeScore">100/100 SCORE</span>
-            </div>
-            <strong style="font-size: 0.92rem;" id="nmapPostureVerdict">HARDENED</strong>
-            <p style="font-size: 0.76rem; color: var(--text-dim); margin-top: 4px;" id="nmapPostureSummary">
-              No critical or high-risk ports exposed.
-            </p>
+            <strong style="font-size: 0.92rem;" id="nmapPostureVerdict"></strong>
+            <p style="font-size: 0.76rem; color: var(--text-dim); margin-top: 4px;" id="nmapPostureSummary"></p>
+            <details style="max-width: 100%; overflow-wrap: anywhere; font-size: 0.76rem;">
+              <summary>Ports checked over TCP/IPv4</summary>
+              <div class="mono" id="nmapScopePorts"></div>
+            </details>
           </div>
 
           <div class="nmap-kpi-cards">
@@ -1291,11 +1400,11 @@
 
             <button type="button" class="kpi-card" data-nmap-filter="closed" onclick="setNmapPortFilter('closed')">
               <div class="kpi-top">
-                <span class="kpi-label">Closed / Filtered</span>
+                <span class="kpi-label">Closed</span>
                 <span class="kpi-icon">🛡️</span>
               </div>
               <strong class="kpi-value" id="nmapKpiClosed">0</strong>
-              <small class="kpi-sub">Blocked or not listening</small>
+              <small class="kpi-sub">Connection refused or reported closed</small>
             </button>
           </div>
         </div>
@@ -1330,7 +1439,13 @@
               📋 All Scanned Ports (<span id="nmapTabCountAll">0</span>)
             </button>
             <button type="button" class="filter-tab" data-nmap-filter="closed" onclick="setNmapPortFilter('closed')">
-              🛡️ Closed / Filtered (<span id="nmapTabCountClosed">0</span>)
+              🛡️ Closed (<span id="nmapTabCountClosed">0</span>)
+            </button>
+            <button type="button" class="filter-tab" data-nmap-filter="filtered" onclick="setNmapPortFilter('filtered')">
+              Filtered (<span id="nmapTabCountFiltered">0</span>)
+            </button>
+            <button type="button" class="filter-tab" data-nmap-filter="unconfirmed" onclick="setNmapPortFilter('unconfirmed')">
+              Unconfirmed (<span id="nmapTabCountUnconfirmed">0</span>)
             </button>
           </div>
 
@@ -1346,7 +1461,7 @@
               <tr>
                 <th style="width: 9%;">Port</th>
                 <th style="width: 14%;">Status &amp; Risk</th>
-                <th style="width: 15%;">Service Name</th>
+                <th style="width: 15%;">Service &amp; Evidence</th>
                 <th style="width: 18%;">Software Details</th>
                 <th style="width: 21%;">Why It Matters</th>
                 <th style="width: 16%;">How to Fix</th>
@@ -1359,7 +1474,7 @@
           </table>
         </div>
 
-        <!-- Nmap CLI Output Transcript Box -->
+        <!-- Port Check Transcript -->
         <div class="nmap-terminal-box">
           <div class="nmap-terminal-head">
             <div style="display: flex; align-items: center; gap: 10px;">
@@ -1368,10 +1483,10 @@
                 <span style="background: #f59e0b;"></span>
                 <span style="background: #10b981;"></span>
               </div>
-              <strong class="mono" style="font-size: 0.8rem; color: var(--text-muted);">Nmap CLI Transcript Output (nmap -sV -T4)</strong>
+              <strong class="mono" style="font-size: 0.8rem; color: var(--text-muted);">Port Check Transcript</strong>
             </div>
             <button type="button" class="btn btn-secondary btn-xs" id="btnCopyNmapTranscript" onclick="copyNmapTranscript()">
-              📋 Copy CLI Output
+              📋 Copy Transcript
             </button>
           </div>
           <pre class="nmap-terminal-pre" id="nmapTranscriptPre"></pre>
@@ -1431,7 +1546,7 @@
                 <th style="width: 13%;">IP Address</th>
                 <th style="width: 19%;">Scan Profile</th>
                 <th style="width: 14%;">Open / At-Risk Ports</th>
-                <th style="width: 12%;">Posture</th>
+                <th style="width: 12%;">Scope</th>
                 <th style="width: 9%; text-align: right;">Action</th>
               </tr>
             </thead>
@@ -1597,7 +1712,7 @@
           <button type="button" class="btn btn-secondary" onclick="importMonitoredToTopology()" id="btnTopoImport">
             ⇄ Import Monitored Devices
           </button>
-          <button type="button" class="btn btn-secondary" onclick="probeTopologyNow()" id="btnTopoProbeAll">
+          <button type="button" class="btn btn-secondary" onclick="probeAllInfrastructureNow(this)" aria-describedby="topologyProbeFeedback" id="btnTopoProbeAll">
             ⚡ Probe Devices Now
           </button>
           <button type="button" class="btn btn-secondary" onclick="clearAllTopology()" id="btnTopoClearAll" title="Remove all devices and cables from the topology map">
@@ -1609,6 +1724,7 @@
         </div>
       </div>
 
+      <p class="gateway-note" id="topologyProbeFeedback" role="status"></p>
       <!-- 6 Topology Problem & Status Summary Cards -->
       <div class="topo-kpi-strip" id="topoKpiStrip">
         <button type="button" class="kpi-card" data-topo-filter="all" onclick="setTopoDeviceFilter('all')">
@@ -1911,7 +2027,7 @@
             <span class="dot-red"></span>
             <span class="dot-amber"></span>
             <span class="dot-green"></span>
-            <span class="ps-terminal-cmd">PS C:\Pulse\NetworkMonitor&gt; Get-LiveNetworkLogs -Stream -Wait</span>
+            <span class="ps-terminal-cmd">Vertex Sentry network events</span>
           </div>
           <span class="ps-terminal-hint">Live Console • Oldest → Newest (tail -f)</span>
         </div>
@@ -1919,7 +2035,7 @@
           <!-- PowerShell-style live log stream rendered here -->
         </div>
         <div class="ps-terminal-prompt-bar">
-          <span class="ps-prompt-prefix">PS C:\Pulse\NetworkMonitor&gt;</span>
+          <span class="ps-prompt-prefix">Vertex Sentry</span>
           <span class="ps-prompt-text" id="psTerminalPromptText">Streaming live network telemetry...</span>
           <span class="ps-cursor"></span>
         </div>
@@ -1936,9 +2052,9 @@
           <div>
             <div class="game-title-row">
               <h2>Game Activity Detector</h2>
-              <span class="status-pill online" id="gamingStatusBadge">Ghost Watching · Passive</span>
+              <span class="status-pill new" id="gamingStatusBadge">Checking sources</span>
             </div>
-            <p class="game-subtitle">Silent Ghost Watcher — passive DNS, TLS SNI, ARP &amp; Npcap inspection across <code>192.168.0.0/22</code> with 0% internet speed impact.</p>
+            <p class="game-subtitle">See games opened on reporting devices and activity detected from network traffic.</p>
           </div>
         </div>
 
@@ -1946,8 +2062,8 @@
           <button type="button" class="btn btn-primary" id="btnScanGames" onclick="runLanGameScan()">
             Scan Connected Devices Now
           </button>
-          <button type="button" class="btn btn-secondary" id="btnGameNotify" onclick="requestGameNotificationPermission()">
-            Desktop Alerts
+          <button type="button" class="btn btn-secondary" id="btnGameNotify" onclick="requestGameNotificationPermission()" aria-describedby="gameNotifyStatus">
+            Enable desktop alerts
           </button>
           <button type="button" class="btn btn-secondary" onclick="clearGameActivity()">
             Clear History
@@ -1955,21 +2071,22 @@
         </div>
       </div>
 
+      <p class="game-notify-status" id="gameNotifyStatus" role="status"></p>
       <div class="game-kpi-strip">
         <div class="kpi-card">
-          <div class="kpi-top"><span class="kpi-label">Active Sessions</span><span class="game-kpi-tag">LIVE</span></div>
+          <div class="kpi-top"><span class="kpi-label">Live detections</span><span class="game-kpi-tag">LIVE</span></div>
           <strong class="kpi-value amber" id="gameStatActive">0</strong>
-          <small class="kpi-sub">Currently open games</small>
+          <small class="kpi-sub">Recent game, launcher, and website activity</small>
         </div>
         <div class="kpi-card">
           <div class="kpi-top"><span class="kpi-label">Total Detections</span><span class="game-kpi-tag">LOG</span></div>
           <strong class="kpi-value" id="gameStatTotal">0</strong>
-          <small class="kpi-sub">Recorded launches</small>
+          <small class="kpi-sub">Recorded game signals</small>
         </div>
         <div class="kpi-card">
           <div class="kpi-top"><span class="kpi-label">Top Detected Title</span><span class="game-kpi-tag">TOP</span></div>
           <strong class="kpi-value cyan game-kpi-ellipsis" id="gameStatTopGame">None yet</strong>
-          <small class="kpi-sub">Most frequent game</small>
+          <small class="kpi-sub">Most frequent game or launcher</small>
         </div>
         <div class="kpi-card">
           <div class="kpi-top"><span class="kpi-label">Most Active Zone</span><span class="game-kpi-tag">AP</span></div>
@@ -1984,7 +2101,7 @@
           <div class="game-deck-head">
             <div class="game-deck-badges">
               <span class="status-pill online" id="gameAutoPulseBadge">Checking Sensor</span>
-              <span class="status-pill online" id="gameManualModeBadge">Manual Block Only</span>
+              <span class="status-pill online" id="gameManualModeBadge">Monitoring Only</span>
             </div>
             <div class="game-deck-actions">
               <button type="button" class="btn btn-secondary btn-xs" id="btnSetupRouterDns" onclick="configureRouterGameDns()" style="display:none;">
@@ -1999,37 +2116,68 @@
             Initializing DNS (53), Syslog (514), Broadcast &amp; LAN socket telemetry...
           </div>
           <div class="game-deck-sub" id="gamePolicyBar">
-            <span id="gamePolicyHint">Manual mode enabled — never auto-blocks users; use Block on any active session to throttle speed.</span>
+            <span id="gamePolicyHint">Vertex Sentry reports game activity without applying network restrictions.</span>
           </div>
         </div>
 
         <div class="game-deck-card" id="gameWiresharkBar">
           <div class="game-deck-head">
             <div class="game-deck-badges">
-              <span class="status-pill online" id="gameWiresharkBadge">Wireshark · Initializing</span>
+              <h3>Packet capture</h3>
+              <span class="status-pill" id="gameWiresharkBadge" role="status">Checking capture status…</span>
             </div>
             <div class="game-deck-actions">
-              <button type="button" class="btn btn-secondary btn-xs" id="btnToggleWireshark" onclick="toggleWiresharkCapture()">
-                Pause
+              <button type="button" class="btn btn-secondary btn-xs" id="btnToggleWireshark" onclick="toggleWiresharkCapture()" disabled>
+                Pause capture
               </button>
-              <a class="btn btn-secondary btn-xs" id="btnDownloadWiresharkPcap" href="/api/gaming/wireshark/capture.pcap" download="pulse-game-capture.pcap">
-                .pcap
+              <a class="btn btn-secondary btn-xs" id="btnDownloadWiresharkPcap" role="link" aria-disabled="true" download="pulse-game-capture.pcap">
+                Download capture
               </a>
-              <button type="button" class="btn btn-secondary btn-xs" onclick="triggerWiresharkPcapImport()">
-                Analyze File
+              <button type="button" class="btn btn-secondary btn-xs" id="btnImportWiresharkPcap" onclick="triggerWiresharkPcapImport()">
+                Analyze capture file
               </button>
               <button type="button" class="btn btn-secondary btn-xs" id="btnCopyWiresharkFilter" onclick="copyWiresharkDisplayFilter()">
-                Filter
+                Copy Wireshark filter
               </button>
               <input type="file" id="wiresharkPcapFileInput" accept=".pcap,.pcapng,.cap" style="display:none;" onchange="handleWiresharkPcapUpload(this)">
             </div>
           </div>
-          <div class="game-deck-meta" id="gameWiresharkSummary">
-            Inspecting DNS Wire, TLS SNI, HTTP Host, TZSP (37008) &amp; Game Flows...
-          </div>
+          <div class="game-deck-meta" id="gameWiresharkSummary"></div>
+          <div class="game-deck-sub" id="gameWiresharkFeedback" role="status"></div>
           <div class="game-deck-sub game-ws-hits" id="gameWiresharkHitsStrip" style="display:none;"></div>
         </div>
       </div>
+
+      <section class="game-deck-card game-coverage" aria-labelledby="gameCoverageTitle">
+        <div class="game-deck-head">
+          <h3 id="gameCoverageTitle">Detection coverage</h3>
+          <button type="button" class="btn btn-secondary btn-xs" id="btnGameCoverageRouter" onclick="openRouterConfigForIp(appState.router?.ip || getGameActivityData().sensorStatus?.routerIp)" hidden>Connect main router</button>
+        </div>
+        <p class="game-deck-meta" id="gameCoverageScope">Checking discovery scope…</p>
+        <p class="game-deck-meta" id="gameCoverageSignals"></p>
+        <p class="game-deck-sub">Steam Client and Riot Client are detected by their Windows processes. Network signals show recent traffic for a title and may include logins or updates.</p>
+        <details id="gameSupportedCatalog" ontoggle="renderGameCoverage()">
+          <summary>Supported games, launchers, and websites</summary>
+          <div id="gameSupportedRows"></div>
+        </details>
+        <div id="gameCoverageSubnets"></div>
+        <details id="gameCoverageDevices" ontoggle="renderGameCoverage()">
+          <summary>Device visibility</summary>
+          <p class="game-deck-sub">Inventory observations and open ports show discovery. A reporting endpoint, recent DNS query, or live game signal gives evidence of detection visibility for that address.</p>
+          <label for="gameCoverageSearch" class="game-deck-meta">Find a device</label>
+          <input type="search" class="form-control" id="gameCoverageSearch" placeholder="Device name or IP" oninput="renderGameCoverage()">
+          <div id="gameCoverageDeviceRows"></div>
+        </details>
+        <details>
+          <summary>Extend coverage</summary>
+          <ol class="game-deck-meta">
+            <li>Connect the main router for client records and supported log polling. Add each routed, managed IPv4 subnet to <code>PULSE_LAN_SUBNETS</code>, then run <strong>Scan Connected Devices Now</strong>. Each entry supports up to 1,024 addresses.</li>
+            <li>Deploy the process-only sensor as the signed-in user on managed Windows PCs. Set the same <code>PULSE_GAME_ENDPOINT_TOKEN</code> on the monitor and the managed PCs. Use your private HTTPS endpoint and run <code>python host_game_sensor.py --process-only --api-url https://YOUR-MONITOR/api/gaming/endpoint</code>. Confirm each PC appears under Device visibility.</li>
+            <li>For one authorized Android phone, connect it by USB on office Wi-Fi and approve USB debugging. Install Android Platform-Tools on the monitoring PC, then run <code>python android_game_sensor.py</code> to see supported foreground apps.</li>
+            <li>For phones and other devices, send supported router logs or mirror LAN-side traffic to a capture interface on the monitoring PC. Keep the original client IP visible. Launch a supported game on one test phone and check that its IP appears in Live activity.</li>
+          </ol>
+        </details>
+      </section>
 
       <!-- Scan / Upload Feedback Banner -->
       <div id="gameScanResultBanner" style="display: none; margin-bottom: 14px;"></div>
@@ -2045,7 +2193,10 @@
         <div class="game-table-toolbar">
           <div class="filter-tab-pills" id="gameFilterTabs">
             <button type="button" class="filter-tab active" data-game-filter="active" onclick="setGameActivityFilter('active')">
-              Playing Now (<span id="gameTabActiveCount">0</span>)
+              Current Detections (<span id="gameTabActiveCount">0</span>)
+            </button>
+            <button type="button" class="filter-tab" data-game-filter="open" onclick="setGameActivityFilter('open')">
+              Apps open (<span id="gameTabOpenCount">0</span>)
             </button>
             <button type="button" class="filter-tab" data-game-filter="blocked" onclick="setGameActivityFilter('blocked')">
               Blocked (<span id="gameTabBlockedCount">0</span>)
@@ -2056,7 +2207,7 @@
           </div>
           <div class="game-table-right">
             <div class="filter-search-box game-search-box">
-              <input type="text" id="gameSearchInput" placeholder="Filter by game, device, IP, or AP..." oninput="handleGameActivitySearch(this.value)">
+              <input type="text" id="gameSearchInput" placeholder="Filter by game, account, device, IP, or AP..." oninput="handleGameActivitySearch(this.value)">
             </div>
             <span class="game-table-count" id="gameTerminalShowingCount">0 entries</span>
           </div>
@@ -2131,6 +2282,40 @@
   </div>
 
   <!-- MODAL 2: ROUTER SETTINGS -->
+  <div class="modal-overlay" id="gameControlModal">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="gameControlTitle">
+      <form onsubmit="submitGameDeviceControl(event)">
+        <div class="modal-header">
+          <h3 id="gameControlTitle">Limit Device Bandwidth</h3>
+          <button type="button" class="modal-close-btn" onclick="closeModal('gameControlModal')" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p id="gameControlDevice"></p>
+          <div id="gameControlRates">
+            <div class="form-group">
+              <label for="gameControlDownload">Download limit (Kbps)</label>
+              <input id="gameControlDownload" type="number" class="form-control" min="8" max="1000000" step="8" value="512" required>
+            </div>
+            <div class="form-group">
+              <label for="gameControlUpload">Upload limit (Kbps)</label>
+              <input id="gameControlUpload" type="number" class="form-control" min="8" max="1000000" step="8" value="256" required>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="gameControlDuration">Duration (minutes)</label>
+            <input id="gameControlDuration" type="number" class="form-control" min="1" max="240" value="15" required>
+          </div>
+          <p class="modal-hint">This affects the device’s network access. Vertex Sentry will attempt restoration at expiry and retry if the router is unavailable.</p>
+          <p id="gameControlError" role="status" aria-live="polite"></p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('gameControlModal')">Cancel</button>
+          <button type="submit" id="gameControlSubmit" class="btn btn-primary">Apply</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="routerConfigModal">
     <div class="modal-box">
       <div class="modal-header">
@@ -2154,8 +2339,8 @@
           </div>
           <div class="form-group">
             <label for="routerStokInput">Router Session Token (stok) [Optional]</label>
-            <input type="text" id="routerStokInput" class="form-control" placeholder="Paste stok from your router URL">
-            <small style="color: var(--text-dim); font-size: 0.76rem;">If you open your router in Chrome, copy the <code style="color:var(--accent-cyan);">stok=...</code> value from your browser address bar.</small>
+            <input type="password" id="routerStokInput" class="form-control" placeholder="Leave blank to keep the saved token" autocomplete="off">
+            <small style="color: var(--text-dim); font-size: 0.76rem;">To replace the token, paste the <code style="color:var(--accent-cyan);">stok</code> value from your signed-in router URL.</small>
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
             <div class="form-group">
@@ -2164,7 +2349,11 @@
             </div>
             <div class="form-group">
               <label for="routerSnmpInput">SNMP Community [Optional]</label>
-              <input type="text" id="routerSnmpInput" class="form-control" value="public" placeholder="e.g. public">
+              <input type="password" id="routerSnmpInput" class="form-control" placeholder="Leave blank to keep saved value">
+            </div>
+            <div class="form-group">
+              <label for="routerWanIndexInput">SNMP WAN Interface Index [Optional]</label>
+              <input type="number" id="routerWanIndexInput" class="form-control" min="1" max="2147483647" step="1" placeholder="Leave blank to use UPnP discovery">
             </div>
           </div>
         </div>
@@ -2200,30 +2389,29 @@
   </div>
 
   <!-- MODAL 4: DISCOVER LOCAL NETWORK HARDWARE -->
-  <div class="modal-overlay" id="discoverDevicesModal">
-    <div class="modal-box discover-modal-box">
+  <dialog class="modal-box discover-modal-box" id="discoverDevicesModal" aria-labelledby="discoverDevicesTitle">
       <div class="modal-header">
-        <div style="display: flex; align-items: center; gap: 12px;">
-          <span style="font-size: 1.6rem;">🔍</span>
-          <div>
-            <h3 style="margin: 0;">Discover Real Network Hardware</h3>
-            <p style="font-size: 0.82rem; color: var(--text-dim); margin: 0;">Discovers active APs, switches, routers, and clients on your office LAN</p>
-          </div>
-        </div>
-        <button class="modal-close-btn" onclick="closeModal('discoverDevicesModal')">✕</button>
+        <h3 id="discoverDevicesTitle">Discover LAN devices</h3>
+        <form method="dialog"><button type="submit" class="modal-close-btn" aria-label="Close discovery">✕</button></form>
       </div>
-      <div class="modal-body" id="discoverModalContent">
-        <div class="tool-empty-state" style="padding: 30px;">
-          <div class="spinner-ring"></div>
-          <p style="margin-top: 12px; color: var(--text-main);">Scanning network ARP table and probing connected hosts...</p>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="discoverDeviceSearch">Search discovered devices</label>
+          <input class="form-control" type="search" id="discoverDeviceSearch" placeholder="Name, IP, MAC or vendor" oninput="renderDiscoveryResults()" autofocus>
         </div>
+        <p id="discoverScanStatus" class="discovery-status" role="status"></p>
+        <p id="discoverFavouriteStatus" class="discovery-status" role="status"></p>
+        <details id="discoverCoverage" hidden>
+          <summary>Scan coverage</summary>
+          <ul></ul>
+        </details>
+        <div id="discoverModalContent"></div>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" onclick="closeModal('discoverDevicesModal')">Close</button>
-        <button type="button" class="btn btn-primary" onclick="runNetworkDiscovery()">🔄 Refresh Scan</button>
+        <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close(); selectSidebarDeviceFilter('favorites')">View Favourites</button>
+        <button type="button" class="btn btn-primary" id="btnRunLanDiscovery" onclick="runNetworkDiscovery()">Scan LAN</button>
       </div>
-    </div>
-  </div>
+  </dialog>
 
   <!-- MODAL 5: ADD OR EDIT TOPOLOGY NETWORK DEVICE -->
   <div class="modal-overlay" id="topologyNodeModal">
@@ -2356,16 +2544,17 @@
   </div>
 
   <!-- Modular Application Scripts -->
-  <script src="js/state.js?v=20261117g"></script>
-  <script src="js/overview-lan.js?v=20261118b"></script>
-  <script src="js/alerts-router.js?v=20261117e"></script>
-  <script src="js/isp-speedtest.js?v=20261117i"></script>
-  <script src="js/charts-timeline.js?v=20261117g"></script>
-  <script src="js/nmap-scanner.js?v=20261117a"></script>
-  <script src="js/topology.js?v=20261117a"></script>
-  <script src="js/game-detector.js?v=20261118b"></script>
-  <script src="js/modals-tools.js?v=20261117f"></script>
-  <script src="js/app.js?v=20261118b"></script>
+  <script src="/js/state.js?v=20261120-operations"></script>
+  <script src="/js/overview-lan.js?v=20261123-audit"></script>
+  <script src="/js/alerts-router.js?v=20261123-gateway"></script>
+  <script src="/js/operations.js?v=20261120-incident-list"></script>
+  <script src="/js/isp-speedtest.js?v=20261123-speedtest"></script>
+  <script src="/js/charts-timeline.js?v=20261120-history"></script>
+  <script src="/js/nmap-scanner.js?v=20261120b"></script>
+  <script src="/js/topology.js?v=20261120-controls"></script>
+  <script src="/js/game-detector.js?v=20261123-android"></script>
+  <script src="/js/modals-tools.js?v=20261120-port-check"></script>
+  <script src="/js/app.js?v=20261123-audit"></script>
 </body>
 </html>
 

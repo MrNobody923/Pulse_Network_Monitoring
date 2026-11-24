@@ -20,6 +20,7 @@ import os
 import re
 import socket
 import ssl
+import statistics
 import subprocess
 import threading
 import time
@@ -28,7 +29,13 @@ import urllib.request
 if os.name == "nt":
     import ctypes.wintypes
 
-from .config import utc_now
+from typing import TYPE_CHECKING, cast
+
+from .config import manual_speed_tests_enabled, utc_now
+from .router_wan import ROUTER_SAMPLE_SECONDS, RouterWanSampler
+
+if TYPE_CHECKING:
+    from .engine import Monitor
 
 SPEED_HOST = "speed.cloudflare.com"
 DOWNLOAD_STREAMS = 6
@@ -36,7 +43,7 @@ UPLOAD_STREAMS = 4
 DOWNLOAD_SECONDS = 10.0
 UPLOAD_SECONDS = 8.0
 DOWNLOAD_CHUNK_BYTES = 25_000_000
-UPLOAD_BODY_BYTES = 8_000_000
+UPLOAD_BODY_BYTES = 256 * 1024
 MAX_TEST_BYTES = 600_000_000  # hard data cap per phase
 RAMP_UP_FRACTION = 0.25  # ignore TCP slow-start at the beginning of each phase
 LIVE_HISTORY_POINTS = 120
@@ -50,10 +57,19 @@ def _https_connection(timeout: float) -> http.client.HTTPSConnection:
     )
 
 
+def _speedtest_failure(phase: str, error: Exception) -> str:
+    if isinstance(error, PermissionError) or getattr(error, "winerror", None) == 10013:
+        return (
+            f"{phase} test blocked: this Vertex Sentry process could not open an HTTPS connection to {SPEED_HOST}. "
+            "Allow outbound HTTPS for the monitoring process."
+        )
+    return f"{phase} test failed: {error}"
+
+
 def _server_duration_ms(response: http.client.HTTPResponse) -> float:
     """Cloudflare reports its own processing time; subtract it from the RTT."""
     header = response.getheader("Server-Timing") or ""
-    match = re.search(r"dur=([\d.]+)", header)
+    match = re.search(r"\bdur=(\d+(?:\.\d+)?)", header)
     return float(match.group(1)) if match else 0.0
 
 
@@ -88,7 +104,7 @@ def fetch_isp_identity(timeout: float = 6.0) -> dict:
                         "provider": provider or "Unknown ISP",
                         "asn": asn,
                         "publicIp": meta.get("ip"),
-                        "edgeColo": meta.get("timezone") or country or None,
+                        "edgeColo": None,
                         "location": loc,
                         "checkedAt": utc_now(),
                     }
@@ -191,6 +207,29 @@ class WanThroughputSampler:
     def __init__(self) -> None:
         self.source = "NIC Counter" if os.name == "nt" else "/proc/net/dev"
         self.link_speed_mbps: float | None = None
+        self.interface_id = None
+        self.wifi_alias = ""
+        self._signal_alias = ""
+        self._signal_checked = float("-inf")
+        self._signal = {}
+
+    def wifi_signal(self) -> dict:
+        alias = self.wifi_alias
+        if alias != self._signal_alias or time.monotonic() - self._signal_checked >= 15:
+            self._signal_alias = alias
+            self._signal_checked = time.monotonic()
+            self._signal = {}
+            if alias:
+                try:
+                    result = subprocess.run(
+                        ["netsh", "wlan", "show", "interfaces"], capture_output=True,
+                        text=True, errors="replace", timeout=3, creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    if result.returncode == 0:
+                        self._signal = _parse_wifi_signal(result.stdout, alias)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        return self._signal
 
     def _read_win32_primary_nic(self) -> tuple[int, int] | None:
         try:
@@ -204,9 +243,10 @@ class WanThroughputSampler:
             if iphlp.GetIfEntry2(ctypes.byref(row)) != 0:
                 return None
             alias = row.Alias.strip() or row.Description.strip() or f"NIC #{idx.value}"
+            self.interface_id = bytes(row.InterfaceGuid)
+            self.wifi_alias = alias if row.Type == 71 else ""
             self.source = f"{alias} (Live NIC)"
-            if row.ReceiveLinkSpeed:
-                self.link_speed_mbps = round(row.ReceiveLinkSpeed / 1_000_000, 1)
+            self.link_speed_mbps = round(row.ReceiveLinkSpeed / 1_000_000, 1) if row.ReceiveLinkSpeed else None
             return int(row.InOctets), int(row.OutOctets)
         except (AttributeError, OSError, ValueError):
             return None
@@ -217,7 +257,10 @@ class WanThroughputSampler:
                 win_pair = self._read_win32_primary_nic()
                 if win_pair is not None:
                     return win_pair
-                self.source = "netstat -e"
+                self.source = "All host interfaces (netstat)"
+                self.interface_id = "netstat"
+                self.wifi_alias = ""
+                self.link_speed_mbps = None
                 output = subprocess.run(
                     ["netstat", "-e"],
                     capture_output=True,
@@ -230,27 +273,56 @@ class WanThroughputSampler:
                     if match:
                         return int(match.group(1)), int(match.group(2))
                 return None
-            rx = tx = 0
+            with open("/proc/net/route", encoding="utf-8") as handle:
+                routes = [line.split() for line in handle.readlines()[1:]]
+            defaults = [row for row in routes if len(row) >= 8 and row[1] == "00000000"
+                        and row[7] == "00000000" and int(row[3], 16) & 1]
+            if not defaults:
+                return None
+            interface = min(defaults, key=lambda row: int(row[6]))[0]
+            self.interface_id = interface
+            self.source = interface
             with open("/proc/net/dev", encoding="utf-8") as handle:
                 for line in handle.readlines()[2:]:
                     name, data = line.split(":", 1)
-                    if name.strip() == "lo":
+                    if name.strip() != interface:
                         continue
                     fields = data.split()
-                    rx += int(fields[0])
-                    tx += int(fields[8])
-            return rx, tx
+                    return int(fields[0]), int(fields[8])
+            return None
         except (OSError, ValueError, subprocess.SubprocessError):
             return None
+
+
+def _parse_wifi_signal(output: str, alias: str) -> dict:
+    for block in re.split(r"(?im)^\s*Name\s*:\s*", output)[1:]:
+        fields = block.splitlines()
+        if not fields or fields[0].strip().casefold() != alias.casefold():
+            continue
+        if not re.search(r"(?im)^\s*State\s*:\s*connected\s*$", block):
+            continue
+        quality = re.search(r"(?im)^\s*Signal\s*:\s*(\d+)%", block)
+        rssi = re.search(r"(?im)^\s*Rssi\s*:\s*(-\d+)\s*$", block)
+        return {
+            "signalPercent": int(quality[1]) if quality and int(quality[1]) <= 100 else None,
+            "rssiDbm": int(rssi[1]) if rssi and -127 <= int(rssi[1]) < 0 else None,
+        }
+    return {}
 
 
 def _counter_delta(current: int, previous: int) -> int | None:
     delta = current - previous
     if delta >= 0:
         return delta
-    if previous < 2**32:  # 32-bit counter wrapped
-        return current + 2**32 - previous
     return None
+
+
+def _counter_rates(current: tuple[int, int], previous: tuple[int, int], seconds: float) -> tuple[float, float] | None:
+    rx = _counter_delta(current[0], previous[0])
+    tx = _counter_delta(current[1], previous[1])
+    if rx is None or tx is None or seconds <= 0:
+        return None
+    return round(rx * 8 / seconds / 1_000_000, 2), round(tx * 8 / seconds / 1_000_000, 2)
 
 
 class IspSpeedMixin:
@@ -258,8 +330,14 @@ class IspSpeedMixin:
 
     # ------------------------------------------------------------------ helpers
     def _isp_set(self, **values) -> None:
+        self = cast("Monitor", self)
         with self.lock:
             self.isp_state.update(values)
+
+    def get_live_isp_telemetry(self) -> dict:
+        self = cast("Monitor", self)
+        with self.lock:
+            return {key: self.isp_state.get(key) for key in ("liveThroughput", "routerWanThroughput")}
 
     def refresh_isp_identity(self) -> dict | None:
         try:
@@ -274,25 +352,41 @@ class IspSpeedMixin:
     def _measure_latency(self, samples: int = 10) -> tuple[float, float]:
         conn = _https_connection(5)
         rtts: list[float] = []
+        warmed_up = False
+        last_error = None
         try:
-            for attempt in range(samples + 1):
+            for _ in range(samples + 2):
                 started = time.perf_counter()
-                conn.request(
-                    "GET", "/__down?bytes=0", headers={"User-Agent": USER_AGENT}
-                )
-                response = conn.getresponse()
-                response.read()
+                try:
+                    conn.request(
+                        "GET", "/__down?bytes=0",
+                        headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"},
+                    )
+                    response = conn.getresponse()
+                    response.read()
+                except PermissionError:
+                    raise
+                except (OSError, http.client.HTTPException) as error:
+                    conn.close()
+                    if last_error is not None and not rtts:
+                        raise
+                    last_error = error
+                    continue
+                if response.status != 200:
+                    raise RuntimeError(f"{SPEED_HOST} returned HTTP {response.status}")
                 elapsed = (time.perf_counter() - started) * 1000
-                if attempt == 0:
+                if not warmed_up:
+                    warmed_up = True
                     continue  # first request includes TCP + TLS handshakes
                 rtts.append(max(0.1, elapsed - _server_duration_ms(response)))
+                if len(rtts) >= samples:
+                    break
         finally:
             conn.close()
-        if not rtts:
-            raise RuntimeError("Latency measurement failed")
+        if len(rtts) < min(3, samples):
+            raise RuntimeError("Too few successful latency samples") from last_error
         ordered = list(rtts)  # jitter from consecutive samples in measurement order
-        rtts.sort()
-        ping = round(rtts[len(rtts) // 2], 1)  # median
+        ping = round(statistics.median(rtts), 1)
         jitter = round(
             sum(abs(ordered[i] - ordered[i - 1]) for i in range(1, len(ordered)))
             / max(1, len(ordered) - 1),
@@ -309,59 +403,82 @@ class IspSpeedMixin:
         progress_span: int,
         extra: dict,
     ) -> float:
+        self = cast("Monitor", self)
         counters = [0] * streams
-        errors: list[str] = []
+        last_transfer = [0.0] * streams
+        errors: list[Exception] = []
         stop = threading.Event()
+        budget = MAX_TEST_BYTES // streams
 
         def download_worker(index: int) -> None:
-            while not stop.is_set():
-                conn = _https_connection(10)
-                try:
-                    conn.request(
-                        "GET",
-                        f"/__down?bytes={DOWNLOAD_CHUNK_BYTES}",
-                        headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
-                    )
-                    response = conn.getresponse()
-                    if response.status != 200:
-                        errors.append(f"HTTP {response.status}")
+            conn = _https_connection(3)
+            try:
+                while not stop.is_set() and counters[index] < budget:
+                    try:
+                        remaining = min(DOWNLOAD_CHUNK_BYTES, budget - counters[index])
+                        conn.request(
+                            "GET", f"/__down?bytes={remaining}&_={time.monotonic_ns()}",
+                            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity", "Cache-Control": "no-cache"},
+                        )
+                        with conn.getresponse() as response:
+                            if response.status != 200:
+                                raise RuntimeError(f"HTTP {response.status} from {SPEED_HOST}")
+                            while not stop.is_set() and remaining:
+                                chunk = response.read1(min(64 * 1024, remaining))
+                                if not chunk:
+                                    raise RuntimeError("Download response ended before the requested byte count")
+                                remaining -= len(chunk)
+                                counters[index] += len(chunk)
+                                last_transfer[index] = time.perf_counter()
+                    except (OSError, http.client.HTTPException, RuntimeError) as exc:
+                        errors.append(exc)
+                        conn.close()
+                        if isinstance(exc, PermissionError):
+                            stop.set()
                         stop.wait(0.5)
-                        continue
-                    while not stop.is_set():
-                        chunk = response.read(64 * 1024)
-                        if not chunk:
-                            break
-                        counters[index] += len(chunk)
-                except (OSError, http.client.HTTPException) as exc:
-                    errors.append(str(exc))
-                    stop.wait(0.5)
-                finally:
-                    conn.close()
+            finally:
+                conn.close()
 
         payload = b"\0" * (64 * 1024)
 
         def upload_worker(index: int) -> None:
-            while not stop.is_set():
-                conn = _https_connection(10)
+            conn = _https_connection(3)
+            body_size = UPLOAD_BODY_BYTES
+            remaining = budget
+            while not stop.is_set() and remaining:
                 try:
+                    body_size = min(body_size, remaining)
+                    started_request = time.perf_counter()
                     conn.putrequest("POST", "/__up")
                     conn.putheader("User-Agent", USER_AGENT)
                     conn.putheader("Content-Type", "application/octet-stream")
-                    conn.putheader("Content-Length", str(UPLOAD_BODY_BYTES))
+                    conn.putheader("Content-Length", str(body_size))
                     conn.endheaders()
                     sent = 0
-                    while sent < UPLOAD_BODY_BYTES and not stop.is_set():
-                        piece = payload[: min(len(payload), UPLOAD_BODY_BYTES - sent)]
+                    while sent < body_size and not stop.is_set():
+                        piece = payload[: min(len(payload), body_size - sent)]
+                        remaining -= len(piece)
                         conn.send(piece)
                         sent += len(piece)
-                        counters[index] += len(piece)
-                    if sent >= UPLOAD_BODY_BYTES:
-                        conn.getresponse().read()
+                    if sent == body_size:
+                        transfer_at = time.perf_counter()
+                        response = conn.getresponse()
+                        response.read()
+                        if 200 <= response.status < 300:
+                            counters[index] += sent
+                            last_transfer[index] = transfer_at
+                            elapsed = max(time.perf_counter() - started_request, 0.001)
+                            body_size = max(len(payload), min(8_000_000, int(0.5 * sent / elapsed)))
+                        else:
+                            errors.append(RuntimeError(f"HTTP {response.status} from {SPEED_HOST}"))
+                            stop.wait(0.5)
                 except (OSError, http.client.HTTPException) as exc:
-                    errors.append(str(exc))
-                    stop.wait(0.5)
-                finally:
+                    errors.append(exc)
                     conn.close()
+                    if isinstance(exc, PermissionError):
+                        stop.set()
+                    stop.wait(0.5)
+            conn.close()
 
         worker = download_worker if phase == "download" else upload_worker
         threads = [
@@ -401,42 +518,57 @@ class IspSpeedMixin:
                         "progressPct": pct,
                     },
                 )
-                if elapsed >= duration or total >= MAX_TEST_BYTES:
+                if elapsed >= duration or stop.is_set() or not any(thread.is_alive() for thread in threads) or self._stop.is_set():
                     break
         finally:
             stop.set()
+            deadline = time.monotonic() + 4
             for thread in threads:
-                thread.join(timeout=3)
+                thread.join(timeout=max(0, deadline - time.monotonic()))
 
-        end_time, end_bytes = samples[-1]
+        end_time = samples[-1][0]
+        end_bytes = sum(counters)
+        if self._stop.is_set() or any(thread.is_alive() for thread in threads):
+            raise RuntimeError(f"The {phase} test was interrupted")
         if end_bytes < 256 * 1024:
-            detail = f" ({errors[-1]})" if errors else ""
-            raise RuntimeError(
-                f"Could not reach {SPEED_HOST} to measure {phase} speed{detail}. "
-                "Check that the internet connection is up and the server is allowed outbound HTTPS."
-            )
+            if errors:
+                raise errors[-1]
+            raise RuntimeError(f"Too little data was transferred to measure speed from {SPEED_HOST}")
+        if end_bytes >= budget * streams:
+            end_time = max(last_transfer) - started
+            samples = [sample for sample in samples if sample[0] < end_time]
+        else:
+            samples.pop()
+        samples.append((end_time, end_bytes))
         ramp_cut = end_time * RAMP_UP_FRACTION
         ramp_time, ramp_bytes = next(s for s in samples if s[0] >= ramp_cut)
         steady_seconds = max(end_time - ramp_time, 0.001)
+        if ramp_time == end_time or end_bytes == ramp_bytes:
+            return round(end_bytes * 8 / end_time / 1_000_000, 1)
         return round((end_bytes - ramp_bytes) * 8 / steady_seconds / 1_000_000, 1)
 
     def run_speedtest(self) -> dict:
+        self = cast("Monitor", self)
+        if not manual_speed_tests_enabled():
+            raise RuntimeError("Active speed tests are disabled. Live interface throughput is still available.")
         if not self._speedtest_lock.acquire(blocking=False):
             raise RuntimeError("A speed test is already running — results will stream in shortly.")
         self._last_speedtest = time.time()
         self._isp_set(speedTestRunning=True, speedTestError=None)
+        phase = "Latency"
         try:
             self.broadcast(
                 "speedtest_progress",
                 {
                     "phase": "ping",
-                    "phaseLabel": "Identifying ISP & measuring latency...",
-                    "message": f"Connecting to {SPEED_HOST} and identifying your ISP...",
+                    "phaseLabel": "Measuring latency...",
+                    "message": f"Connecting to {SPEED_HOST} from the monitoring PC...",
                     "currentMbps": 0.0,
                     "progressPct": 3,
                 },
             )
-            identity = self.refresh_isp_identity()
+            with self.lock:
+                identity = self.isp_state.get("provider") or {}
             ping_ms, jitter_ms = self._measure_latency()
             base = {"pingMs": ping_ms, "jitterMs": jitter_ms}
             self.broadcast(
@@ -450,9 +582,11 @@ class IspSpeedMixin:
                     "progressPct": 10,
                 },
             )
+            phase = "Download"
             download = self._run_transfer_phase(
                 "download", DOWNLOAD_STREAMS, DOWNLOAD_SECONDS, 10, 50, base
             )
+            phase = "Upload"
             upload = self._run_transfer_phase(
                 "upload", UPLOAD_STREAMS, UPLOAD_SECONDS, 60, 38,
                 {**base, "downloadMbps": download},
@@ -464,7 +598,7 @@ class IspSpeedMixin:
                 "pingMs": ping_ms,
                 "jitterMs": jitter_ms,
                 "rating": _rating(download),
-                "server": f"Cloudflare {identity.get('edgeColo') if identity else ''}".strip(),
+                "server": " ".join(filter(None, ["Cloudflare", (identity or {}).get("edgeColo")])),
                 "provider": (identity or {}).get("provider"),
                 "publicIp": (identity or {}).get("publicIp"),
                 "method": f"{DOWNLOAD_STREAMS}x HTTPS download / {UPLOAD_STREAMS}x HTTPS upload streams",
@@ -474,17 +608,6 @@ class IspSpeedMixin:
                 history = self.isp_state.setdefault("speedHistory", [])
                 history.append(result)
                 del history[:-24]
-                self.isp_state["diagnosis"] = self._build_isp_diagnosis(
-                    overall=self.isp_state.get("overallHealth", "GOOD"),
-                    score=int(self.isp_state.get("healthScore") or 80),
-                    gw_alive=True,
-                    gw_latency=self.isp_state.get("wanGatewayLatencyMs"),
-                    wan_latency=self.isp_state.get("tier1LatencyMs") or ping_ms,
-                    jitter_ms=jitter_ms,
-                    loss_pct=int(self.isp_state.get("packetLossPct") or 0),
-                    dns_ms=self.isp_state.get("dnsResolutionMs"),
-                    last_speed=result,
-                )
             try:
                 if hasattr(self, "_connect"):
                     with self._connect() as db:
@@ -510,40 +633,87 @@ class IspSpeedMixin:
                 "INFO",
                 "Internet Speed Test Complete",
                 f"Measured {round(download / 8, 2)} MB/s ({download} Mbps) down / {round(upload / 8, 2)} MB/s ({upload} Mbps) up · Ping {ping_ms} ms ({result['server']}).",
-                ip=identity.get("publicIp") or "",
+                ip=(identity or {}).get("publicIp") or "",
                 device_name="ISP Internet Uplink",
             )
             self.broadcast("speedtest_result", result)
             return result
         except Exception as exc:
-            self._isp_set(speedTestError=str(exc))
+            message = _speedtest_failure(phase, exc)
+            self._isp_set(speedTestError=message)
             self._record_event(
                 "SPEED_TEST",
                 "WARNING",
                 "Internet Speed Test Failed",
-                str(exc),
+                message,
                 device_name="ISP Internet Uplink",
             )
             self.broadcast(
                 "speedtest_progress",
-                {"phase": "error", "message": str(exc), "progressPct": 0},
+                {"phase": "error", "message": message, "progressPct": 0},
             )
-            raise RuntimeError(str(exc)) from exc
+            raise RuntimeError(message) from exc
         finally:
             self._isp_set(speedTestRunning=False)
             self._speedtest_lock.release()
 
     # -------------------------------------------------- live throughput loop
     def _speedtest_interval_sec(self) -> float:
+        self = cast("Monitor", self)
+        if os.environ.get("PULSE_ALLOW_SPEED_TESTS") != "1":
+            return 0.0
         try:
             minutes = float(self.config.get("isp", {}).get("speedTestIntervalMinutes", 0))
         except (TypeError, ValueError):
             minutes = 0.0
         return minutes * 60 if minutes > 0 else 0.0
 
+    def _router_wan_loop(self) -> None:
+        self = cast("Monitor", self)
+        sampler = RouterWanSampler(self._snmp_get_oids)
+        previous = None
+        last_unavailable = None
+        while not self._stop.is_set():
+            started = time.monotonic()
+            with self.lock:
+                config = dict(self.config.get("router", {}))
+            ip = config.get("ip")
+            reading = sampler.read(config)
+            sampled_at = time.monotonic()
+            rates = None
+            if reading is None:
+                if previous and previous[0][0] == ip and sampled_at - previous[2] <= 6:
+                    self._stop.wait(max(0, ROUTER_SAMPLE_SECONDS - (time.monotonic() - started)))
+                    continue
+                previous = None
+                state = "unavailable"
+                source = None
+            else:
+                source, rx, tx, generation = reading
+                identity = (ip, source, generation)
+                if previous and identity == previous[0] and sampled_at - previous[2] <= 6:
+                    rates = _counter_rates((rx, tx), previous[1], sampled_at - previous[2])
+                previous = (identity, (rx, tx), sampled_at)
+                state = "live" if rates is not None else "sampling"
+            link = sampler.physical_link(config)
+            marker = (ip, source, state, link) if rates is None else None
+            if marker is None or marker != last_unavailable:
+                live = {
+                    "timestamp": utc_now(), "routerIp": ip, "status": state, "source": source,
+                    "rxMbps": rates[0] if rates is not None else None,
+                    "txMbps": rates[1] if rates is not None else None,
+                    "physicalLink": link,
+                }
+                self._isp_set(routerWanThroughput=live)
+                self.broadcast("router_wan_throughput", live)
+            last_unavailable = marker
+            self._stop.wait(max(0, ROUTER_SAMPLE_SECONDS - (time.monotonic() - started)))
+
     def _wan_throughput_loop(self) -> None:
+        self = cast("Monitor", self)
         sampler = WanThroughputSampler()
         previous = sampler.read_counters()
+        previous_id = sampler.interface_id
         previous_at = time.monotonic()
         last_identity = 0.0
         loop_started = time.monotonic()
@@ -551,8 +721,7 @@ class IspSpeedMixin:
         first_auto_test_at = time.time() + (300 if has_speedtest else 8)
         history: list[dict] = []
         peak_rx = peak_tx = 0.0
-        while not self._stop.is_set():
-            self._stop.wait(1.0)
+        while not self._stop.wait(1.0):
             now = time.monotonic()
 
             if now - last_identity >= IDENTITY_REFRESH_SEC or (
@@ -580,17 +749,22 @@ class IspSpeedMixin:
                 self._isp_set(nextAutoTestAt=None)
 
             current = sampler.read_counters()
-            if current is None or previous is None:
-                previous, previous_at = current, now
+            now = time.monotonic()
+            rates = (
+                _counter_rates(current, previous, now - previous_at)
+                if current is not None and previous is not None and previous_id == sampler.interface_id
+                else None
+            )
+            previous, previous_at, previous_id = current, now, sampler.interface_id
+            if rates is None:
+                history.clear()
+                peak_rx = peak_tx = 0.0
+                unavailable = {"timestamp": utc_now(), "source": sampler.source,
+                               "rxMbps": None, "txMbps": None, "wifiSignal": {}, "history": []}
+                self._isp_set(liveThroughput=unavailable)
+                self.broadcast("wan_throughput", unavailable)
                 continue
-            seconds = max(now - previous_at, 0.001)
-            rx_delta = _counter_delta(current[0], previous[0])
-            tx_delta = _counter_delta(current[1], previous[1])
-            previous, previous_at = current, now
-            if rx_delta is None or tx_delta is None:
-                continue
-            rx_mbps = round(rx_delta * 8 / seconds / 1_000_000, 2)
-            tx_mbps = round(tx_delta * 8 / seconds / 1_000_000, 2)
+            rx_mbps, tx_mbps = rates
             peak_rx = max(peak_rx, rx_mbps)
             peak_tx = max(peak_tx, tx_mbps)
             point = {"t": utc_now(), "rx": rx_mbps, "tx": tx_mbps}
@@ -605,6 +779,7 @@ class IspSpeedMixin:
                 "peakTxMbps": peak_tx,
                 "source": sampler.source,
                 "linkSpeedMbps": sampler.link_speed_mbps,
+                "wifiSignal": sampler.wifi_signal(),
                 "lastDownloadMbps": st.get("downloadMbps"),
                 "lastUploadMbps": st.get("uploadMbps"),
                 "history": list(history),

@@ -6,23 +6,45 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from typing import TYPE_CHECKING, cast
+
 from .config import (
     CONFIG_FILE,
     DATA_DIR,
     DATABASE_FILE,
+    DEFAULT_CONFIG,
     KNOWN_OUI_VENDORS,
     PLACEHOLDER_DEFAULT_IPS,
+    inferred_inventory_mac,
     normalize_mac,
+    observed_inventory_mac,
     runtime_attr,
     utc_now,
+    validate_device_ip,
     validate_ip,
     validate_port,
 )
+
+if TYPE_CHECKING:
+    from .engine import Monitor
+
+
+UPSTREAM_DEVICE_TYPES = {"gateway", "router", "switch", "ap", "firewall"}
+
+
+def _runtime_path(name: str, default: Path) -> Path:
+    value: object = runtime_attr(name, default)
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, (str, os.PathLike)):
+        return Path(os.fsdecode(value))
+    raise TypeError(f"{name} must be a filesystem path")
 
 
 class StorageMixin:
@@ -30,15 +52,15 @@ class StorageMixin:
 
     @staticmethod
     def _data_dir() -> Path:
-        return runtime_attr("DATA_DIR", DATA_DIR)
+        return _runtime_path("DATA_DIR", DATA_DIR)
 
     @staticmethod
     def _config_file() -> Path:
-        return runtime_attr("CONFIG_FILE", CONFIG_FILE)
+        return _runtime_path("CONFIG_FILE", CONFIG_FILE)
 
     @staticmethod
     def _database_file() -> Path:
-        return runtime_attr("DATABASE_FILE", DATABASE_FILE)
+        return _runtime_path("DATABASE_FILE", DATABASE_FILE)
 
     @contextmanager
     def _connect(self):
@@ -105,6 +127,8 @@ class StorageMixin:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ping_samples_target_ts
                     ON ping_samples(target_id, ts_epoch DESC);
+                CREATE INDEX IF NOT EXISTS idx_ping_samples_ts
+                    ON ping_samples(ts_epoch);
                 """
             )
             columns = {
@@ -117,34 +141,108 @@ class StorageMixin:
                 )
             if "last_scan_id" not in columns:
                 db.execute("ALTER TABLE discovered_devices ADD COLUMN last_scan_id TEXT")
+            if "review_ignored" not in columns:
+                db.execute("ALTER TABLE discovered_devices ADD COLUMN review_ignored INTEGER NOT NULL DEFAULT 0")
+            event_columns = {row["name"] for row in db.execute("PRAGMA table_info(network_events)")}
+            if "device_id" not in event_columns:
+                db.execute("ALTER TABLE network_events ADD COLUMN device_id TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_network_events_device ON network_events(device_id, id DESC)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_network_events_mac ON network_events(mac COLLATE NOCASE, id DESC)")
 
     def save_config(self) -> None:
-        data_dir = self._data_dir()
-        config_file = self._config_file()
-        data_dir.mkdir(parents=True, exist_ok=True)
-        temp_file = config_file.with_suffix(".json.tmp")
-        temp_file.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
-        os.replace(temp_file, config_file)
+        self = cast("Monitor", self)
+        with self.lock:
+            config_file = self._config_file()
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=config_file.parent,
+                    prefix=f".{config_file.name}.", suffix=".tmp", delete=False,
+                ) as temp_file:
+                    temp_path = Path(temp_file.name)
+                    json.dump(self.config, temp_file, indent=2)
+                os.replace(temp_path, config_file)
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+
+    def update_router_config(self, body: dict, *, select_primary: bool = False) -> str:
+        self = cast("Monitor", self)
+        with self.lock:
+            primary = self.config["router"]
+            primary_ip = primary.get("ip", DEFAULT_CONFIG["router"]["ip"])
+            target_ip = self._validate_ip(body.get("ip") or primary_ip)
+            previous_routers = self.config.get("routers")
+            saved = previous_routers
+            if isinstance(saved, list):
+                saved = {
+                    str(router["ip"]): router
+                    for router in saved if isinstance(router, dict) and router.get("ip")
+                }
+            routers = {
+                key: dict(router) for key, router in (saved or {}).items() if isinstance(router, dict)
+            } if isinstance(saved, dict) else {}
+            current = {**primary, **routers.get(primary_ip, {}), "ip": primary_ip}
+            entry = dict(current if target_ip == primary_ip else routers.get(target_ip, {}))
+            entry["ip"] = target_ip
+            if body.get("port") is not None and str(body["port"]).strip():
+                entry["port"] = self._validate_port(body["port"])
+            if "useHttps" in body:
+                entry["useHttps"] = bool(body["useHttps"])
+            for key, limit in (("stok", 256), ("password", 256), ("username", 128)):
+                if key in body:
+                    entry[key] = str(body[key] or "")[:limit]
+            if "snmpCommunity" in body:
+                entry["snmpCommunity"] = str(body["snmpCommunity"] or "public")[:64]
+            if "wanInterfaceIndex" in body:
+                raw_index = body["wanInterfaceIndex"]
+                index = "" if raw_index is None else str(raw_index).strip()
+                if index and (not index.isascii() or not index.isdecimal() or len(index) > 10 or not 0 < int(index) <= 2_147_483_647):
+                    raise ValueError("Enter a valid SNMP WAN interface index")
+                entry["wanInterfaceIndex"] = int(index) if index else None
+            for key, limit in (("name", 120), ("role", 60)):
+                value = str(body.get(key) or "").strip()
+                if value:
+                    entry[key] = value[:limit]
+            routers[target_ip] = entry
+
+            if target_ip == primary_ip:
+                new_primary = entry
+            elif select_primary:
+                routers[primary_ip] = current
+                new_primary = {**DEFAULT_CONFIG["router"], **entry}
+            else:
+                new_primary = primary
+            self.config.update(router=new_primary, routers=routers)
+            try:
+                self.save_config()
+            except (OSError, TypeError, ValueError):
+                self.config.update(router=primary, routers=previous_routers)
+                raise
+            return target_ip
 
     def get_devices(self) -> list[dict]:
+        self = cast("Monitor", self)
         with self.lock:
             devices = [dict(device) for device in self.config.get("devices", [])]
         favorites = self._favorite_keys()
         archived = self._archived_keys()
         for device in devices:
+            ip_key = f"ip:{device['ip']}"
             favorite_key = (
-                f"mac:{device['mac'].lower()}" if device.get("mac") else f"ip:{device['ip']}"
+                f"mac:{device['mac'].lower()}" if device.get("mac") else ip_key
             )
-            device["favorite"] = (
-                favorite_key in favorites or f"ip:{device['ip']}" in favorites
-            )
+            device["favoriteKey"] = favorite_key if favorite_key in favorites or ip_key not in favorites else ip_key
+            device["favorite"] = device["favoriteKey"] in favorites
             device["archived"] = (
-                favorite_key in archived or f"ip:{device['ip']}" in archived
+                favorite_key in archived or ip_key in archived
             )
         return devices
 
     def add_device(self, device: dict) -> dict:
-        ip = self._validate_ip(device.get("ip"))
+        self = cast("Monitor", self)
+        ip = validate_device_ip(device.get("ip"))
         name = str(device.get("name", "")).strip()
         if not name:
             raise ValueError("Device name is required")
@@ -187,10 +285,12 @@ class StorageMixin:
             mac=new_device["mac"],
             ip=ip,
             device_name=new_device["name"],
+            device_id=new_device["id"],
         )
         return new_device
 
     def update_device(self, device_id: str, updates: dict) -> dict | None:
+        self = cast("Monitor", self)
         allowed = {"name", "ip", "type", "port", "location", "critical", "checkMethod", "mac"}
         updates = {key: value for key, value in updates.items() if key in allowed}
         if "ip" in updates:
@@ -206,6 +306,11 @@ class StorageMixin:
         with self.lock:
             for device in self.config["devices"]:
                 if device["id"] == device_id:
+                    old_ip = device["ip"]
+                    if "ip" in updates and updates["ip"] != device["ip"]:
+                        validate_device_ip(updates["ip"])
+                        if any(item["ip"] == updates["ip"] for item in self.config["devices"]):
+                            raise ValueError("A monitored device already uses this IP address")
                     device.update(updates)
                     self.save_config()
                     result = dict(device)
@@ -214,9 +319,46 @@ class StorageMixin:
                 return None
         if result.get("mac"):
             self.authorize_device(result["mac"])
+        if old_ip != result["ip"]:
+            self._record_event(
+                "MONITORED_IP_CHANGED", "INFO", "Monitored address changed",
+                f"Monitoring moved from {old_ip} to {result['ip']}.",
+                ip=result["ip"], device_name=result["name"], device_id=device_id,
+            )
         return result
 
+    def set_device_upstream(self, device_id: str, upstream_id: str) -> None:
+        self = cast("Monitor", self)
+        with self.lock:
+            devices = {device["id"]: device for device in self.get_devices()}
+            device = devices.get(device_id)
+            if device is None:
+                raise LookupError("Monitored device not found")
+            if upstream_id:
+                upstream = devices.get(upstream_id)
+                if not upstream or upstream["archived"] or upstream.get("type") not in UPSTREAM_DEVICE_TYPES:
+                    raise ValueError("Select a monitored router, switch, access point, or firewall")
+                seen = {device_id}
+                next_id = upstream_id
+                while next_id:
+                    if next_id in seen:
+                        raise ValueError("Upstream dependencies cannot form a loop")
+                    seen.add(next_id)
+                    next_id = devices.get(next_id, {}).get("upstreamDeviceId")
+            record = next(item for item in self.config["devices"] if item["id"] == device_id)
+            previous = record.pop("upstreamDeviceId", None)
+            if upstream_id:
+                record["upstreamDeviceId"] = upstream_id
+            try:
+                self.save_config()
+            except Exception:
+                record.pop("upstreamDeviceId", None)
+                if previous is not None:
+                    record["upstreamDeviceId"] = previous
+                raise
+
     def delete_device(self, device_id: str) -> bool:
+        self = cast("Monitor", self)
         removed_dev = None
         with self.lock:
             before = len(self.config["devices"])
@@ -248,6 +390,7 @@ class StorageMixin:
 
     def sync_infrastructure_devices(self) -> dict:
         """Auto-enroll real discovered Routers, Access Points, Switches, and Gateways from LAN inventory."""
+        self = cast("Monitor", self)
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM discovered_devices ORDER BY ip ASC"
@@ -605,6 +748,7 @@ class StorageMixin:
         }
 
     def _clear_ip_state_and_alerts(self, ip: str) -> None:
+        self = cast("Monitor", self)
         if not ip:
             return
         with self.lock:
@@ -619,6 +763,7 @@ class StorageMixin:
             ]
 
     def _prune_orphaned_device_alerts(self, save: bool = True) -> int:
+        self = cast("Monitor", self)
         with self.lock:
             devices_by_ip = {
                 d["ip"]: d for d in self.config.get("devices", []) if d.get("ip")
@@ -663,33 +808,38 @@ class StorageMixin:
                 self.save_config()
             return removed
 
-    def _record_ping_sample(self, target_id: str, alive: bool, latency_ms: float | None) -> None:
-        now_ts = datetime.now().timestamp()
+    def _record_ping_sample(
+        self, target_id: str, alive: bool, latency_ms: float | None,
+        *, timestamp: float | None = None,
+    ) -> None:
+        now_ts = datetime.now().timestamp() if timestamp is None else timestamp
+        last_prune = getattr(self, "_last_ping_prune", None)
+        prune = last_prune is None or now_ts - last_prune >= 3600
         with self._connect() as db:
             db.execute(
                 "INSERT INTO ping_samples (target_id, ts_epoch, alive, latency_ms) VALUES (?, ?, ?, ?)",
                 (target_id, now_ts, 1 if alive else 0, latency_ms),
             )
-            # Prune samples older than 30 days occasionally
-            if int(now_ts) % 60 < 2:
+            if prune:
                 cutoff_30d = now_ts - (30 * 86400)
                 db.execute("DELETE FROM ping_samples WHERE ts_epoch < ?", (cutoff_30d,))
+        if prune:
+            self._last_ping_prune = now_ts
 
     def _get_ping_uptime_stats(self, target_id: str) -> dict:
         now_ts = datetime.now().timestamp()
         cutoff_24h = now_ts - 86400
         cutoff_30d = now_ts - (30 * 86400)
         with self._connect() as db:
-            row24 = db.execute(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(alive), 0) AS ok FROM ping_samples WHERE target_id=? AND ts_epoch>=?",
-                (target_id, cutoff_24h),
+            row = db.execute(
+                """SELECT COUNT(*) AS n30, COALESCE(SUM(alive), 0) AS ok30,
+                          COUNT(CASE WHEN ts_epoch >= :cutoff24 THEN 1 END) AS n24,
+                          COALESCE(SUM(CASE WHEN ts_epoch >= :cutoff24 THEN alive END), 0) AS ok24
+                   FROM ping_samples WHERE target_id = :target AND ts_epoch >= :cutoff30""",
+                {"target": target_id, "cutoff24": cutoff_24h, "cutoff30": cutoff_30d},
             ).fetchone()
-            row30 = db.execute(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(alive), 0) AS ok FROM ping_samples WHERE target_id=? AND ts_epoch>=?",
-                (target_id, cutoff_30d),
-            ).fetchone()
-        n24, ok24 = (row24["n"], row24["ok"]) if row24 else (0, 0)
-        n30, ok30 = (row30["n"], row30["ok"]) if row30 else (0, 0)
+        n24, ok24 = row["n24"], row["ok24"]
+        n30, ok30 = row["n30"], row["ok30"]
         return {
             "uptime24hPct": round((ok24 / n24) * 100, 2) if n24 else None,
             "uptime30dPct": round((ok30 / n30) * 100, 2) if n30 else None,
@@ -700,7 +850,8 @@ class StorageMixin:
     def _load_recent_ping_samples(self, target_id: str, limit: int = 60) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT ts_epoch, alive, latency_ms FROM ping_samples WHERE target_id=? ORDER BY id DESC LIMIT ?",
+                """SELECT ts_epoch, alive, latency_ms FROM ping_samples
+                   WHERE target_id=? ORDER BY ts_epoch DESC, id DESC LIMIT ?""",
                 (target_id, limit),
             ).fetchall()
         out = []
@@ -710,6 +861,7 @@ class StorageMixin:
             out.append({
                 "time": dt.strftime("%H:%M:%S"),
                 "dateTime": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "sampleEpoch": r["ts_epoch"],
                 "ms": r["latency_ms"],
                 "status": "online" if alive else "offline",
                 "message": (
@@ -741,14 +893,16 @@ class StorageMixin:
         mac: str = "",
         ip: str = "",
         device_name: str = "",
+        device_id: str = "",
     ) -> dict:
+        self = cast("Monitor", self)
         timestamp = utc_now()
         with self._connect() as db:
             cursor = db.execute(
                 """INSERT INTO network_events
-                   (timestamp, event_type, severity, title, message, mac, ip, device_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (timestamp, event_type, severity, title, message, mac, ip, device_name),
+                   (timestamp, event_type, severity, title, message, mac, ip, device_name, device_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (timestamp, event_type, severity, title, message, (mac or "").lower(), ip, device_name, device_id or None),
             )
             event_id = cursor.lastrowid
         event = {
@@ -771,6 +925,10 @@ class StorageMixin:
             rows = db.execute(
                 "SELECT * FROM network_events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
+        return self._serialize_network_events(rows)
+
+    @staticmethod
+    def _serialize_network_events(rows: list[sqlite3.Row]) -> list[dict]:
         return [
             {
                 "id": row["id"],
@@ -787,11 +945,53 @@ class StorageMixin:
         ]
 
     def clear_events(self) -> dict:
+        self = cast("Monitor", self)
         with self._connect() as db:
             removed = int(db.execute("SELECT COUNT(*) FROM network_events").fetchone()[0] or 0)
             db.execute("DELETE FROM network_events")
         self.broadcast("events_cleared", {"removed": removed})
         return {"success": True, "removed": removed}
+
+    def get_device_history(self, device_id: str, mac: str) -> dict:
+        devices = self.get_devices() if device_id else []
+        device = next((item for item in devices if item["id"] == device_id), None)
+        if device_id and device is None:
+            raise LookupError("Monitored device not found")
+        mac = str(device.get("mac") or "") if device else self._normalize_mac(mac)
+        with self._connect() as db:
+            inventory = db.execute(
+                "SELECT * FROM discovered_devices WHERE mac=?", (mac.lower(),)
+            ).fetchone() if mac else None
+            if device is not None:
+                ip, name = device["ip"], device["name"]
+            elif inventory is not None:
+                ip, name = inventory["ip"], inventory["suggested_name"]
+            else:
+                raise LookupError("Discovered device not found")
+            rows = db.execute(
+                """SELECT * FROM network_events
+                   WHERE (? <> '' AND device_id=?) OR (? <> '' AND mac=? COLLATE NOCASE)
+                   ORDER BY id DESC LIMIT 100""",
+                (device_id, device_id, mac, mac),
+            ).fetchall()
+        return {
+            "deviceId": device_id or None,
+            "deviceType": device.get("type") if device else None,
+            "name": name,
+            "ip": ip,
+            "observedMac": observed_inventory_mac(mac, ip) if inventory and inventory["arp_type"] != "icmp" and inventory["ip"] == ip else "",
+            "firstSeen": inventory["first_seen"] if inventory else None,
+            "lastSeen": inventory["last_seen"] if inventory else None,
+            "observationSource": inventory["arp_type"] if inventory else None,
+            "observed": bool(inventory["is_online"]) if inventory else None,
+            "upstreamDeviceId": device.get("upstreamDeviceId") if device else None,
+            "upstreamChoices": [
+                {"id": item["id"], "name": item["name"], "ip": item["ip"]}
+                for item in devices
+                if item["id"] != device_id and not item["archived"] and item.get("type") in UPSTREAM_DEVICE_TYPES
+            ],
+            "events": self._serialize_network_events(rows),
+        }
 
     def get_inventory(self) -> list[dict]:
         with self._connect() as db:
@@ -808,6 +1008,7 @@ class StorageMixin:
         return [
             {
                 "mac": row["mac"],
+                "observedMac": observed_inventory_mac(row["mac"], row["ip"]) if row["arp_type"] != "icmp" else "",
                 "ip": row["ip"],
                 "vendor": row["vendor"],
                 "name": row["suggested_name"],
@@ -816,11 +1017,17 @@ class StorageMixin:
                 "firstSeen": row["first_seen"],
                 "lastSeen": row["last_seen"],
                 "authorized": bool(row["authorized"]) or row["mac"] in known_macs,
+                "reviewIgnored": bool(row["review_ignored"]),
                 "observed": bool(row["is_online"]),
                 "isOnline": bool(row["is_online"]),
                 "favorite": (
                     f"mac:{row['mac']}" in favorites
                     or f"ip:{row['ip']}" in favorites
+                ),
+                "favoriteKey": (
+                    f"ip:{row['ip']}"
+                    if f"ip:{row['ip']}" in favorites and f"mac:{row['mac']}" not in favorites
+                    else f"mac:{row['mac']}"
                 ),
                 "archived": (
                     f"mac:{row['mac']}" in archived
@@ -882,6 +1089,7 @@ class StorageMixin:
     def toggle_favorite(self, asset_key: str) -> bool:
         normalized = self._normalize_asset_key(asset_key, "favourite")
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             current = db.execute(
                 "SELECT 1 FROM device_favorites WHERE asset_key=?", (normalized,)
             ).fetchone()
@@ -913,9 +1121,17 @@ class StorageMixin:
         mac = self._normalize_mac(mac)
         with self._connect() as db:
             result = db.execute(
-                "UPDATE discovered_devices SET authorized=1 WHERE mac=?", (mac,)
+                "UPDATE discovered_devices SET authorized=1, review_ignored=0 WHERE mac=?", (mac,)
             )
             return result.rowcount > 0
+
+    def set_device_review_ignored(self, mac: str, ignored: bool) -> bool:
+        mac = self._normalize_mac(mac)
+        with self._connect() as db:
+            return db.execute(
+                "UPDATE discovered_devices SET review_ignored=? WHERE mac=? AND authorized=0",
+                (int(ignored), mac),
+            ).rowcount > 0
 
     @staticmethod
     def _is_generic_device_name(name: str, ip: str = "") -> bool:
@@ -937,6 +1153,7 @@ class StorageMixin:
 
     def refresh_inventory_identities(self, resolve_live: bool = False) -> int:
         """Backfill OUI vendors and resolved hostnames across discovered_devices without losing user authorizations."""
+        self = cast("Monitor", self)
         with self._connect() as db:
             db.execute(
                 "DELETE FROM discovered_devices WHERE lower(mac) IN ('ff:ff:ff:ff:ff:ff', '00:00:00:00:00:00')"
@@ -945,12 +1162,13 @@ class StorageMixin:
         if not rows:
             return 0
 
+        mac_by_ip = {r["ip"]: r["mac"] for r in rows if r["is_online"] and r["arp_type"] != "icmp"}
         if resolve_live and hasattr(self, "_resolve_hostnames_bulk"):
             online_ips = [str(r["ip"]) for r in rows if r["is_online"] and r["ip"]]
             if online_ips:
-                self._resolve_hostnames_bulk(online_ips)
+                self._resolve_hostnames_bulk(online_ips, mac_by_ip)
 
-        hostnames = self._get_cached_hostnames() if hasattr(self, "_get_cached_hostnames") else {}
+        hostnames = self._get_cached_hostnames(mac_by_ip) if hasattr(self, "_get_cached_hostnames") else {}
         fps = self._get_cached_fingerprints() if hasattr(self, "_get_cached_fingerprints") else {}
         known_gateways = self._known_local_gateways() if hasattr(self, "_known_local_gateways") else set()
         gw_plus_one = (
@@ -967,8 +1185,12 @@ class StorageMixin:
             oui_vendor, oui_type = self._vendor_for_oui(oui) if hasattr(self, "_vendor_for_oui") else ("LAN Network Device", "device")
             if ip in known_gateways or ip in gw_plus_one:
                 oui_type = "gateway"
-            hostname = str(hostnames.get(ip) or "").strip()
-            fp = fps.get(ip) if isinstance(fps, dict) else None
+            if not row["is_online"]:
+                continue
+            hostname = str(hostnames.get(ip) or "").strip() if mac_by_ip.get(ip) == mac else ""
+            fp = fps.get(ip)
+            if fp and fp.get("mac") != mac:
+                fp = None
 
             if hasattr(self, "_build_device_label"):
                 resolved_vendor, label = self._build_device_label(
@@ -1005,15 +1227,40 @@ class StorageMixin:
     def _upsert_inventory(self, item: dict, scan_id: str = "") -> None:
         now = utc_now()
         event_args = None
+        displaced = []
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if item["arpType"] != "icmp" and observed_inventory_mac(item["mac"], item["ip"]):
+                try:
+                    old_key = inferred_inventory_mac(item["ip"])
+                except ValueError:
+                    old_key = ""
+                if old_key:
+                    promoted = db.execute(
+                        """UPDATE OR IGNORE discovered_devices
+                           SET mac=?, authorized=0, review_ignored=0
+                           WHERE mac=? AND arp_type='icmp'""",
+                        (item["mac"], old_key),
+                    ).rowcount
+                    if promoted:
+                        for table in ("device_favorites", "device_archives"):
+                            db.execute(
+                                f"UPDATE OR IGNORE {table} SET asset_key=? WHERE asset_key=?",
+                                (f"mac:{item['mac']}", f"mac:{old_key}"),
+                            )
+                    displaced = db.execute(
+                        "SELECT mac, suggested_name FROM discovered_devices WHERE ip=? AND mac<>? AND is_online=1",
+                        (item["ip"], item["mac"]),
+                    ).fetchall()
+                    db.execute(
+                        "UPDATE discovered_devices SET is_online=0 WHERE ip=? AND mac<>? AND is_online=1",
+                        (item["ip"], item["mac"]),
+                    )
             previous = db.execute(
                 "SELECT * FROM discovered_devices WHERE mac=?", (item["mac"],)
             ).fetchone()
             if previous is None:
-                known = any(
-                    d.get("ip") == item["ip"] or d.get("mac", "").lower() == item["mac"]
-                    for d in self.get_devices()
-                )
+                known = any(d.get("mac", "").lower() == item["mac"] for d in self.get_devices())
                 db.execute(
                     """INSERT INTO discovered_devices
                        (mac, ip, vendor, suggested_name, arp_type, first_seen, last_seen,
@@ -1035,7 +1282,7 @@ class StorageMixin:
                     "NEW_DEVICE",
                     "WARNING" if not known else "INFO",
                     "New network device detected" if not known else "Known device detected",
-                    f"{item['suggestedName']} appeared at {item['ip']} (MAC {item['mac']})."
+                    f"{item['suggestedName']} appeared at {item['ip']}."
                     + (" Review and authorize it if expected." if not known else ""),
                     item["mac"],
                     item["ip"],
@@ -1086,6 +1333,12 @@ class StorageMixin:
                         item["mac"],
                     ),
                 )
+        for row in displaced:
+            self._record_event(
+                "ADDRESS_REASSIGNED", "INFO", "Address observed on a different device",
+                f"Discovery saw a different MAC address at {item['ip']}.",
+                row["mac"], item["ip"], row["suggested_name"],
+            )
         if event_args:
             self._record_event(*event_args)
 

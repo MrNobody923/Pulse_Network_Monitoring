@@ -1,59 +1,82 @@
-"""HTTP server, REST API routes, SSE streaming, and static asset serving."""
+"""Django dashboard, REST API, and sensor request handlers."""
 
 from __future__ import annotations
 
 import csv
+import hmac
 import io
+import ipaddress
 import json
 import os
 import queue
 import re
 import socket
-import sys
-import threading
 import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING
+
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.views import View
 
 from .config import API_VERSION, ROOT, utc_now
+from .game_detector import ANDROID_APP_DETECTION, MANAGED_PROCESS_DETECTION
+from .runtime import PORT, DashboardServer, _active_monitor, run_server
 from .views import render_page
 
+if TYPE_CHECKING:
+    from .engine import Monitor
+
+
+__all__ = ["DashboardServer", "MAX_BODY_BYTES", "PORT", "PUBLIC_DIR", "RequestHandler", "run_server"]
 
 PUBLIC_DIR = ROOT / "public"
 MAX_BODY_BYTES = 1_000_000
-PORT = int(os.environ.get("PORT", "3000"))
+
+
+RESOURCE_ROUTES = (
+    (r"api/devices/[^/]+/probe", ["post"]),
+    (r"api/alerts/[^/]+/(?:retest|acknowledge|feedback|dismiss)", ["post"]),
+    (r"api/topology/node/[^/]+/position", ["post"]),
+    (r"api/topology/node/[^/]+", ["put", "delete"]),
+    (r"api/topology/link/[^/]+", ["delete"]),
+    (r"api/devices/[^/]+", ["put", "delete"]),
+)
 
 
 def _safe_key(value: str) -> str:
     return urllib.parse.unquote(value)
 
 
-def _active_monitor():
-    """Return the active monitor instance (supports unittest.mock.patch on `server.monitor`)."""
-    srv_mod = sys.modules.get("server")
-    if srv_mod is not None and hasattr(srv_mod, "monitor"):
-        return srv_mod.monitor
-    from . import monitor as default_monitor
+class RequestHandler(View):
+    """Serve the existing dashboard and sensor API through Django."""
 
-    return default_monitor
+    resource = False
 
+    def dispatch(self, request, *args, **kwargs):
+        request.get_host()
+        self.headers = request.headers
+        self.client_address = (request.META.get("REMOTE_ADDR", ""),)
+        target = request.META.get("RAW_URI") or request.get_full_path()
+        path, separator, query = target.partition("?")
+        self.route_path = path.removesuffix("/") or "/"
+        if self.resource or "%2f" in self.route_path.lower():
+            for pattern, methods in RESOURCE_ROUTES:
+                if re.fullmatch("/" + pattern, self.route_path):
+                    self.http_method_names = methods
+                    break
+            else:
+                return JsonResponse({"error": "Not found"}, status=404)
+        self.path = self.route_path + separator + query
+        result = super().dispatch(request, *args, **kwargs)
+        return self.response if result is None else result
 
-class DashboardServer(ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+    http_method_names = ["get", "post", "put", "delete"]
 
-    def handle_error(self, request: object, client_address: object) -> None:
-        _, exc, _ = sys.exc_info()
-        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
-            return
-        super().handle_error(request, client_address)
-
-
-class RequestHandler(BaseHTTPRequestHandler):
-    server_version = "PulseNetworkMonitor/2.0"
-
-    def log_message(self, fmt: str, *args: object) -> None:
-        print(f"[http] {self.address_string()} - {fmt % args}", flush=True)
+    def http_method_not_allowed(self, request, *args, **kwargs):
+        return JsonResponse(
+            {"error": "Method not allowed"}, status=405,
+            headers={"Allow": ", ".join(self._allowed_methods())},
+        )
 
     def _json_body(self, max_bytes: int = MAX_BODY_BYTES) -> dict:
         try:
@@ -62,7 +85,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Invalid Content-Length header") from exc
         if length < 0 or length > max_bytes:
             raise ValueError(f"Request body must be smaller than {max_bytes // (1024 * 1024) or 1} MB")
-        raw = self.rfile.read(length) if length else b"{}"
+        raw = self.request.read(length) if length else b"{}"
         try:
             body = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -71,47 +94,49 @@ class RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Request body must be a JSON object")
         return body
 
-    def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+    def _allow_write_request(self) -> bool:
+        origin = self.headers.get("Origin")
+        if origin is None and self.headers.get("Sec-Fetch-Site") != "cross-site":
+            return True
+        if origin and self.headers.get("Sec-Fetch-Site") != "cross-site":
+            try:
+                parsed = urllib.parse.urlsplit(origin)
+            except ValueError:
+                pass
+            else:
+                if parsed.scheme in {"http", "https"} and parsed.netloc.lower() == self.headers.get("Host", "").lower():
+                    return True
+        self._send_error_json("Cross-origin writes are forbidden", 403)
+        return False
 
-    def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self._send_cors_headers()
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+    def _allow_local_dashboard(self, error: str = "Device controls require the local dashboard") -> bool:
+        try:
+            host = urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname
+            local_host = host == "localhost" or ipaddress.ip_address(host or "").is_loopback
+            if local_host and ipaddress.ip_address(self.client_address[0]).is_loopback:
+                return True
+        except ValueError:
+            pass
+        self._send_error_json(error, 403)
+        return False
 
     def _send_json(self, payload: object, status: int = 200) -> None:
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
+        self.response = JsonResponse(
+            payload, status=status, safe=False,
+            content_type="application/json; charset=utf-8",
+            json_dumps_params={"ensure_ascii": False, "separators": (",", ":")},
+            headers={"Cache-Control": "no-store"},
         )
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "no-store")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(raw)
-        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-            pass
 
     def _send_static_file(self, rel_path: str, content_type: str) -> bool:
         target = (PUBLIC_DIR / rel_path).resolve()
         if (
-            not str(target).startswith(str(PUBLIC_DIR.resolve()))
+            not target.is_relative_to(PUBLIC_DIR.resolve())
             or not target.is_file()
         ):
             return False
-        raw = target.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(raw)
+        self.response = HttpResponse(target.read_bytes(), content_type=content_type,
+                                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
         return True
 
     def _send_page(
@@ -122,14 +147,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         ):
             return
         mon = _active_monitor()
-        raw = render_page(mon, path, message, filter_by).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(raw)
+        self.response = HttpResponse(
+            render_page(mon, path, message, filter_by), content_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     def _form_body(self) -> dict[str, str]:
         try:
@@ -138,14 +159,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Invalid Content-Length header") from exc
         if length < 0 or length > MAX_BODY_BYTES:
             raise ValueError("Form body must be smaller than 1 MB")
-        raw = self.rfile.read(length).decode("utf-8")
+        raw = self.request.read(length).decode("utf-8")
         parsed = urllib.parse.parse_qs(raw, keep_blank_values=True, max_num_fields=30)
         return {key: values[-1] for key, values in parsed.items()}
 
     def _redirect(self, message: str = "", path: str = "/") -> None:
-        if not path.startswith("/") or path.startswith("//"):
-            path = "/"
-        parsed = urllib.parse.urlsplit(path)
+        parsed = urllib.parse.urlsplit("/")
+        # Forms return to one of the local dashboard pages.
+        page, _, query_string = path.partition("?")
+        if page in {"/", "/index.html", "/devices", "/events"}:
+            parsed = urllib.parse.urlsplit(page + "?" + query_string)
         query = urllib.parse.parse_qs(parsed.query)
         if message:
             query["message"] = [message]
@@ -153,10 +176,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             {k: v[-1] for k, v in query.items() if v}
         )
         location = parsed.path + ("?" + encoded_query if encoded_query else "")
-        self.send_response(303)
-        self.send_header("Location", location)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        self.response = HttpResponse(status=303, headers={"Location": location})
 
     def _send_error_json(self, message: str, status: int) -> None:
         self._send_json({"error": message}, status)
@@ -174,26 +194,20 @@ class RequestHandler(BaseHTTPRequestHandler):
         ]
         writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            writer.writerow({
+                field: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value
+                for field, value in row.items()
+            })
         raw = output.getvalue().encode("utf-8-sig")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/csv; charset=utf-8")
-        self.send_header(
-            "Content-Disposition",
-            'attachment; filename="pulse-network-inventory.csv"',
+        self.response = HttpResponse(
+            raw, content_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="pulse-network-inventory.csv"'},
         )
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
 
-    def _path_parts(self) -> list[str]:
-        path = urllib.parse.urlsplit(self.path).path
-        return [urllib.parse.unquote(part) for part in path.split("/") if part]
-
-    def do_GET(self) -> None:
+    def get(self, request) -> None:
         mon = _active_monitor()
-        parts = self._path_parts()
-        path = "/" + "/".join(parts)
+        path = urllib.parse.unquote(self.route_path)
         try:
             if path in {"/", "/index.html", "/devices", "/events"}:
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -234,10 +248,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 })
             elif path in {"/api/mobile/summary", "/api/summary", "/api/v1/summary"}:
                 self._send_json(mon.get_mobile_summary())
-            elif path == "/favicon.ico":
-                self.send_response(204)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+            elif path in {"/vertex-sentry.png", "/vertex-sentry-192.png", "/favicon.ico"}:
+                asset = "vertex-sentry-192.png" if path == "/favicon.ico" else path.lstrip("/")
+                if not self._send_static_file(asset, "image/png"):
+                    self._send_error_json("Not found", 404)
             elif path == "/api/status":
                 self._send_json(mon.snapshot())
             elif path == "/api/events":
@@ -251,16 +265,36 @@ class RequestHandler(BaseHTTPRequestHandler):
                 })
             elif path == "/api/devices":
                 self._send_json(mon.get_devices())
+            elif path == "/api/devices/connection":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                self._send_device_connection(mon, query.get("ip", [""])[0])
+            elif path == "/api/devices/history":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                try:
+                    self._send_json(mon.get_device_history(query.get("deviceId", [""])[0], query.get("mac", [""])[0]))
+                except LookupError as exc:
+                    self._send_error_json(str(exc), 404)
             elif path == "/api/alerts":
                 self._send_json({
                     "active": mon.get_active_alerts(),
                     "history": mon.get_alerts(100),
                     "stats": mon.get_alert_stats(),
                 })
+            elif path == "/api/operations":
+                self._send_json(mon.get_operations())
+            elif path == "/api/operations/incident":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                try:
+                    self._send_json(mon.get_incident(query.get("key", [""])[0]))
+                except LookupError as exc:
+                    self._send_error_json(str(exc), 404)
+            elif path == "/api/operations/switch-ports":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                self._send_json(mon.get_switch_ports(query.get("deviceId", [""])[0]))
             elif path == "/api/network/ping-history":
                 self._send_json(mon.get_isp_state().get("pingGraph", {}))
-            elif path == "/api/network/discover":
-                self._send_json(mon.discover_devices())
+            elif path == "/api/isp/live":
+                self._send_json(mon.get_live_isp_telemetry())
             elif path == "/api/network/inventory":
                 self._send_json({
                     "inventory": mon.get_inventory(),
@@ -271,7 +305,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 limit = int(query.get("limit", ["50"])[0])
                 self._send_json(mon.get_events(limit))
             elif path == "/api/network/inventory/export":
-                self._send_csv(mon.get_inventory())
+                self._send_csv([{**row, "mac": row["observedMac"]} for row in mon.get_inventory()])
             elif path == "/api/tools/port-scan/catalog":
                 self._send_json(mon.get_portscan_catalog())
             elif path == "/api/topology":
@@ -287,18 +321,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(mon.get_wireshark_status())
             elif path == "/api/gaming/wireshark/capture.pcap":
                 raw_pcap = mon.get_wireshark_capture_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.tcpdump.pcap")
-                self.send_header("Content-Disposition", 'attachment; filename="pulse-game-capture.pcap"')
-                self.send_header("Content-Length", str(len(raw_pcap)))
-                self.send_header("Cache-Control", "no-store")
-                self._send_cors_headers()
-                self.end_headers()
-                self.wfile.write(raw_pcap)
+                self.response = HttpResponse(
+                    raw_pcap, content_type="application/vnd.tcpdump.pcap",
+                    headers={"Cache-Control": "no-store", "Content-Disposition": 'attachment; filename="pulse-game-capture.pcap"'},
+                )
             else:
                 self._send_error_json("Not found", 404)
-        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-            pass
         except (ValueError, RuntimeError) as exc:
             self._send_error_json(str(exc), 400)
         except (OSError, TimeoutError) as exc:
@@ -308,40 +336,46 @@ class RequestHandler(BaseHTTPRequestHandler):
             print(f"[http] GET {path} failed unexpectedly: {exc}", flush=True)
             self._send_error_json("Internal server error", 500)
 
-    def _stream_events(self, mon: object) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self._send_cors_headers()
-        self.end_headers()
-        subscriber: queue.Queue = queue.Queue(maxsize=200)
+    def _stream_events(self, mon: Monitor) -> None:
+        subscriber: queue.Queue[dict | None] = queue.Queue(maxsize=200)
         with mon.lock:
-            mon.event_subscribers.add(subscriber)
-        try:
-            snapshot = json.dumps(mon.snapshot(), separators=(",", ":"))
-            self.wfile.write(f"event: snapshot\ndata: {snapshot}\n\n".encode("utf-8"))
-            self.wfile.flush()
-            while True:
-                try:
-                    event = subscriber.get(timeout=15)
-                    if event is None:
-                        break
-                    payload = json.dumps(event["data"], separators=(",", ":"))
-                    self.wfile.write(
-                        f"event: {event['event']}\ndata: {payload}\n\n".encode("utf-8")
-                    )
-                except queue.Empty:
-                    self.wfile.write(b": keep-alive\n\n")
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            with mon.lock:
-                mon.event_subscribers.discard(subscriber)
+            stream_available = len(mon.event_subscribers) < 24
+            if stream_available:
+                mon.event_subscribers.add(subscriber)
+        if not stream_available:
+            self._send_error_json("Event stream capacity reached", 503)
+            return
 
-    def do_POST(self) -> None:
+        def events():
+            try:
+                # Prime the generator so closing an unread response also frees the slot.
+                yield b""
+                snapshot = json.dumps(mon.snapshot(), separators=(",", ":"))
+                yield f"event: snapshot\ndata: {snapshot}\n\n"
+                while True:
+                    try:
+                        event = subscriber.get(timeout=15)
+                    except queue.Empty:
+                        yield b": keep-alive\n\n"
+                        continue
+                    if event is None:
+                        return
+                    payload = json.dumps(event["data"], separators=(",", ":"))
+                    yield f"event: {event['event']}\ndata: {payload}\n\n"
+            finally:
+                with mon.lock:
+                    mon.event_subscribers.discard(subscriber)
+
+        stream = events()
+        next(stream)
+        self.response = StreamingHttpResponse(
+            stream, content_type="text/event-stream; charset=utf-8",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    def post(self, request) -> None:
+        if not self._allow_write_request():
+            return
         mon = _active_monitor()
         path = urllib.parse.urlsplit(self.path).path
         if path.startswith("/actions/"):
@@ -351,161 +385,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = self._json_body(
                 max_bytes=16 * 1024 * 1024 if path == "/api/gaming/wireshark/analyze" else MAX_BODY_BYTES
             )
-            if path == "/api/devices":
-                created = mon.add_device(body)
-                self._send_json(created, 201)
-                mon.broadcast(
-                    "telemetry",
-                    {
-                        "timestamp": utc_now(),
-                        "router": mon.router_state,
-                        "isp": mon.get_isp_state(),
-                        "devices": mon._hydrated_devices(),
-                        "activeAlerts": mon.get_active_alerts(),
-                        "alertStats": mon.get_alert_stats(),
-                    },
-                )
-            elif path == "/api/devices/probe-all":
-                results = mon.probe_all_devices()
-                self._send_json({
-                    "success": True,
-                    "devices": results,
-                    "activeAlerts": mon.get_active_alerts(),
-                    "inventory": mon.get_inventory(),
-                })
-                mon.broadcast(
-                    "telemetry",
-                    {
-                        "timestamp": utc_now(),
-                        "router": mon.router_state,
-                        "isp": mon.get_isp_state(),
-                        "devices": results,
-                        "activeAlerts": mon.get_active_alerts(),
-                        "alertStats": mon.get_alert_stats(),
-                    },
-                )
-            elif path == "/api/network/sync-infrastructure":
-                sync_res = mon.sync_infrastructure_devices()
-                results = mon.probe_all_devices()
-                self._send_json({
-                    "success": True,
-                    "sync": sync_res,
-                    "devices": results,
-                    "inventory": mon.get_inventory(),
-                    "activeAlerts": mon.get_active_alerts(),
-                })
-                mon.broadcast(
-                    "telemetry",
-                    {
-                        "timestamp": utc_now(),
-                        "router": mon.router_state,
-                        "isp": mon.get_isp_state(),
-                        "devices": results,
-                        "activeAlerts": mon.get_active_alerts(),
-                        "alertStats": mon.get_alert_stats(),
-                    },
-                )
-            elif re.fullmatch(r"/api/devices/[^/]+/probe", path):
-                device_id = _safe_key(path.split("/")[-2])
-                device = next(
-                    (item for item in mon.get_devices() if item["id"] == device_id),
-                    None,
-                )
-                if device is None:
-                    self._send_error_json("Device not found", 404)
-                    return
-                result = mon.probe_device(device)
-                mon.latest_devices[result["ip"]] = result
-                mon.enrich_fleet_diagnostics(list(mon.latest_devices.values()))
-                self._send_json(result)
-                mon.broadcast(
-                    "telemetry",
-                    {
-                        "timestamp": utc_now(),
-                        "router": mon.router_state,
-                        "isp": mon.get_isp_state(),
-                        "devices": mon._hydrated_devices(),
-                        "activeAlerts": mon.get_active_alerts(),
-                        "alertStats": mon.get_alert_stats(),
-                    },
-                )
-            elif path in {"/api/router/config", "/api/routers/config"}:
-                router_ip_default = mon.config["router"].get("ip", "192.168.0.1")
-                target_ip = mon._validate_ip(body.get("ip") or router_ip_default)
-                routers_map = mon.config.setdefault("routers", {})
-                if not isinstance(routers_map, dict):
-                    routers_map = {}
-                    mon.config["routers"] = routers_map
-                r_entry = dict(routers_map.get(target_ip, {}))
-                r_entry["ip"] = target_ip
-                if body.get("port") is not None and str(body.get("port")).strip():
-                    r_entry["port"] = mon._validate_port(body["port"])
-                if "useHttps" in body:
-                    r_entry["useHttps"] = bool(body["useHttps"])
-                if "stok" in body:
-                    r_entry["stok"] = str(body["stok"])[:256]
-                if "password" in body:
-                    r_entry["password"] = str(body["password"])[:256]
-                if "username" in body:
-                    r_entry["username"] = str(body["username"])[:128]
-                if "snmpCommunity" in body:
-                    r_entry["snmpCommunity"] = str(body["snmpCommunity"] or "public")[:64]
-                if "name" in body and str(body["name"]).strip():
-                    r_entry["name"] = str(body["name"]).strip()[:120]
-                if "role" in body and str(body["role"]).strip():
-                    r_entry["role"] = str(body["role"]).strip()[:60]
-                routers_map[target_ip] = r_entry
-
-                is_primary_update = target_ip == router_ip_default or (
-                    path == "/api/router/config" and body.get("isPrimary") is not False
-                )
-                if is_primary_update:
-                    config = mon.config["router"]
-                    config["ip"] = target_ip
-                    for k in ("port", "stok", "password", "username", "snmpCommunity", "useHttps"):
-                        if k in r_entry:
-                            config[k] = r_entry[k]
-
-                mon.save_config()
-                fleet = mon.probe_routers_fleet()
-                matched_router = next(
-                    (r for r in fleet if r.get("ip") == target_ip),
-                    mon.router_state,
-                )
-                mon.broadcast(
-                    "router_update",
-                    {**mon.router_state, "fleet": fleet},
-                )
-                self._send_json({"success": True, "router": matched_router, "routers": fleet})
-            elif path == "/api/router/simulate":
-                self._simulate_port(mon, body)
-            elif path == "/api/network/import-devices":
-                self._import_devices(mon, body)
-            elif path == "/api/network/discover":
-                self._send_json(mon.discover_devices())
-            elif path == "/api/network/inventory/authorize":
-                mac = body.get("mac", "")
-                updated = mon.authorize_device(mac)
-                if not updated:
-                    self._send_error_json("Discovered device not found", 404)
-                else:
-                    self._send_json({"success": True, "inventory": mon.get_inventory()})
-            elif path == "/api/network/inventory/favorite":
-                fav = mon.toggle_favorite(str(body.get("asset_key", "")))
-                self._send_json({
-                    "success": True,
-                    "favorite": fav,
-                    "inventory": mon.get_inventory(),
-                    "devices": mon.get_devices(),
-                })
-            elif path == "/api/network/inventory/archive":
-                archived = mon.toggle_archive(str(body.get("asset_key", "")))
-                self._send_json({
-                    "success": True,
-                    "archived": archived,
-                    "inventory": mon.get_inventory(),
-                    "devices": mon.get_devices(),
-                })
+            if path == "/api/devices" or path.startswith(("/api/devices/", "/api/network/", "/api/router/", "/api/routers/")):
+                self._handle_network_post(mon, path, body)
             elif path == "/api/alerts/acknowledge-all":
                 now = utc_now()
                 tech = str(body.get("technician") or "Network Administrator")[:120]
@@ -516,8 +397,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                     mon.save_alert(alert)
                 self._send_json({"success": True, "active": mon.get_active_alerts()})
             elif path == "/api/speedtest/run":
-                mon.broadcast("speedtest_status", {"status": "running"})
                 self._send_json(mon.run_speedtest())
+            elif path == "/api/operations/maintenance":
+                self._send_json(mon.create_maintenance(body), 201)
+            elif path == "/api/operations/maintenance/cancel":
+                mon.cancel_maintenance(str(body.get("id") or ""))
+                self._send_json({"success": True})
+            elif path == "/api/operations/switch-ports":
+                if self._allow_local_dashboard("Run switch SNMP checks from the local dashboard"):
+                    self._send_json(mon.sample_switch_ports(str(body.get("deviceId") or ""), body))
             elif path == "/api/isp/probe":
                 isp_state = mon.probe_isp()
                 self._send_json({"success": True, "isp": isp_state})
@@ -543,11 +431,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif path == "/api/tools/port-check":
                 host = mon._validate_host(body.get("host", ""))
                 port = mon._validate_port(body.get("port"))
-                detail = mon._scan_single_port(host, port, 1.5)
+                try:
+                    resolved_ip = socket.gethostbyname(host)
+                except OSError as exc:
+                    raise ValueError(f"Could not resolve target host '{host}': {exc}") from exc
+                detail = mon.check_tcp_port(resolved_ip, port)
+                error = None
+                if not detail["open"]:
+                    error = {
+                        "connection-refused": "Connection refused",
+                        "timeout": "Connection timed out",
+                        "connection-error": "Connection could not be established",
+                    }.get(detail["reason"], f"Nmap reported the port as {detail['state']}")
                 self._send_json({
                     "host": host,
+                    "ip": resolved_ip,
                     "port": port,
                     "open": detail["open"],
+                    "state": detail["state"],
+                    "reason": detail["reason"],
+                    "observedService": detail["observedService"],
+                    "serviceSource": detail["serviceSource"],
+                    "reviewSource": detail["reviewSource"],
                     "latencyMs": detail["latencyMs"],
                     "service": detail["service"],
                     "category": detail["category"],
@@ -557,7 +462,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "summary": detail["summary"],
                     "exposureRisk": detail["exposureRisk"],
                     "remediation": detail["remediation"],
-                    "error": None if detail["open"] else "Connection timed out or was refused",
+                    "error": error,
                     "timestamp": utc_now(),
                 })
             elif path == "/api/tools/port-scan":
@@ -570,11 +475,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     )
                 )
             elif path == "/api/alerts/clear":
-                mon.config["alerts"] = []
-                mon.save_config()
+                with mon.lock:
+                    mon.config["alerts"] = []
+                    mon.save_config()
                 self._send_json({"success": True})
-            elif path == "/api/network/events/clear":
-                self._send_json(mon.clear_events())
             elif path == "/api/alerts/test-drill":
                 self._test_drill(mon, body)
             elif path == "/api/topology/node":
@@ -591,37 +495,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     mon.ping_topology_pdu(body.get("sourceId"), body.get("targetId"))
                 )
-            elif path == "/api/gaming/detect":
-                self._send_json(mon.record_game_detection(body), 201)
-            elif path == "/api/gaming/scan":
-                self._send_json(mon.scan_lan_for_games(include_topology_refresh=True))
-            elif path == "/api/gaming/clear":
-                self._send_json(mon.clear_game_activity())
-            elif path == "/api/gaming/dismiss":
-                if body.get("id"):
-                    self._send_json(mon.dismiss_game_session(body.get("id", "")))
-                else:
-                    self._send_json(
-                        mon.mark_game_session_ended_by_ip_game(
-                            body.get("ip", ""), body.get("gameId", "")
-                        )
-                    )
-            elif path == "/api/gaming/block":
-                self._send_json(mon.block_game_session(body))
-            elif path == "/api/gaming/unblock":
-                self._send_json(
-                    mon.unblock_game_rule(body.get("ruleId") or body.get("id") or "")
-                )
-            elif path == "/api/gaming/policy":
-                self._send_json(mon.set_gaming_policy(body))
-            elif path == "/api/gaming/sensor-heartbeat":
-                self._send_json(mon.record_gaming_sensor_heartbeat(body))
-            elif path == "/api/gaming/setup-router-dns":
-                self._send_json(mon.configure_router_game_dns())
-            elif path == "/api/gaming/wireshark/analyze":
-                self._send_json(mon.analyze_wireshark_capture(body))
-            elif path == "/api/gaming/wireshark/config":
-                self._send_json(mon.set_wireshark_config(body))
+            elif path.startswith("/api/gaming/"):
+                self._handle_gaming_post(mon, path, body)
             else:
                 pos_match = re.fullmatch(
                     r"/api/topology/node/([^/]+)/position", path
@@ -639,8 +514,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     self._send_error_json("Not found", 404)
-        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-            pass
         except (ValueError, RuntimeError) as exc:
             self._send_error_json(str(exc), 400)
         except (OSError, TimeoutError) as exc:
@@ -650,7 +523,273 @@ class RequestHandler(BaseHTTPRequestHandler):
             print(f"[http] POST {path} failed unexpectedly: {exc}", flush=True)
             self._send_error_json("Internal server error", 500)
 
-    def _handle_dashboard_action(self, mon: object, path: str) -> None:
+    def _handle_network_post(self, mon: Monitor, path: str, body: dict) -> None:
+        if path == "/api/devices":
+            created = mon.add_device(body)
+            self._send_json(created, 201)
+            mon.broadcast(
+                "telemetry",
+                {
+                    "timestamp": utc_now(),
+                    "router": mon.router_state,
+                    "isp": mon.get_isp_state(),
+                    "devices": mon._hydrated_devices(),
+                    "activeAlerts": mon.get_active_alerts(),
+                    "alertStats": mon.get_alert_stats(),
+                },
+            )
+        elif path == "/api/devices/connection":
+            self._send_device_connection(mon, body.get("ip"), check_now=True)
+        elif path == "/api/devices/upstream":
+            try:
+                mon.set_device_upstream(str(body.get("deviceId") or ""), str(body.get("upstreamDeviceId") or ""))
+            except LookupError as exc:
+                self._send_error_json(str(exc), 404)
+            else:
+                active = mon.get_active_alerts()
+                mon.broadcast("alert_updated", {"deviceId": body.get("deviceId")})
+                self._send_json({"success": True, "activeAlerts": active})
+        elif path == "/api/devices/connection/snmp":
+            if self._allow_local_dashboard("Enter the SNMP community from the local dashboard"):
+                try:
+                    self._send_json(mon.read_device_snmp(body.get("ip"), body.get("community")))
+                except LookupError as exc:
+                    self._send_error_json(str(exc), 404)
+        elif path == "/api/devices/probe-all":
+            results = mon.probe_all_devices()
+            self._send_json({
+                "success": True,
+                "devices": results,
+                "activeAlerts": mon.get_active_alerts(),
+                "inventory": mon.get_inventory(),
+            })
+            mon.broadcast(
+                "telemetry",
+                {
+                    "timestamp": utc_now(),
+                    "router": mon.router_state,
+                    "isp": mon.get_isp_state(),
+                    "devices": results,
+                    "activeAlerts": mon.get_active_alerts(),
+                    "alertStats": mon.get_alert_stats(),
+                },
+            )
+        elif path == "/api/network/sync-infrastructure":
+            sync_res = mon.sync_infrastructure_devices()
+            results = mon.probe_all_devices()
+            self._send_json({
+                "success": True,
+                "sync": sync_res,
+                "devices": results,
+                "inventory": mon.get_inventory(),
+                "activeAlerts": mon.get_active_alerts(),
+            })
+            mon.broadcast(
+                "telemetry",
+                {
+                    "timestamp": utc_now(),
+                    "router": mon.router_state,
+                    "isp": mon.get_isp_state(),
+                    "devices": results,
+                    "activeAlerts": mon.get_active_alerts(),
+                    "alertStats": mon.get_alert_stats(),
+                },
+            )
+        elif re.fullmatch(r"/api/devices/[^/]+/probe", path):
+            device_id = _safe_key(path.split("/")[-2])
+            device = next(
+                (item for item in mon.get_devices() if item["id"] == device_id),
+                None,
+            )
+            if device is None:
+                self._send_error_json("Device not found", 404)
+                return
+            result = mon.probe_device(device)
+            mon.latest_devices[result["ip"]] = result
+            mon.enrich_fleet_diagnostics(list(mon.latest_devices.values()))
+            self._send_json(result)
+            mon.broadcast(
+                "telemetry",
+                {
+                    "timestamp": utc_now(),
+                    "router": mon.router_state,
+                    "isp": mon.get_isp_state(),
+                    "devices": mon._hydrated_devices(),
+                    "activeAlerts": mon.get_active_alerts(),
+                    "alertStats": mon.get_alert_stats(),
+                },
+            )
+        elif path in {"/api/router/access/block", "/api/router/access/restore"}:
+            if not self._allow_local_dashboard():
+                return
+            result = (
+                mon.block_gateway_device(body) if path.endswith("/block")
+                else mon.restore_gateway_device(body.get("ruleId"))
+            )
+            self._send_json(result)
+        elif path == "/api/router/refresh":
+            router = mon.probe_router()
+            fleet = mon.get_router_fleet()
+            mon.broadcast("router_update", {**router, "fleet": fleet})
+            self._send_json({"router": router, "routers": fleet})
+        elif path in {"/api/router/config", "/api/routers/config"}:
+            target_ip = mon.update_router_config(
+                body,
+                select_primary=path == "/api/router/config" and body.get("isPrimary") is not False,
+            )
+            fleet = mon.probe_routers_fleet()
+            matched_router = next(
+                (r for r in fleet if r.get("ip") == target_ip),
+                mon.router_state,
+            )
+            mon.broadcast(
+                "router_update",
+                {**mon.router_state, "fleet": fleet},
+            )
+            self._send_json({"success": True, "router": matched_router, "routers": fleet})
+        elif path == "/api/router/simulate":
+            self._simulate_port(mon, body)
+        elif path == "/api/network/import-devices":
+            self._import_devices(mon, body)
+        elif path == "/api/network/discover":
+            self._send_json(mon.discover_devices())
+        elif path == "/api/network/inventory/authorize":
+            mac = body.get("mac", "")
+            updated = mon.authorize_device(mac)
+            if not updated:
+                self._send_error_json("Discovered device not found", 404)
+            else:
+                inventory = mon.get_inventory()
+                mon.broadcast("inventory_update", {"inventory": inventory})
+                self._send_json({"success": True, "inventory": inventory})
+        elif path == "/api/network/inventory/review":
+            if not isinstance(body.get("ignored"), bool):
+                raise ValueError("Choose whether to ignore this device")
+            if not mon.set_device_review_ignored(body.get("mac", ""), body["ignored"]):
+                self._send_error_json("Pending device review not found", 404)
+            else:
+                inventory = mon.get_inventory()
+                mon.broadcast("inventory_update", {"inventory": inventory})
+                self._send_json({"success": True, "inventory": inventory})
+        elif path == "/api/network/inventory/favorite":
+            fav = mon.toggle_favorite(str(body.get("asset_key", "")))
+            self._send_json({
+                "success": True,
+                "favorite": fav,
+                "inventory": mon.get_inventory(),
+                "devices": mon._hydrated_devices(),
+            })
+        elif path == "/api/network/inventory/archive":
+            archived = mon.toggle_archive(str(body.get("asset_key", "")))
+            self._send_json({
+                "success": True,
+                "archived": archived,
+                "inventory": mon.get_inventory(),
+                "devices": mon.get_devices(),
+            })
+        elif path == "/api/network/events/clear":
+            self._send_json(mon.clear_events())
+        else:
+            self._send_error_json("Not found", 404)
+
+    def _send_device_connection(self, mon: Monitor, ip: object, *, check_now: bool = False) -> None:
+        try:
+            self._send_json(mon.get_device_connection(ip, check_now=check_now))
+        except LookupError as exc:
+            self._send_error_json(str(exc), 404)
+
+    def _handle_gaming_post(self, mon: Monitor, path: str, body: dict) -> None:
+        if path == "/api/gaming/detect":
+            if str(body.get("detectionMethod") or "").strip() == ANDROID_APP_DETECTION:
+                raise ValueError("Android app reports use the local Android sensor endpoint")
+            result = mon.record_game_detection(body, include_activity=body.get("includeActivity") is not False)
+            self._send_json(result, 201)
+        elif path == "/api/gaming/android":
+            if self._allow_local_dashboard("Android game reports require a local sensor"):
+                self._send_json(mon.report_android_game_activity(body))
+        elif path == "/api/gaming/endpoint":
+            self._handle_game_endpoint(mon, body)
+        elif path == "/api/gaming/scan":
+            self._send_json(mon.scan_lan_for_games(include_topology_refresh=True))
+        elif path == "/api/gaming/clear":
+            self._send_json(mon.clear_game_activity())
+        elif path == "/api/gaming/dismiss":
+            if body.get("id"):
+                self._send_json(mon.dismiss_game_session(body.get("id", "")))
+            else:
+                self._send_json(
+                    mon.mark_game_session_ended_by_ip_game(
+                        body.get("ip", ""), body.get("gameId", "")
+                    )
+                )
+        elif path == "/api/gaming/block":
+            if not self._allow_local_dashboard():
+                return
+            if body.get("scope") in ("device_throttle", "device_wifi_cut"):
+                body["routerOnly"] = True
+            self._send_json(mon.block_game_session(body))
+        elif path == "/api/gaming/unblock":
+            if not self._allow_local_dashboard():
+                return
+            result = mon.unblock_game_rule(body.get("ruleId") or body.get("id") or "")
+            self._send_json(result, 200 if result["success"] else 409)
+        elif path == "/api/gaming/policy":
+            self._send_json(mon.set_gaming_policy(body))
+        elif path == "/api/gaming/sensor-heartbeat":
+            self._send_json(mon.record_gaming_sensor_heartbeat(body))
+        elif path == "/api/gaming/setup-router-dns":
+            self._send_json(mon.configure_router_game_dns())
+        elif path == "/api/gaming/wireshark/analyze":
+            self._send_json(mon.analyze_wireshark_capture(body))
+        elif path == "/api/gaming/wireshark/config":
+            self._send_json(mon.set_wireshark_config(body))
+        else:
+            self._send_error_json("Not found", 404)
+
+    def _handle_game_endpoint(self, mon: Monitor, body: dict) -> None:
+        token = os.environ.get("PULSE_GAME_ENDPOINT_TOKEN", "")
+        auth = self.headers.get("Authorization", "").encode("utf-8")
+        if not token or not hmac.compare_digest(auth, f"Bearer {token}".encode("utf-8")):
+            self._send_error_json("Endpoint enrollment token is required", 403)
+            return
+
+        peer_ip = self.client_address[0]
+        ip = str(body.get("ip") or peer_ip) if ipaddress.ip_address(peer_ip).is_loopback else peer_ip
+        if not mon._is_real_lan_client_ip(ip):
+            raise ValueError("Endpoint must be in a monitored LAN subnet")
+        if body.get("heartbeat") is True:
+            mon.note_game_endpoint(ip)
+            self._send_json({"success": True})
+            return
+        player = body.get("player")
+        if (
+            not isinstance(player, str) or not player.strip() or len(player) > 128
+            or any(not char.isprintable() for char in player)
+        ):
+            raise ValueError("A Windows account name is required")
+        player = player.strip().casefold()
+
+        if body.get("ended") is True:
+            signature = mon._match_game_signature(game_id=body.get("gameId"))
+            if signature is None:
+                raise ValueError("Unrecognized game")
+            result = mon.mark_game_session_ended_by_ip_game(
+                ip, signature["id"], player=player, include_activity=False,
+            )
+        else:
+            process = body.get("process")
+            if not isinstance(process, str) or mon._match_game_signature(process=process) is None:
+                raise ValueError("Unrecognized game process")
+            result = mon.record_game_detection({
+                "ip": ip,
+                "process": process,
+                "detectionMethod": MANAGED_PROCESS_DETECTION,
+                "skipAutoPrevent": True,
+            }, player=player, include_activity=False)
+        mon.note_game_endpoint(ip)
+        self._send_json({"success": result["success"]})
+
+    def _handle_dashboard_action(self, mon: Monitor, path: str) -> None:
         return_to = "/devices"
         try:
             form = self._form_body()
@@ -698,7 +837,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             print(f"[http] Dashboard action {path} failed: {exc}", flush=True)
             self._redirect("The requested network operation failed.", return_to)
 
-    def do_PUT(self) -> None:
+    def put(self, request) -> None:
+        if not self._allow_write_request():
+            return
         mon = _active_monitor()
         path = urllib.parse.urlsplit(self.path).path
         topo_match = re.fullmatch(r"/api/topology/node/([^/]+)", path)
@@ -725,7 +866,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_error_json(str(exc), 400)
 
-    def do_DELETE(self) -> None:
+    def delete(self, request) -> None:
+        if not self._allow_write_request():
+            return
         mon = _active_monitor()
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
@@ -767,7 +910,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
         self._send_json({"success": deleted})
 
-    def _import_devices(self, mon: object, body: dict) -> None:
+    def _import_devices(self, mon: Monitor, body: dict) -> None:
         items = body.get("devices")
         if not isinstance(items, list) or not items:
             raise ValueError("No devices provided")
@@ -804,11 +947,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             "errors": errors,
         })
 
-    def _simulate_port(self, mon: object, body: dict) -> None:
+    def _simulate_port(self, mon: Monitor, body: dict) -> None:
         try:
-            index = int(body.get("portIndex"))
+            index = int(body["portIndex"])
             speed = int(body.get("speed", 1000))
-        except (TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise ValueError("portIndex and speed must be integers") from exc
         target_ip = str(body.get("ip") or mon.router_state.get("ip") or "").strip()
         with mon.lock:
@@ -843,7 +986,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._send_json({"success": True, "port": port})
         mon.broadcast("router_update", {**mon.router_state, "fleet": mon.get_router_fleet()})
 
-    def _test_drill(self, mon: object, body: dict) -> None:
+    def _test_drill(self, mon: Monitor, body: dict) -> None:
         now = utc_now()
         drill_type = str(body.get("type") or "DUPLEX_COLLISION")
         is_outage = drill_type == "AP_OUTAGE"
@@ -879,7 +1022,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._send_json({"success": True, "alert": alert})
 
     def _alert_action(
-        self, mon: object, key: str, action: str, body: dict
+        self, mon: Monitor, key: str, action: str, body: dict
     ) -> None:
         alert = mon.active_alerts.get(key)
         if alert is None:
@@ -919,6 +1062,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({"success": dismissed is not None})
             mon.broadcast("alert_dismissed", {"key": key})
         else:
+            if alert.get("isDrill"):
+                raise ValueError("Simulation alerts use test data.")
             ip = alert.get("ip") or mon.config["router"]["ip"]
             port = int(alert.get("port") or 80)
             resolved_now = False
@@ -931,13 +1076,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                     (p for p in router_state.get("ports", []) if f"port-{p.get('id')}" == key),
                     {},
                 )
+                port_unknown = port_row.get("linkStatus") not in {"connected", "disconnected"}
                 result = {
                     "alive": router_state.get("reachable", False),
                     "latencyMs": None,
                     "method": "Router Port Check",
-                    "status": "HEALTHY" if resolved_now else str(port_row.get("status") or "UNKNOWN").upper(),
+                    "status": "UNKNOWN" if port_unknown else "HEALTHY" if resolved_now else str(port_row.get("status") or "UNKNOWN").upper(),
                     "feedback": (
-                        f"{port_row.get('name', 'Router port')} returned to normal."
+                        "The router did not report the port's current link state."
+                        if port_unknown
+                        else f"{port_row.get('name', 'Router port')} returned to normal."
                         if resolved_now
                         else f"Issue persists ({port_row.get('speedText', 'Unavailable')} / {port_row.get('duplex', 'Unknown')})."
                     ),
@@ -971,7 +1119,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
                 probe_res = mon.probe_device(dev)
                 mon.latest_devices[ip] = probe_res
-                alive = bool(probe_res.get("alive"))
+                observed_only = probe_res.get("connectivityState") == "ARP_OBSERVED"
+                alive = bool(probe_res.get("alive")) and not observed_only
                 latency = probe_res.get("latencyMs")
                 method = probe_res.get("probeMethod") or "TCP + ICMP"
                 still_active = key in mon.active_alerts
@@ -981,16 +1130,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "latencyMs": latency,
                     "method": method,
                     "status": (
-                        "ONLINE"
+                        "UNCONFIRMED"
+                        if observed_only
+                        else "ONLINE"
                         if alive and probe_res.get("status") == "online"
                         else ("DEGRADED" if alive else "OFFLINE")
                     ),
                     "feedback": (
-                        f"Responded in {latency} ms via {method}."
+                        "ARP entry observed. TCP and ICMP received no reply."
+                        if observed_only
+                        else f"Responded in {latency} ms via {method}."
                         if alive
                         else f"No response on TCP ports or ICMP ping ({method})."
                     ),
-                    "testedAt": utc_now(),
+                    "testedAt": probe_res.get("lastChecked") or utc_now(),
                 }
                 mon.broadcast(
                     "telemetry",
@@ -1006,7 +1159,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             if key in mon.active_alerts:
                 alert["lastProbeResult"] = result
-                alert["lastChecked"] = utc_now()
+                alert["lastChecked"] = result["testedAt"]
                 mon.save_alert(alert)
             self._send_json({
                 "success": True,
@@ -1016,48 +1169,3 @@ class RequestHandler(BaseHTTPRequestHandler):
             })
             if not resolved_now:
                 mon.broadcast("alert_updated", alert)
-
-
-def run_server(port: int = PORT) -> None:
-    mon = _active_monitor()
-    server = DashboardServer(("0.0.0.0", port), RequestHandler)
-    mon.start()
-
-    def _open_browser() -> None:
-        time.sleep(1.0)
-        try:
-            import webbrowser
-            if os.environ.get("PULSE_NO_BROWSER") != "1" and not os.path.exists("/.dockerenv"):
-                webbrowser.open(f"http://localhost:{port}")
-        except Exception:
-            pass
-
-    threading.Thread(target=_open_browser, daemon=True, name="browser-opener").start()
-
-    print("=======================================================", flush=True)
-    print("  PULSE NETWORK MONITORING SYSTEM (Python)", flush=True)
-    print(f"  Local Web Dashboard: http://localhost:{port}", flush=True)
-    try:
-        lan_ip = None
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("192.168.0.1", 80))
-            lan_ip = s.getsockname()[0]
-        if lan_ip and not lan_ip.startswith("127."):
-            print(f"  Mobile / LAN API URL: http://{lan_ip}:{port}", flush=True)
-    except OSError:
-        pass
-    device_poll_sec = max(5, min(20, int(mon.config.get("devicePollIntervalSec") or 15)))
-    print(
-        "  LAN discovery: live ARP/infra sync every 45s + full LAN sweep every 5m",
-        flush=True,
-    )
-    print(f"  Monitored device probes: TCP/ICMP every {device_poll_sec} seconds", flush=True)
-    print("=======================================================", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping Pulse Network Monitor...", flush=True)
-    finally:
-        mon.stop()
-        server.server_close()
-

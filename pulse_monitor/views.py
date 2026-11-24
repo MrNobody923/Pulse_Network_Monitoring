@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import html
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .engine import Monitor
 
 
 REFRESH_SECONDS = 15
@@ -59,53 +63,60 @@ def _timestamp(value: object) -> str:
 def dashboard_rows(snapshot: dict) -> list[dict]:
     inventory_by_ip: dict[str, dict] = {}
     for item in snapshot["networkInventory"]:
-        if item.get("ip") and item["ip"] not in inventory_by_ip:
-            inventory_by_ip[item["ip"]] = item
+        ip = item.get("ip")
+        if ip and (ip not in inventory_by_ip or (item.get("isOnline") and not inventory_by_ip[ip].get("isOnline"))):
+            inventory_by_ip[ip] = item
     rows = []
-    monitored_ips = set()
+    merged_macs = set()
     for device in snapshot["devices"]:
         ip = device["ip"]
-        monitored_ips.add(ip)
         asset = inventory_by_ip.get(ip, {})
+        if (device.get("mac") and asset.get("mac") != device["mac"]) or asset.get("isOnline") is False:
+            asset = {}
+        if asset.get("mac"):
+            merged_macs.add(asset["mac"])
+        mac = device.get("mac") or asset.get("mac", "")
+        asset_key = f"mac:{mac}" if mac else f"ip:{ip}"
         rows.append({
             "name": device["name"],
             "ip": ip,
-            "mac": device.get("mac") or asset.get("mac", ""),
+            "mac": asset.get("observedMac", asset.get("mac", "")),
             "vendor": asset.get("vendor", device.get("type", "Monitored device")),
             "status": device.get("status", "unknown"),
             "monitored": True,
-            "online": device.get("alive") is True
-            or device.get("status") in {"online", "warning"},
+            "online": device["directlyReachable"] if isinstance(device.get("directlyReachable"), bool)
+            else device.get("status") in {"online", "warning"},
             "favorite": bool(device.get("favorite") or asset.get("favorite")),
             "archived": bool(device.get("archived") or asset.get("archived")),
             "favorite_key": (
-                f"mac:{device.get('mac') or asset.get('mac')}"
-                if device.get("mac") or asset.get("mac")
-                else f"ip:{ip}"
+                (device.get("favoriteKey") if device.get("favorite") else None)
+                or (asset.get("favoriteKey") if asset.get("favorite") else None)
+                or asset_key
             ),
+            "asset_key": asset_key,
             "authorized": True,
             "is_new": False,
             "first_seen": asset.get("firstSeen", ""),
             "last_seen": asset.get("lastSeen") or device.get("lastChecked", ""),
         })
     for asset in snapshot["networkInventory"]:
-        if asset["ip"] in monitored_ips:
+        if asset.get("mac") in merged_macs:
             continue
+        asset_key = f"mac:{asset['mac']}" if asset.get("mac") else f"ip:{asset['ip']}"
         rows.append({
             "name": asset.get("name") or asset["ip"],
             "ip": asset["ip"],
-            "mac": asset.get("mac", ""),
+            "mac": asset.get("observedMac", asset.get("mac", "")),
             "vendor": asset.get("vendor") or "LAN Client",
             "status": "online" if asset.get("isOnline") else "offline",
             "online": bool(asset.get("isOnline")),
             "monitored": False,
             "favorite": bool(asset.get("favorite")),
-            "favorite_key": (
-                f"mac:{asset['mac']}" if asset.get("mac") else f"ip:{asset['ip']}"
-            ),
+            "favorite_key": asset.get("favoriteKey") or asset_key,
+            "asset_key": asset_key,
             "authorized": bool(asset.get("authorized")),
             "archived": bool(asset.get("archived")),
-            "is_new": bool(asset.get("isNew") and not asset.get("authorized")),
+            "is_new": not asset.get("authorized") and not asset.get("reviewIgnored"),
             "first_seen": asset.get("firstSeen", ""),
             "last_seen": asset.get("lastSeen", ""),
         })
@@ -137,7 +148,7 @@ def render_table(
             if row["monitored"] and row["status"] == "offline" and not row["archived"]
         ]
     elif filter_by == "offline":
-        rows = [row for row in rows if not row["online"] and not row["archived"]]
+        rows = [row for row in rows if row["status"] == "offline" and not row["archived"]]
     elif filter_by == "disconnected":
         rows = [
             row
@@ -177,7 +188,7 @@ def render_table(
         status_class = (
             "offline"
             if status == "offline"
-            else ("online" if status in {"online", "warning"} else "warning")
+            else ("online" if status == "online" else "warning")
         )
         status_label = {
             "offline": "DOWN" if row["monitored"] else "OFFLINE / DISCONNECTED",
@@ -217,7 +228,7 @@ def render_table(
             output.append('<span class="muted">—</span> ')
         output.append(
             '<form class="inline-form" method="post" action="/actions/archive">'
-            f'<input type="hidden" name="asset_key" value="{_e(row["favorite_key"])}">'
+            f'<input type="hidden" name="asset_key" value="{_e(row["asset_key"])}">'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             f'<button type="submit">{"Restore" if row["archived"] else "Archive"}</button></form>'
         )
@@ -227,7 +238,7 @@ def render_table(
 
 
 def render_page(
-    monitor_instance: object,
+    monitor_instance: Monitor,
     path: str,
     message: str = "",
     filter_by: str = "all",
@@ -244,7 +255,7 @@ def render_page(
     down_count = sum(
         1 for row in active_rows if row["monitored"] and row["status"] == "offline"
     )
-    offline_count = sum(1 for row in active_rows if not row["online"])
+    offline_count = sum(1 for row in active_rows if row["status"] == "offline")
     new_count = sum(1 for row in active_rows if row["is_new"])
 
     title, subtitle = {
@@ -260,7 +271,7 @@ def render_page(
         path,
         (
             "Network overview",
-            "Live device health, daily LAN scan status, and row-by-row asset list.",
+            "Device health, LAN discovery status, and asset inventory.",
         ),
     )
     nav = [
@@ -273,7 +284,9 @@ def render_page(
         for href, label in nav
     )
     notice = f'<div class="notice">{_e(message)}</div>' if message else ""
-    last_scan = _timestamp(monitor_instance.last_discovery_at())
+    last_scan = _timestamp(snapshot.get("lastDiscoveryAt"))
+    scan_mode = "Daily" if snapshot.get("config", {}).get("backgroundScansEnabled") else "On demand"
+    scan_summary = f'LAN discovery: {scan_mode} · Last completed scan: {_e(last_scan)}'
     target_path = "/devices" if path == "/devices" else "/"
     return_to = f"{target_path}?filter={filter_by}"
 
@@ -360,7 +373,7 @@ def render_page(
         (
             "New devices",
             new_count,
-            "New devices detected in daily scan",
+            "Newly discovered devices awaiting review",
             "cyan" if new_count else "",
             "new",
         ),
@@ -403,7 +416,7 @@ def render_page(
             f'<section class="cards">{overview_cards}</section>'
             '<section class="panel" id="lan-assets"><div class="panel-head"><div>'
             "<h2>LAN asset inventory (List View)</h2>"
-            f'<div class="footnote">Automatic daily scan: Active (runs every 24h) · Last completed scan: {_e(last_scan)}</div>'
+            f'<div class="footnote">{scan_summary}</div>'
             '</div><div class="actions"><form method="post" action="/actions/discover">'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             '<button class="primary" type="submit">Scan local LAN now</button></form>'
@@ -412,7 +425,7 @@ def render_page(
             f'<div class="filter-pills">{pills_html}</div>'
             f"{render_table(rows, filter_by, return_to)}</section>"
             '<section class="panel"><div class="panel-head"><div><h2>Add a monitored device</h2>'
-            '<div class="footnote">Reachability checks run every 30 seconds; devices that fail TCP and ICMP checks appear as DOWN.</div></div></div>'
+            '<div class="footnote">Reachability checks use TCP, ICMP and local ARP observations.</div></div></div>'
             '<form method="post" action="/actions/add-device" class="form-grid">'
             '<div class="field"><label for="name">Name</label><input id="name" name="name" required maxlength="120"></div>'
             '<div class="field"><label for="ip">IP address</label><input id="ip" name="ip" required inputmode="decimal"></div>'
@@ -436,6 +449,7 @@ def render_page(
                     "online": True,
                     "favorite": False,
                     "favorite_key": "",
+                    "asset_key": "",
                     "authorized": True,
                     "is_new": False,
                     "first_seen": "",
@@ -466,13 +480,13 @@ def render_page(
         content.append(f'<section class="cards">{overview_cards}</section>')
         content.append(
             '<section class="panel"><div class="panel-head"><div><h2>Down monitored devices</h2>'
-            '<div class="footnote">Device availability checks run every 30 seconds.</div></div>'
+            '<div class="footnote">Devices appear here after an offline probe result.</div></div>'
             '<a class="button" href="/devices?filter=down">View down devices</a></div>'
             f'{render_table(rows, "down", return_to)}</section>'
         )
         content.append(
             '<section class="panel" id="lan-assets"><div class="panel-head"><div><h2>LAN asset discovery (List View)</h2>'
-            f'<div class="footnote">Automatic daily wired &amp; Wi-Fi LAN scan enabled (every 24h) · Last completed: {_e(last_scan)}</div></div>'
+            f'<div class="footnote">{scan_summary}</div></div>'
             '<div class="actions"><form method="post" action="/actions/discover">'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             '<button class="primary" type="submit">Scan local LAN now</button></form>'
@@ -480,7 +494,7 @@ def render_page(
             f'<div class="cards-lan">{lan_asset_cards}</div>'
             f'<div class="filter-pills">{pills_html}</div>'
             f"{render_table(rows, filter_by, return_to)}"
-            '<div class="footnote">Daily discovery automatically scans connected private wired/Wi-Fi subnets and highlights newly connected devices.</div>'
+            '<div class="footnote">Discovered devices awaiting review appear in the New devices filter.</div>'
             "</section>"
         )
         recent_events = snapshot["networkEvents"][:8]
@@ -502,9 +516,10 @@ def render_page(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
-        f"<title>{_e(title)} · Pulse Network Monitor</title>"
+        f"<title>{_e(title)} · Vertex Sentry</title>"
+        '<link rel="icon" type="image/png" href="/vertex-sentry-192.png">'
         f'<style>{PAGE_STYLE}</style></head><body><div class="layout">'
-        '<aside class="side"><div class="brand">Pulse<small>NETWORK MONITOR</small></div>'
+        '<aside class="side"><div class="brand"><img src="/vertex-sentry-192.png" width="36" height="36" alt="">Vertex Sentry</div>'
         '<div class="label">WORKSPACE</div><nav class="nav" aria-label="Main navigation">'
         f"{nav_html}</nav><div class=\"side-foot\">Python monitoring · refreshing every {REFRESH_SECONDS}s</div></aside>"
         '<div class="workspace"><header class="top"><div class="top-title">Network operations</div>'

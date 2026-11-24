@@ -79,47 +79,6 @@
   text-align: center;
 }
 
-.nmap-grade-ring {
-  width: 92px;
-  height: 92px;
-  border-radius: 50%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  border: 4px solid var(--accent-green);
-  background: rgba(16, 185, 129, 0.1);
-  margin-bottom: 10px;
-}
-
-.nmap-grade-ring.grade-b {
-  border-color: var(--accent-cyan);
-  background: rgba(6, 182, 212, 0.1);
-}
-
-.nmap-grade-ring.grade-c {
-  border-color: var(--accent-amber);
-  background: rgba(245, 158, 11, 0.12);
-}
-
-.nmap-grade-ring.grade-f {
-  border-color: var(--accent-red);
-  background: rgba(239, 68, 68, 0.14);
-}
-
-.nmap-grade-letter {
-  font-size: 2rem;
-  font-weight: 900;
-  line-height: 1;
-}
-
-.nmap-grade-score {
-  font-size: 0.72rem;
-  color: var(--text-dim);
-  font-weight: 700;
-  margin-top: 2px;
-}
-
 .nmap-kpi-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
