@@ -2,15 +2,24 @@
 
 import re
 
+from django.contrib import admin
+from django.contrib.auth.views import LoginView, LogoutView
+from django.contrib.staticfiles.views import serve as serve_static
 from django.http import HttpResponseRedirect, JsonResponse
-from django.urls import re_path
+from django.urls import path, re_path
 from django.views.decorators.http import require_safe
 
 from .http_handler import RESOURCE_ROUTES, RequestHandler
+from .staff import StaffLoginView
+from . import device_pages
 
 
 def not_found(request, exception=None):
     return JsonResponse({"error": "Not found"}, status=404)
+
+
+def server_error(request):
+    return JsonResponse({"error": "Internal server error — check the server terminal log for details."}, status=500)
 
 
 @require_safe
@@ -19,7 +28,15 @@ def workspace(request, section):
 
 
 handler404 = not_found
+handler500 = server_error
 urlpatterns = [
+    path("healthz", require_safe(lambda request: JsonResponse({"ok": True})), name="liveness"),
+    path("login/", StaffLoginView.as_view(), name="staff-login"),
+    path("logout/", LogoutView.as_view(), name="staff-logout"),
+    path("staff-admin/", admin.site.urls),
+    re_path(r"^static/(?P<path>admin/.+)$", serve_static, {"insecure": True}),
+    re_path(r"^devices/?$", device_pages.inventory),
+    path("devices/form/", device_pages.device_form),
     re_path(r"^$", RequestHandler.as_view(http_method_names=["get"]), name="dashboard"),
     re_path(r"^(?P<section>overview|triage|topology|internet|router|alerts|ping|nmap|toolkit|gaming)/?$", workspace),
 ]
@@ -57,7 +74,6 @@ for route in (
     "api/topology",
     "api/v1/health",
     "api/v1/summary",
-    "devices",
     "events",
     "favicon.ico",
     "index.html",

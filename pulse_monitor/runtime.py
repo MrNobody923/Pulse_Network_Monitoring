@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, cast
 
 from django.core.servers.basehttp import ThreadedWSGIServer, WSGIRequestHandler
 from django.core.wsgi import get_wsgi_application
+from django.core.management import call_command
+from .sensor_auth import sensor_token
 
 if TYPE_CHECKING:
     from .engine import Monitor
@@ -75,7 +77,21 @@ def run_server(port: int = PORT) -> None:
     bind_host = os.environ.get("PULSE_BIND_HOST", "127.0.0.1")
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pulse_monitor.django_settings")
     application = get_wsgi_application()
-    server = DashboardServer((bind_host, port), DashboardTransport)
+    call_command("migrate", interactive=False, verbosity=0)
+    sensor_token(initialize=True)
+    try:
+        server = DashboardServer((bind_host, port), DashboardTransport)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 10048 or exc.errno == 98:
+            print(f"[Vertex Sentry] Port {port} is already in use — opening http://localhost:{port} ...", flush=True)
+            try:
+                import webbrowser
+                if os.environ.get("PULSE_NO_BROWSER") != "1":
+                    webbrowser.open(f"http://localhost:{port}")
+            except Exception:
+                pass
+            return
+        raise
     server.set_app(application)
     port = server.server_port
     sensor = None
@@ -94,7 +110,7 @@ def run_server(port: int = PORT) -> None:
     print("  VERTEX SENTRY", flush=True)
     print(f"  Local Web Dashboard: http://localhost:{port}", flush=True)
     print(f"  HTTP listener: {bind_host}:{port}", flush=True)
-    device_poll_sec = max(5, min(20, int(mon.config.get("devicePollIntervalSec") or 15)))
+    device_poll_sec = mon.device_probe_interval({"type": "gateway"})
     scan_status = "enabled" if os.environ.get("PULSE_ENABLE_BACKGROUND_SCANS") == "1" else "off"
     print(f"  Background LAN sweeps: {scan_status}", flush=True)
     print(f"  Monitored device probes: core every {device_poll_sec}s, AP/server every 30s, clients every 60s", flush=True)
@@ -102,6 +118,7 @@ def run_server(port: int = PORT) -> None:
     try:
         mon.start()
         if sys.platform == "win32" and os.environ.get("PULSE_HOST_GAME_SENSOR") != "0":
+            os.environ.setdefault("PULSE_ENABLE_DNS_FORWARDING", "1")
             from host_game_sensor import HostGameSensor
 
             api_host = "127.0.0.1" if bind_host in {"", "0.0.0.0"} else bind_host
@@ -123,4 +140,3 @@ def run_server(port: int = PORT) -> None:
             sensor_thread.join(timeout=3.0)
         mon.stop()
         server.server_close()
-

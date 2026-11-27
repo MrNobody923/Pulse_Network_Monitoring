@@ -608,12 +608,11 @@ class IspSpeedMixin:
         loss_pct = round(((6 - len(rtts)) / 6.0) * 100.0, 1)
 
         # Phase 2: Local HTTP response transfer measurement (when an HTTP/HTTPS port is open)
-        dl_mbps = 0.0
-        ul_mbps = 0.0
+        dl_mbps = None
         method = "LAN ICMP/TCP Latency"
         if open_http:
             port, scheme = open_http
-            method = f"LAN {scheme.upper()}:{port} Link Test"
+
             ctx = ssl._create_unverified_context() if scheme == "https" else None
             total_dl_bytes = 0
             dl_started = time.perf_counter()
@@ -630,7 +629,10 @@ class IspSpeedMixin:
                     conn.request("GET", "/", headers={"Connection": "close", "User-Agent": "VertexSentry/2.1"})
                     resp = conn.getresponse()
                     body = resp.read(262144)
-                    total_dl_bytes += len(body) + 256
+                    if not body or not 200 <= resp.status < 300:
+                        break
+                    total_dl_bytes += len(body)
+                    method = f"LAN {scheme.upper()}:{port} response body transfer"
                 except Exception:
                     break
                 finally:
@@ -660,61 +662,13 @@ class IspSpeedMixin:
                         },
                     )
 
-            # Phase 3: Local HTTP write throughput probe (small 16 KB payload, non-intrusive)
-            payload = b"0" * 16384
-            total_ul_bytes = 0
-            ul_started = time.perf_counter()
-            for i in range(12):
-                if (time.perf_counter() - ul_started) >= 1.5:
-                    break
-                conn = None
-                try:
-                    conn = (
-                        http.client.HTTPSConnection(clean_ip, port, timeout=1.0, context=ctx)
-                        if scheme == "https"
-                        else http.client.HTTPConnection(clean_ip, port, timeout=1.0)
-                    )
-                    conn.request("HEAD", "/", body=payload, headers={"Connection": "close", "Content-Length": str(len(payload))})
-                    resp = conn.getresponse()
-                    resp.read(4096)
-                    total_ul_bytes += len(payload)
-                except Exception:
-                    break
-                finally:
-                    if conn is not None:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                elapsed = max(0.005, time.perf_counter() - ul_started)
-                ul_mbps = round((total_ul_bytes * 8.0) / (elapsed * 1_000_000.0), 2)
-                if i % 3 == 0:
-                    self.broadcast(
-                        "speedtest_progress",
-                        {
-                            "phase": "upload",
-                            "phaseLabel": f"Testing local write rate to {label}...",
-                            "message": f"Measured {ul_mbps} Mbps to {label} ({clean_ip}:{port})",
-                            "currentMbps": ul_mbps,
-                            "downloadMbps": dl_mbps,
-                            "uploadMbps": ul_mbps,
-                            "pingMs": ping_ms,
-                            "jitterMs": jitter_ms,
-                            "progressPct": min(95, 74 + i * 2),
-                            "targetType": target_type,
-                            "targetIp": clean_ip,
-                            "targetName": label,
-                        },
-                    )
-
-        if open_http:
-            rating = (
-                f"{kind_label} LAN Link · {ping_ms} ms"
-                if loss_pct == 0
-                else f"{kind_label} LAN Link · {loss_pct}% packet loss"
-            )
-        else:
-            rating = f"{kind_label} Latency Only ({ping_ms} ms · no HTTP transfer port)"
+        rating = (
+            f"{kind_label} HTTP response rate · {dl_mbps} Mbps"
+            if dl_mbps is not None else f"{kind_label} Latency Only ({ping_ms} ms)"
+        )
+        summary = f"{label}: {ping_ms} ms latency · {loss_pct}% unanswered"
+        if dl_mbps is not None:
+            summary += f" · HTTP response rate {dl_mbps} Mbps"
 
         result = {
             "timestamp": utc_now(),
@@ -722,7 +676,7 @@ class IspSpeedMixin:
             "targetIp": clean_ip,
             "targetName": label,
             "downloadMbps": dl_mbps,
-            "uploadMbps": ul_mbps,
+            "uploadMbps": None,
             "pingMs": ping_ms,
             "jitterMs": jitter_ms,
             "packetLossPct": loss_pct,
@@ -741,11 +695,7 @@ class IspSpeedMixin:
                 **result,
                 "phase": "complete",
                 "phaseLabel": f"{kind_label} Speed Test Complete",
-                "message": (
-                    f"{label}: {dl_mbps} Mbps down / {ul_mbps} Mbps up · Ping {ping_ms} ms"
-                    if open_http
-                    else f"{label}: Ping {ping_ms} ms · Jitter {jitter_ms} ms · Loss {loss_pct}%"
-                ),
+                "message": summary,
                 "currentMbps": dl_mbps,
                 "progressPct": 100,
             },
@@ -754,7 +704,7 @@ class IspSpeedMixin:
             "SPEED_TEST",
             "INFO",
             f"{kind_label} Speed Test Complete",
-            f"Tested {label} ({clean_ip}): {dl_mbps} Mbps down / {ul_mbps} Mbps up · Ping {ping_ms} ms · Jitter {jitter_ms} ms ({method}).",
+            summary,
             ip=clean_ip,
             device_name=label,
         )

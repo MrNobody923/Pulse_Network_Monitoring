@@ -328,6 +328,7 @@ class Monitor(
             target=self._game_control_expiry_loop, daemon=True, name="game-control-expiry"
         ).start()
         threading.Thread(target=self._operations_loop, daemon=True, name="incident-notifications").start()
+        threading.Thread(target=self.refresh_live_arp_and_infra, daemon=True, name="startup-arp-sync").start()
         threading.Thread(target=self._switch_ports_loop, daemon=True, name="switch-ports").start()
         if sys.platform == "win32":
             threading.Thread(
@@ -367,7 +368,7 @@ class Monitor(
                     self.poll_router_logs_for_games()
             except Exception as exc:
                 print(f"[monitor] Realtime game loop warning: {exc}", flush=True)
-            self._stop.wait(4.0)
+            self._stop.wait(2.0)
 
     def _isp_ping_loop(self) -> None:
         while not self._stop.is_set():

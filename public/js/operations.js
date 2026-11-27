@@ -190,8 +190,8 @@ async function refreshOperations() {
       const chatEl = document.getElementById('notifTelegramChatId');
       const confirmEl = document.getElementById('notifOfflineConfirm');
       if (enabledEl) enabledEl.checked = Boolean(ns.enabled);
-      if (webhookEl) webhookEl.value = ns.webhookUrl || '';
-      if (tokenEl) tokenEl.value = ns.telegramBotToken || '';
+      if (webhookEl) webhookEl.placeholder = ns.hasWebhookUrl ? 'Configured · enter a replacement URL' : 'https://hooks.slack.com/services/...';
+      if (tokenEl) tokenEl.placeholder = ns.hasTelegramToken ? 'Configured · enter a replacement token' : 'Telegram bot token';
       if (chatEl) chatEl.value = ns.telegramChatId || '';
       if (confirmEl) confirmEl.value = String(ns.offlineConfirmCount || 1);
     }
@@ -209,17 +209,23 @@ async function saveNotificationSettings(event) {
   const feedback = document.getElementById('notifSettingsFeedback');
   if (button) button.disabled = true;
   if (feedback) feedback.textContent = 'Saving alert settings…';
+  const webhook = document.getElementById('notifWebhookUrl');
+  const removeWebhook = document.getElementById('notifRemoveWebhook');
+  const tokenInput = document.getElementById('notifTelegramToken');
   try {
     await apiJson('/api/operations/notifications', {
       method: 'POST',
       body: JSON.stringify({
         enabled: Boolean(document.getElementById('notifEnabled')?.checked),
-        webhookUrl: (document.getElementById('notifWebhookUrl')?.value || '').trim(),
-        telegramBotToken: (document.getElementById('notifTelegramToken')?.value || '').trim(),
+        webhookUrl: removeWebhook?.checked ? '' : (webhook?.value.trim() || undefined),
+        telegramBotToken: (tokenInput?.value || '').trim(),
         telegramChatId: (document.getElementById('notifTelegramChatId')?.value || '').trim(),
         offlineConfirmCount: Number(document.getElementById('notifOfflineConfirm')?.value || 1)
       })
     });
+    if (webhook) webhook.value = '';
+    if (removeWebhook) removeWebhook.checked = false;
+    if (tokenInput) tokenInput.value = '';
     if (feedback) feedback.textContent = 'Alert settings saved.';
     await refreshOperations();
   } catch (error) {

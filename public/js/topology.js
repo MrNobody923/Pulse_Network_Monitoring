@@ -466,7 +466,7 @@ function renderTopologyCanvas() {
           : hs === 'no_internet'
           ? `${n.latencyMs != null ? `${n.latencyMs} ms · ` : ''}NO INTERNET`
           : hs === 'degraded'
-          ? `${n.latencyMs ?? '—'} ms · ${n.packetLossPct ?? 0}% loss`
+          ? [n.latencyMs != null && `${n.latencyMs} ms`, n.packetLossPct != null && `${n.packetLossPct}% unanswered`].filter(Boolean).join(' · ') || 'Degraded'
           : n.latencyMs != null
           ? `${n.latencyMs} ms · OK`
           : n.monitored

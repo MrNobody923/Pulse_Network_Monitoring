@@ -40,6 +40,35 @@ def _build_eth_ipv4_tcp_frame(src_ip: str, dst_ip: str, src_port: int, dst_port:
 
 
 class AccuracyUpgradesTests(MonitorTestCase):
+    def test_notification_secrets_survive_partial_and_rejected_updates(self):
+        url = "https://hooks.example.test/secret"
+        self.monitor.save_notification_settings({"webhookUrl": url, "telegramChatId": "123"})
+        settings = self.monitor.save_notification_settings({"offlineConfirmCount": 2})["notificationSettings"]
+        self.assertTrue(settings["hasWebhookUrl"])
+        self.assertNotIn(url, str(self.monitor.get_operations()))
+        with self.assertRaises(ValueError):
+            self.monitor.save_notification_settings({"webhookUrl": "", "offlineConfirmCount": "invalid"})
+        self.assertEqual(self.monitor.config["notifications"]["webhookUrl"], url)
+        self.assertEqual(self.monitor.config["notifications"]["telegramChatId"], "123")
+        self.monitor.save_notification_settings({"webhookUrl": ""})
+        self.assertEqual(self.monitor.config["notifications"]["webhookUrl"], "")
+
+    def test_notification_retry_only_sends_to_outstanding_channels(self):
+        with self.monitor._connect() as db:
+            db.execute("INSERT INTO incident_notices VALUES ('incident', 'outage', '', '', '', '', 'pending', 0)")
+        with (
+            patch.object(self.monitor, "_alert_email_enabled", return_value=False),
+            patch.object(self.monitor, "_alert_webhook_enabled", return_value=True),
+            patch.object(self.monitor, "_alert_telegram_enabled", return_value=True),
+            patch.object(self.monitor, "_send_incident_webhook") as webhook,
+            patch.object(self.monitor, "_send_incident_telegram", side_effect=[OSError(), None]) as telegram,
+        ):
+            self.monitor._deliver_incident_notifications()
+            self.monitor._deliver_incident_notifications()
+        webhook.assert_called_once()
+        self.assertEqual(telegram.call_count, 2)
+        self.assertEqual(self.monitor.get_operations()["notifications"][0]["delivery"], "sent")
+
     def test_flapping_protection_debounces_single_offline_miss(self):
         self.monitor.config["thresholds"]["offlineConfirmCount"] = 2
         device = self.monitor.add_device(
@@ -288,11 +317,32 @@ class AccuracyUpgradesTests(MonitorTestCase):
         self.assertEqual(res["pingMs"], 1.4)
         self.assertEqual(res["packetLossPct"], 0.0)
         self.assertIn("Latency Only", res["rating"])
+        self.assertIsNone(res["downloadMbps"])
+        self.assertIsNone(res["uploadMbps"])
 
         with self.assertRaises(RuntimeError):
             self.monitor.run_speedtest(
                 target={"targetType": "device", "targetIp": "127.0.0.1", "targetName": "Loopback"}
             )
+
+    def test_lan_transfer_counts_successful_response_bodies_only(self):
+        target = {"targetType": "router", "targetIp": "192.168.10.1"}
+        with (
+            patch.object(self.monitor, "_probe_tcp_socket", return_value=(True, True, 1.0)),
+            patch.object(self.monitor, "_probe_icmp", return_value=(True, 1.0)),
+            patch("pulse_monitor.isp_speed.http.client.HTTPConnection") as connect,
+        ):
+            response = connect.return_value.getresponse.return_value
+            response.read.return_value = b"x" * 8192
+            for status in (403, 200):
+                response.status = status
+                result = self.monitor.run_speedtest(target=target)
+                if status == 200:
+                    self.assertGreater(result["downloadMbps"], 0)
+                else:
+                    self.assertIsNone(result["downloadMbps"])
+                self.assertIsNone(result["uploadMbps"])
+            self.assertTrue(all(call.args[0] == "GET" for call in connect.return_value.request.call_args_list))
 
 
 if __name__ == "__main__":

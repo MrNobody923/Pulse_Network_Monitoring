@@ -165,6 +165,7 @@
           </div>
 
           <div class="header-actions">
+            <a class="btn btn-secondary" href="/devices">Device inventory</a>
             <button type="button" class="btn btn-secondary find-device-btn" onclick="openDeviceLookup()">
               Find device <kbd aria-hidden="true">Ctrl K</kbd>
             </button>
@@ -173,6 +174,8 @@
             <details class="header-settings" id="headerSettings">
               <summary class="btn btn-secondary">Settings</summary>
               <div class="header-settings-panel">
+                {% if user.is_superuser %}<a class="btn btn-secondary" href="/staff-admin/auth/user/">Staff accounts</a>{% endif %}
+                <form action="/logout/" method="post">{% csrf_token %}<button class="btn btn-secondary" type="submit">Sign out ({{ user.username }})</button></form>
                 <button type="button" class="btn btn-secondary" onclick="openRouterConfigForSelected()" id="btnRouterConfig">Router settings</button>
                 <button type="button" class="btn btn-secondary" id="btnCvdToggle"><span id="cvdModeLabel">Colors: Auto</span></button>
                 <button type="button" class="btn btn-secondary" id="btnThemeToggle">Switch theme <span id="themeIcon" aria-hidden="true"></span></button>
@@ -296,6 +299,7 @@
           </label>
           <label class="device-lookup-label" for="notifWebhookUrl">Webhook URL (Slack / Discord / Teams / JSON)</label>
           <input class="form-control" type="url" id="notifWebhookUrl" placeholder="https://hooks.slack.com/services/...">
+          <label><input type="checkbox" id="notifRemoveWebhook"> Remove saved webhook URL</label>
           <label class="device-lookup-label" for="notifTelegramToken">Telegram Bot Token (optional)</label>
           <input class="form-control" type="password" id="notifTelegramToken" placeholder="123456:ABC-DEF...">
           <label class="device-lookup-label" for="notifTelegramChatId">Telegram Chat ID (optional)</label>
@@ -1192,7 +1196,7 @@
       <div class="router-meta-bar">
         <div class="router-meta-item">
           <span>Router Model:</span>
-          <strong id="routerModelBadge">TP-Link BE3600 (Archer BE230)</strong>
+          <strong id="routerModelBadge">Router model unavailable</strong>
         </div>
         <div class="router-meta-item">
           <span>Router IP Address:</span>
@@ -2660,11 +2664,11 @@
   </div>
 
   <!-- Modular Application Scripts -->
-  <script src="/js/state.js?v=20261124-accuracy"></script>
+  <script src="/js/state.js?v=20261127-login"></script>
   <script src="/js/overview-lan.js?v=20261124-accuracy"></script>
   <script src="/js/alerts-router.js?v=20261123-gateway"></script>
-  <script src="/js/operations.js?v=20261124-accuracy"></script>
-  <script src="/js/isp-speedtest.js?v=20261124-targets"></script>
+  <script src="/js/operations.js?v=20261127-admin"></script>
+  <script src="/js/isp-speedtest.js?v=20261127-admin"></script>
   <script src="/js/charts-timeline.js?v=20261124-livegame"></script>
   <script src="/js/nmap-scanner.js?v=20261120b"></script>
   <script src="/js/topology.js?v=20261120-controls"></script>

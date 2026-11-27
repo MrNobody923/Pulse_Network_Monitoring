@@ -20,7 +20,7 @@ from .config import (
     DATABASE_FILE,
     DEFAULT_CONFIG,
     KNOWN_OUI_VENDORS,
-    PLACEHOLDER_DEFAULT_IPS,
+    LEGACY_SAMPLE_DEVICES,
     inferred_inventory_mac,
     normalize_mac,
     observed_inventory_mac,
@@ -274,7 +274,7 @@ class StorageMixin:
             "port": port,
             "location": str(device.get("location") or "Office")[:120],
             "critical": bool(device.get("critical", True)),
-            "manual": bool(device.get("manual", False)),
+            "manual": bool(device.get("manual", True)),
             "mac": raw_mac,
         }
         with self.lock:
@@ -609,25 +609,14 @@ class StorageMixin:
                 dev_ip = dev.get("ip", "")
                 dev_mac = str(dev.get("mac") or "").lower()
                 if (
-                    dev_ip in PLACEHOLDER_DEFAULT_IPS
-                    and dev_ip not in discovered_ips
-                    and not dev_mac
+                    dev_ip not in discovered_ips and dev in LEGACY_SAMPLE_DEVICES
                 ):
                     removed_placeholders += 1
                     removed_ips.add(dev_ip)
                     continue
                 # Prune previously auto-enrolled entries whose MAC/IP is no longer verified infrastructure
-                is_private_wifi_mac = False
-                if len(dev_mac) >= 2 and not dev_mac.startswith("02:00:"):
-                    try:
-                        is_private_wifi_mac = (int(dev_mac[:2], 16) & 2) != 0
-                    except ValueError:
-                        is_private_wifi_mac = False
                 is_auto_enrolled = (
-                    (
-                        dev_id.startswith(("dev-gateway-", "dev-router-", "dev-ap-", "dev-switch-"))
-                        or (dev_id.startswith("dev-custom-") and is_private_wifi_mac)
-                    )
+                    dev_id.startswith(("dev-gateway-", "dev-router-", "dev-ap-", "dev-switch-"))
                     and not dev.get("manual")
                 )
                 if is_auto_enrolled and dev_ip != router_ip:

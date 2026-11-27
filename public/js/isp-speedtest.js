@@ -62,7 +62,8 @@ function syncSpeedTestTargets() {
   const frag = document.createDocumentFragment();
   const ispGroup = document.createElement('optgroup');
   ispGroup.label = 'Internet (ISP)';
-  const ispName = appState.isp?.provider?.isp ? `Internet (${appState.isp.provider.isp} · Cloudflare)` : 'Internet (ISP · Cloudflare)';
+  const detectedIsp = appState.isp?.provider?.provider || appState.isp?.provider?.isp || '';
+  const ispName = detectedIsp && detectedIsp !== 'Unknown ISP' ? `Internet (${detectedIsp} · Cloudflare)` : 'Internet (ISP · Cloudflare)';
   const ispOpt = new Option(`🌐 ${ispName}`, `isp|cloudflare|${ispName}`);
   ispGroup.appendChild(ispOpt);
   frag.appendChild(ispGroup);
@@ -279,8 +280,8 @@ function handleSpeedTestProgress(data) {
       badge.textContent = 'COMPLETE';
       badge.className = 'status-pill online';
     }
-    const finalDl = Number(data.downloadMbps ?? data.currentMbps ?? 0);
-    const finalUl = Number(data.uploadMbps ?? 0);
+    const finalDl = data.downloadMbps ?? null;
+    const finalUl = data.uploadMbps ?? null;
     lastCompletedSpeedTest = {
       ...data,
       downloadMbps: finalDl,
@@ -290,15 +291,13 @@ function handleSpeedTestProgress(data) {
       rating: data.rating || 'High-Speed Broadband'
     };
     if (appState.isp) appState.isp.lastSpeedTest = lastCompletedSpeedTest;
-    setSpeedGaugeTarget(finalDl);
-    if (dlEl && finalDl > 0) dlEl.textContent = `${finalDl.toFixed(1)} Mbps`;
-    if (ulEl && finalUl > 0) ulEl.textContent = `${finalUl.toFixed(1)} Mbps`;
+    setSpeedGaugeTarget(finalDl ?? 0);
+    if (dlEl) dlEl.textContent = fmtMbps(finalDl);
+    if (ulEl) ulEl.textContent = fmtMbps(finalUl);
     if (ratingEl && data.rating) ratingEl.textContent = data.rating;
     if (noteEl) {
       const targetPrefix = data.targetName ? `Target: ${data.targetName} • ` : '';
-      noteEl.textContent = `${targetPrefix}Completed at ${new Date().toLocaleTimeString()} • Download ${finalDl.toFixed(
-        1
-      )} Mbps / Upload ${finalUl.toFixed(1)} Mbps`;
+      noteEl.textContent = `${targetPrefix}Completed at ${new Date().toLocaleTimeString()} • Download ${fmtMbps(finalDl)} / Upload ${fmtMbps(finalUl)}`;
     }
     setActiveSpeedCard(null);
     if (typeof updateKumaLiveSpeed === 'function') {
@@ -332,7 +331,7 @@ function renderIspSection() {
     const targetDesc =
       target.targetType === 'isp'
         ? 'Measures WAN download, upload, ping & jitter from the monitoring PC to Cloudflare.'
-        : `Measures LAN link latency, jitter, packet loss, and local throughput to ${target.targetName} (${target.targetIp}).`;
+        : `Measures latency, variation, unanswered probes, and HTTP response rate when available for ${target.targetName} (${target.targetIp}).`;
     document.getElementById('speedTestAvailability').textContent =
       failure || (testing ? `Measuring speed to ${target.targetName}…` : isp.speedTestsEnabled === true
         ? targetDesc
@@ -374,7 +373,7 @@ function renderIspSection() {
     }
   }
 
-  if (isp.lastSpeedTest && isp.lastSpeedTest.downloadMbps) {
+  if (isp.lastSpeedTest?.timestamp) {
     lastCompletedSpeedTest = isp.lastSpeedTest;
   }
   const st = isp.lastSpeedTest || lastCompletedSpeedTest;
@@ -396,8 +395,8 @@ function renderIspSection() {
       document.getElementById('speedGaugeSubNote').textContent =
         st?.timestamp ? `Readings below were measured ${new Date(st.timestamp).toLocaleString()}.` : '';
       if (targetGaugeMbps !== 0) setSpeedGaugeTarget(0);
-    } else if (st?.downloadMbps != null) {
-      setSpeedGaugeTarget(st.downloadMbps);
+    } else if (st?.timestamp) {
+      setSpeedGaugeTarget(st.downloadMbps ?? 0);
       const badge = document.getElementById('speedGaugePhaseBadge');
       const pctEl = document.getElementById('speedGaugePctText');
       const barEl = document.getElementById('speedGaugeProgressBar');
@@ -409,7 +408,7 @@ function renderIspSection() {
       if (pctEl) pctEl.textContent = '100%';
       if (barEl) barEl.style.width = '100%';
       if (labelEl) {
-        labelEl.textContent = `Measured ${Number(st.downloadMbps).toFixed(1)} Mbps Down${
+        labelEl.textContent = st.downloadMbps == null ? st.rating : `Measured ${Number(st.downloadMbps).toFixed(1)} Mbps Down${
           st.uploadMbps != null ? ` • ${Number(st.uploadMbps).toFixed(1)} Mbps Up` : ''
         }`;
       }
@@ -644,7 +643,7 @@ async function runSpeedTestNow() {
       body: JSON.stringify(payload)
     });
     const st = res.speedTest || res;
-    if (st && st.downloadMbps != null) {
+    if (st?.timestamp) {
       if (!appState.isp) appState.isp = {};
       appState.isp.lastSpeedTest = st;
       handleSpeedTestProgress({
@@ -706,7 +705,7 @@ function renderIspIdentity(isp) {
   set(
     'ispLastTestAt',
     st && st.timestamp
-      ? `${Number(st.downloadMbps).toFixed(0)}↓ / ${Number(st.uploadMbps).toFixed(0)}↑ · ${new Date(
+      ? `${fmtMbps(st.downloadMbps)}↓ / ${fmtMbps(st.uploadMbps)}↑ · ${new Date(
           st.timestamp
         ).toLocaleString()}`
       : 'Never'

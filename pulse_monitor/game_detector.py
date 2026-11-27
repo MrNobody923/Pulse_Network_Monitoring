@@ -80,6 +80,7 @@ _WEBSITE_SIGNATURES = [
         (RIOT_WEBSITE_ID, "Riot Games", False, ("riotgames.com", "www.riotgames.com")),
         (MLBB_WEBSITE_ID, "Mobile Legends", True, ("mobilelegends.com", "www.mobilelegends.com", "m.mobilelegends.com", "play.mobilelegends.com")),
         ("wildrift_website", "Wild Rift", True, ("wildrift.leagueoflegends.com",)),
+        ("tft_website", "Teamfight Tactics", True, ("teamfighttactics.leagueoflegends.com",)),
         ("supercell_website", "Supercell", False, ("supercell.com", "www.supercell.com")),
         ("clashofclans_website", "Clash of Clans", True, ("clashofclans.com", "www.clashofclans.com")),
         ("clashroyale_website", "Clash Royale", True, ("clashroyale.com", "www.clashroyale.com")),
@@ -110,6 +111,7 @@ GAME_SIGNATURES: list[dict] = [
             "mlbb.io",
             "moonton.com",
             "moonton.net",
+            "moonton.org",
             "moontongame.com",
             "moontontech.com",
             "yuanzhanapp.com",
@@ -149,6 +151,11 @@ GAME_SIGNATURES: list[dict] = [
             "demonware.net",
             "proximabeta.com",
             "intlgame.com",
+            "mcdn.garenanow.com",
+            "gop.garenanow.com",
+            "connect.garenanow.com",
+            "codmwest.com",
+            "amsoveasea.com",
         ),
         "domainKeywords": ("codm.", "activision", "callofduty", "demonware", "proximabeta", "intlgame"),
         "ports": (7500, 7501, 10012),
@@ -202,7 +209,34 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile MOBA · 5v5",
         "icon": "⚡",
         "isMobile": True,
-        "domains": ("wildrift.leagueoflegends.com",),
+        "domains": (
+            "wildrift.secure.dyn.riotcdn.net",
+            "wildrift.dyn.riotcdn.net",
+            "wr.pvp.net",
+            "wildrift.pvp.net",
+            "wildrift.riotgames.com",
+            "wr.riotgames.com",
+            "wildrift.proximabeta.com",
+            "wr.proximabeta.com",
+            "wildrift.rgpub.io",
+            "wildrift.leagueoflegends.com",
+        ),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "tft",
+        "name": "Teamfight Tactics",
+        "category": "Mobile / PC Strategy",
+        "icon": "♟️",
+        "isMobile": True,
+        "domains": (
+            "tft.secure.dyn.riotcdn.net",
+            "tft.dyn.riotcdn.net",
+            "tft.pvp.net",
+            "teamfighttactics.leagueoflegends.com",
+        ),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -213,7 +247,11 @@ GAME_SIGNATURES: list[dict] = [
         "category": "PC MOBA · 5v5",
         "icon": "⚔️",
         "isMobile": False,
-        "domains": (),
+        "domains": (
+            "lol.secure.dyn.riotcdn.net",
+            "prod.lol.riotgames.com",
+            "lolesports.com",
+        ),
         "domainKeywords": (),
         "ports": (),
         "processes": ("League of Legends.exe",),
@@ -224,7 +262,11 @@ GAME_SIGNATURES: list[dict] = [
         "category": "PC / Mobile Card Game",
         "icon": "🃏",
         "isMobile": True,
-        "domains": ("playruneterra.com",),
+        "domains": (
+            "playruneterra.com",
+            "bacon.secure.dyn.riotcdn.net",
+            "lor.pvp.net",
+        ),
         "domainKeywords": (),
         "ports": (),
         "processes": ("LoR.exe",),
@@ -275,7 +317,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Strategy",
         "icon": "🛡️",
         "isMobile": True,
-        "domains": ("clashofclans.com",),
+        "domains": ("game.clashofclans.com", "gamea.clashofclans.com", "clashofclans.inbox.supercell.com", "clashofclans-api.inbox.supercell.com", "clashofclans.com"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -286,7 +328,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Strategy",
         "icon": "🏰",
         "isMobile": True,
-        "domains": ("game.clashroyaleapp.com", "clashroyaleapp.com", "clashroyale.com"),
+        "domains": ("game.clashroyaleapp.com", "clashroyaleapp.com", "clashroyale.inbox.supercell.com", "clashroyale-api.inbox.supercell.com", "clashroyale.com"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -297,7 +339,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Arena Brawler",
         "icon": "⭐",
         "isMobile": True,
-        "domains": ("brawlstarsgame.com", "brawlstars.com"),
+        "domains": ("game.brawlstarsgame.com", "brawlstarsgame.com", "brawlstars.inbox.supercell.com", "brawlstars-api.inbox.supercell.com", "brawlstars.com"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -308,7 +350,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Farming",
         "icon": "🌾",
         "isMobile": True,
-        "domains": ("hayday.com", "haydaygame.com"),
+        "domains": ("hayday.com", "haydaygame.com", "hayday.inbox.supercell.com", "hayday-api.inbox.supercell.com"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -319,7 +361,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile / PC Strategy",
         "icon": "🏝️",
         "isMobile": True,
-        "domains": ("boombeach.com",),
+        "domains": ("boombeachgame.com", "boombeach.inbox.supercell.com", "boombeach-api.inbox.supercell.com", "boombeach.com"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -330,7 +372,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Action",
         "icon": "👾",
         "isMobile": True,
-        "domains": ("mo.co",),
+        "domains": ("mocogame.com", "moco.inbox.supercell.com", "moco-api.inbox.supercell.com", "mo.co"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -341,7 +383,7 @@ GAME_SIGNATURES: list[dict] = [
         "category": "Mobile Party Action",
         "icon": "💎",
         "isMobile": True,
-        "domains": ("squadbusters.com",),
+        "domains": ("squadbustersgame.com", "squadbusters.inbox.supercell.com", "squadbusters-api.inbox.supercell.com", "squadbusters.com"),
         "domainKeywords": (),
         "ports": (),
         "processes": (),
@@ -381,11 +423,18 @@ GAME_SIGNATURES: list[dict] = [
             "gamejoin.roblox.com",
             "auth.roblox.com",
             "realtime.roblox.com",
+            "ecsv2.roblox.com",
+            "ephemeralcounters.api.roblox.com",
+            "metrics.roblox.com",
+            "realtime-signalr.roblox.com",
+            "ncs.roblox.com",
+            "tracing.roblox.com",
             "roblox.com",
             "www.roblox.com",
             "rbxcdn.com",
             "rbx.com",
             "robloxlabs.com",
+            "rbxinfra.com",
             "rbxinfra.net",
         ),
         "domainKeywords": ("roblox", "rbxcdn", "rbxinfra"),
@@ -398,10 +447,79 @@ GAME_SIGNATURES: list[dict] = [
         "category": "PC Tactical FPS",
         "icon": "🎯",
         "isMobile": False,
-        "domains": ("playvalorant.com", "valorant.com"),
+        "domains": ("playvalorant.com", "valorant.com", "valorant.secure.dyn.riotcdn.net", "valorant.dyn.riotcdn.net", "a.pvp.net"),
         "domainKeywords": (),
         "ports": (8393, 8394),
         "processes": ("VALORANT.exe", "VALORANT-Win64-Shipping.exe"),
+    },
+    {
+        "id": "riot_games",
+        "name": "Riot Games (Wild Rift / Valorant / LoL)",
+        "category": "Mobile / PC Competitive",
+        "icon": "⚡",
+        "isMobile": True,
+        "domains": (
+            "riotgames.com",
+            "leagueoflegends.com",
+            "pvp.net",
+            "riotcdn.net",
+            "rgpub.io",
+            "riotgames.net",
+        ),
+        "excludeDomains": (
+            "support.riotgames.com",
+            "support-wildrift.riotgames.com",
+            "support-valorant.riotgames.com",
+            "support-leagueoflegends.riotgames.com",
+            "status.riotgames.com",
+        ),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "wutheringwaves",
+        "name": "Wuthering Waves",
+        "category": "Mobile / PC Action RPG",
+        "icon": "🌊",
+        "isMobile": True,
+        "domains": ("kurogames.com", "kurogame.com", "aki-game.com", "kurogame-service.com", "wutheringwaves.kurogames.com"),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": ("Wuthering Waves.exe",),
+    },
+    {
+        "id": "bloodstrike",
+        "name": "Blood Strike / NetEase Games",
+        "category": "Mobile / PC Shooter",
+        "icon": "🔫",
+        "isMobile": True,
+        "domains": ("blood-strike.com", "easebar.com", "marvelrivals.com", "identityvgame.com"),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": ("MarvelRivals-Win64-Shipping.exe",),
+    },
+    {
+        "id": "farlight84",
+        "name": "Farlight 84",
+        "category": "Mobile / PC Hero Shooter",
+        "icon": "🚀",
+        "isMobile": True,
+        "domains": ("farlightgames.com", "farlight84.com", "miraclegames.sg"),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
+    },
+    {
+        "id": "efootball",
+        "name": "eFootball",
+        "category": "Mobile / PC Sports",
+        "icon": "⚽",
+        "isMobile": True,
+        "domains": ("efootball.konami.net", "pesmobile.konami.net", "e-football.konami.net"),
+        "domainKeywords": (),
+        "ports": (),
+        "processes": (),
     },
     {
         "id": "minecraft",
@@ -477,6 +595,19 @@ GAME_SIGNATURES: list[dict] = [
 ANDROID_GAME_PACKAGES = {
     "com.mobile.legends": "mlbb",
     "com.riotgames.league.wildrift": "wildrift",
+    "com.riotgames.league.teamfighttactics": "tft",
+    "com.garena.game.codm": "codm",
+    "com.activision.callofduty.shooter": "codm",
+    "com.tencent.ig": "pubgm",
+    "com.levelinfinite.sgameGlobal": "hok",
+    "com.miHoYo.GenshinImpact": "hoyoverse",
+    "com.HoYoverse.hkrpgoversea": "hoyoverse",
+    "com.dts.freefireth": "freefire",
+    "com.dts.freefiremax": "freefire",
+    "com.kurogame.wutheringwaves.global": "wutheringwaves",
+    "com.netease.newspike": "bloodstrike",
+    "com.miraclegames.farlight84": "farlight84",
+    "jp.konami.pesam": "efootball",
     "com.roblox.client": "roblox",
     "com.supercell.clashofclans": "clashofclans",
     "com.supercell.clashroyale": "clashroyale",
@@ -701,6 +832,8 @@ class GameDetectorMixin:
             "lastDnsClientIp": "",
             "lastDnsDomain": "",
             "lastDnsAt": None,
+            "recentDnsQueries": [],
+            "dnsClientDomains": {},
             "wireshark": None,
             "wiresharkLastAnalyze": None,
         }
@@ -714,9 +847,9 @@ class GameDetectorMixin:
         if not restrictions_enabled or mode not in {"alert_only", "auto_block_game", "auto_wifi_cut"}:
             mode = "alert_only"
         try:
-            stale_sec = max(20, min(600, int(raw.get("staleSessionSeconds") or 75)))
+            stale_sec = max(20, min(600, int(raw.get("staleSessionSeconds") or 150)))
         except (TypeError, ValueError):
-            stale_sec = 75
+            stale_sec = 150
         return {
             "preventionMode": mode,
             "restrictionsEnabled": restrictions_enabled,
@@ -874,6 +1007,12 @@ class GameDetectorMixin:
                 tel["lastDnsDomain"] = str(payload["lastDnsDomain"])[:120]
             if payload.get("lastDnsAt"):
                 tel["lastDnsAt"] = str(payload["lastDnsAt"])[:64]
+            if isinstance(payload.get("recentDnsQueries"), list):
+                tel["recentDnsQueries"] = list(payload["recentDnsQueries"])[:250]
+            if isinstance(payload.get("dnsClientDomains"), dict):
+                tel["dnsClientDomains"] = {
+                    str(k): list(v)[:20] for k, v in list(payload["dnsClientDomains"].items())[:120] if isinstance(v, list)
+                }
             if isinstance(payload.get("wireshark"), dict):
                 tel["wireshark"] = dict(payload["wireshark"])
         return {
@@ -1110,6 +1249,8 @@ class GameDetectorMixin:
             "lastDnsClientIp": tel.get("lastDnsClientIp") or "",
             "lastDnsDomain": tel.get("lastDnsDomain") or "",
             "lastDnsAt": tel.get("lastDnsAt"),
+            "recentDnsQueries": list(tel.get("recentDnsQueries") or []),
+            "dnsClientDomains": dict(tel.get("dnsClientDomains") or {}),
             "localDhcpDnsServers": local_dns,
             "bypassingExternalDns": bypass_dns,
             "dnsInterceptReady": dns_intercept_ready,
@@ -1262,7 +1403,11 @@ class GameDetectorMixin:
                 if g.get("exactDomainsOnly") and dom in g["domains"]:
                     return g
             for g in GAME_SIGNATURES:
-                if not g.get("exactDomainsOnly") and any(dom == sig or dom.endswith(f".{sig}") for sig in g["domains"]):
+                if (
+                    not g.get("exactDomainsOnly")
+                    and not any(dom == ex or dom.endswith(f".{ex}") for ex in g.get("excludeDomains", ()))
+                    and any(dom == sig or dom.endswith(f".{sig}") for sig in g["domains"])
+                ):
                     return g
             for g in GAME_SIGNATURES:
                 if any(GameDetectorMixin._domain_keyword_matches(kw, dom) for kw in g.get("domainKeywords", ())):
@@ -1293,6 +1438,7 @@ class GameDetectorMixin:
         topo_links: list[dict],
         reporter_ip: str = "",
         allow_live_name_probe: bool = False,
+        profiles: dict[str, dict] | None = None,
     ) -> dict:
         self = cast("Monitor", self)
         host_ip = self._reporting_host_ip()
@@ -1324,7 +1470,10 @@ class GameDetectorMixin:
             if hostname and hasattr(self, "_save_cached_hostnames"):
                 self._save_cached_hostnames({client_ip: hostname})
 
-        if mon_dev and mon_dev.get("name"):
+        prof = (profiles or {}).get(mac) if mac else None
+        if prof and str(prof.get("customName") or "").strip():
+            device_name = str(prof["customName"]).strip()
+        elif mon_dev and mon_dev.get("name"):
             device_name = str(mon_dev["name"])
         elif inv_row and inv_row.get("suggested_name") and "unknown" not in str(inv_row["suggested_name"]).lower():
             device_name = str(inv_row["suggested_name"])
@@ -1421,6 +1570,7 @@ class GameDetectorMixin:
             if hasattr(self, "_get_cached_hostnames")
             else {}
         )
+        profiles = self._get_device_profiles() if hasattr(self, "_get_device_profiles") else {}
         return self._assemble_client_context(
             client_ip=client_ip,
             mon_by_ip=mon_by_ip,
@@ -1431,6 +1581,7 @@ class GameDetectorMixin:
             topo_links=topo_links,
             reporter_ip=reporter_ip,
             allow_live_name_probe=True,
+            profiles=profiles,
         )
 
     def record_game_detection(self, payload: dict, *, player: str = "", include_activity: bool = True) -> dict:
@@ -1463,8 +1614,8 @@ class GameDetectorMixin:
         if website and domain not in game["domains"]:
             raise ValueError(f"{game['name']} activity requires a matching website hostname")
         process_name = str(payload.get("process") or "").strip()
-        if launcher:
-            expected_process = game["processes"][0]
+        expected_process = game["processes"][0] if launcher else None
+        if expected_process is not None:
             if (
                 method not in {HOST_PROCESS_DETECTION, MANAGED_PROCESS_DETECTION}
                 or process_name.lower() != expected_process.lower()
@@ -1478,7 +1629,7 @@ class GameDetectorMixin:
         if str(payload.get("connectedTo") or "").strip():
             ctx["connectedTo"] = str(payload["connectedTo"]).strip()[:140]
 
-        indicator = f"Process {expected_process}" if launcher else (
+        indicator = f"Process {expected_process}" if expected_process is not None else (
             str(
                 payload.get("matchedIndicator")
                 or payload.get("domain")
@@ -1850,6 +2001,7 @@ class GameDetectorMixin:
             if hasattr(self, "_get_cached_hostnames")
             else {}
         )
+        profiles = self._get_device_profiles() if hasattr(self, "_get_device_profiles") else {}
         node_by_id = {n["id"]: n for n in topo_nodes}
         topo_by_ip = {str(n.get("ip") or ""): n for n in topo_nodes if n.get("ip")}
 
@@ -1905,6 +2057,7 @@ class GameDetectorMixin:
                 node_by_id=node_by_id,
                 topo_links=topo_links,
                 allow_live_name_probe=False,
+                profiles=profiles,
             )
             dev_active = [
                 {
@@ -3387,7 +3540,9 @@ class GameDetectorMixin:
                             worker_slots.release()
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if isinstance(exc, ConnectionResetError) or getattr(exc, "winerror", None) in {10040, 10052, 10054}:
+                        continue
                     break
         finally:
             sock.close()
@@ -3493,7 +3648,9 @@ class GameDetectorMixin:
                     data, addr = sock.recvfrom(4096)
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if isinstance(exc, ConnectionResetError) or getattr(exc, "winerror", None) in {10040, 10052, 10054}:
+                        continue
                     break
                 text = data.decode("utf-8", "ignore")
                 sender_ip = addr[0]

@@ -158,6 +158,12 @@ docker compose up -d --build
 - Web dashboard: **`http://localhost:3000`**
 
 The native dashboard listens on loopback by default. Docker Compose publishes port 3000 on host loopback. For managed endpoints or operators on other hosts, use a TLS reverse proxy on the monitor host. Restrict dashboard routes to authenticated operators and expose the endpoint enrollment route only to managed clients. Set `PULSE_BIND_HOST` for a different trusted bind address. Set `PULSE_ALLOWED_HOSTS` to the comma-separated hostnames or IP addresses used by remote clients. Start with `server.py` so the Django listener and monitor workers share one process. Set `PULSE_TSHARK_PATH` on the machine running the relevant process to use a custom TShark executable.
+
+Set `PULSE_DATA_DIR` before startup to use a separate directory for the monitor configuration and SQLite history. It defaults to the project's `data` directory.
+
+New configurations start with an empty monitored-device list. Add equipment through Devices or discover and enroll it from the LAN inventory.
+
+LAN speed tests report latency and, when a device serves a successful HTTP response with a body, the observed response-body transfer rate. LAN upload speed is unavailable because a standard device management page cannot confirm how many upload bytes it received.
 - Adjust `PULSE_LAN_SUBNETS` and `PULSE_ROUTER_IP` in `docker-compose.yml` to match your local subnet.
 - Run `python host_game_sensor.py` on the Windows host to report its local game processes to the container.
 

@@ -8,6 +8,12 @@ from tests.support import MonitorTestCase
 
 
 class InventoryTests(MonitorTestCase):
+    def test_sync_preserves_operator_devices_at_old_sample_addresses(self):
+        self.assertFalse(self.monitor.get_devices())
+        device = self.monitor.add_device({"ip": "192.168.0.10", "name": "Warehouse printer"})
+        self.monitor.sync_infrastructure_devices()
+        self.assertIn(device["id"], [item["id"] for item in self.monitor.get_devices()])
+
     def test_inventory_remembers_first_seen_and_flags_unreviewed_assets(self):
         item = self.discovered_device()
         self.monitor._upsert_inventory(item)

@@ -1,5 +1,5 @@
 import unittest
-from http.client import HTTPMessage
+from django.http.request import HttpHeaders
 from unittest.mock import Mock
 from pulse_monitor.http_handler import RequestHandler
 
@@ -8,16 +8,13 @@ class DashboardRequestTests(unittest.TestCase):
     def test_game_device_controls_require_loopback_peer_and_host(self):
         handler = RequestHandler.__new__(RequestHandler)
         handler._send_error_json = Mock()
-        handler.client_address = ("127.0.0.1", 32100)
-        handler.headers = HTTPMessage()
-        handler.headers["Host"] = "localhost:3000"
+        handler.client_address = ("127.0.0.1",)
+        handler.headers = HttpHeaders({"HTTP_HOST": "localhost:3000"})
         self.assertTrue(handler._allow_local_dashboard())
-        handler.headers = HTTPMessage()
-        handler.headers["Host"] = "external.example:3000"
+        handler.headers = HttpHeaders({"HTTP_HOST": "external.example:3000"})
         self.assertFalse(handler._allow_local_dashboard())
-        handler.client_address = ("192.168.1.20", 32100)
-        handler.headers = HTTPMessage()
-        handler.headers["Host"] = "localhost:3000"
+        handler.client_address = ("192.168.1.20",)
+        handler.headers = HttpHeaders({"HTTP_HOST": "localhost:3000"})
         self.assertFalse(handler._allow_local_dashboard())
 
     def test_inventory_filters_and_scan_mode_follow_snapshot(self):
@@ -46,12 +43,11 @@ class DashboardRequestTests(unittest.TestCase):
     def test_dashboard_writes_accept_only_same_origin_browser_requests(self):
         handler = RequestHandler.__new__(RequestHandler)
         handler._send_error_json = Mock()
-        handler.headers = HTTPMessage()
-        handler.headers["Host"] = "monitor.example:3000"
+        handler.headers = HttpHeaders({"HTTP_HOST": "monitor.example:3000"})
         self.assertTrue(handler._allow_write_request())
-        handler.headers["Origin"] = "http://monitor.example:3000"
+        handler.headers = HttpHeaders({"HTTP_HOST": "monitor.example:3000", "HTTP_ORIGIN": "http://monitor.example:3000"})
         self.assertTrue(handler._allow_write_request())
-        handler.headers.replace_header("Origin", "http://other.example:3000")
+        handler.headers = HttpHeaders({"HTTP_HOST": "monitor.example:3000", "HTTP_ORIGIN": "http://other.example:3000"})
         self.assertFalse(handler._allow_write_request())
         handler._send_error_json.assert_called_once_with("Cross-origin writes are forbidden", 403)
 

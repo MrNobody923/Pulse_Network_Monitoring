@@ -6,6 +6,18 @@ from tests.support import MonitorTestCase
 
 
 class NetworkProbesTests(MonitorTestCase):
+    def test_router_refusal_confirms_reachability_without_an_open_management_port(self):
+        with (
+            patch.object(self.monitor, "_probe_tcp_socket", return_value=(False, True, 2.0)),
+            patch.object(self.monitor, "_probe_icmp", return_value=(False, None)),
+            patch.object(self.monitor, "_luci_post") as request,
+        ):
+            result = self.monitor._probe_single_router({"ip": "192.168.0.1", "stok": "sample"}, is_primary=True)
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["openPorts"], [])
+        self.assertFalse(result["model"])
+        request.assert_not_called()
+
     def test_primary_gateway_exposes_reported_clients_and_negotiated_port_speed(self):
         def reply(host, port, scheme, path, **kwargs):
             responses = {

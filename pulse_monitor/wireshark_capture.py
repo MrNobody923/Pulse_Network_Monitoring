@@ -95,11 +95,18 @@ def build_wireshark_display_filter(game_signatures: list[dict] | None = None) ->
     domains: list[str] = []
     exact_domains: list[str] = []
     ports: set[int] = set()
+    exact_set = {
+        d for g in game_signatures if g.get("exactDomainsOnly") for d in g.get("domains", ())
+    }
     for g in game_signatures:
         for d in g.get("domains", ()):
-            target = exact_domains if g.get("exactDomainsOnly") else domains
-            if d not in target:
-                target.append(d)
+            if g.get("exactDomainsOnly"):
+                if d not in exact_domains:
+                    exact_domains.append(d)
+            else:
+                flt_dom = f".{d}" if d in exact_set else d
+                if flt_dom not in domains:
+                    domains.append(flt_dom)
         for p in g.get("ports", ()):
             try:
                 ports.add(int(p))
@@ -1442,7 +1449,9 @@ class WiresharkCaptureEngine:
                     data, addr = sock.recvfrom(65535)
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if isinstance(exc, ConnectionResetError) or getattr(exc, "winerror", None) in {10040, 10052, 10054}:
+                        continue
                     break
                 inner, dlt = unwrap_tzsp_packet(data)
                 if not inner:

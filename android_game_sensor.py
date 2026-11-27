@@ -14,6 +14,7 @@ import subprocess
 import time
 
 from pulse_monitor.game_detector import ANDROID_GAME_PACKAGES
+from pulse_monitor.sensor_auth import sensor_token
 
 
 def _adb_output(adb: str, *args: str) -> str:
@@ -48,7 +49,8 @@ def _report(port: int, ip: str, package: str, *, ended: bool = False) -> None:
     body = json.dumps({"ip": ip, "package": package, "ended": ended})
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
     try:
-        connection.request("POST", "/api/gaming/android", body, {"Content-Type": "application/json"})
+        connection.request("POST", "/api/gaming/android", body, {"Content-Type": "application/json",
+                           "Authorization": f"Bearer {sensor_token()}"})
         response = connection.getresponse()
         result = json.load(response)
         if response.status != 200 or not result.get("success"):

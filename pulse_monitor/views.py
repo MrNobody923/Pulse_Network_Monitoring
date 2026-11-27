@@ -131,7 +131,10 @@ def dashboard_rows(snapshot: dict) -> list[dict]:
 
 
 def render_table(
-    rows: list[dict], filter_by: str = "all", return_to: str = "/devices"
+    rows: list[dict],
+    filter_by: str = "all",
+    return_to: str = "/devices",
+    csrf_token: str = "",
 ) -> str:
     if filter_by == "all":
         rows = [row for row in rows if not row["archived"]]
@@ -202,6 +205,7 @@ def render_table(
         if row["archived"]:
             badges += ' <span class="pill warning">ARCHIVED</span>'
         favorite_class = "star on" if row["favorite"] else "star"
+        csrf_input = f'<input type="hidden" name="csrfmiddlewaretoken" value="{_e(csrf_token)}">' if csrf_token else ""
         output.append(
             "<tr>"
             f'<td class="list-row-num">{index}</td>'
@@ -210,7 +214,7 @@ def render_table(
             f'<td>{_e(row["ip"])}</td><td>{_e(row["mac"] or "—")}</td>'
             f'<td>{_e(row["vendor"])}</td><td>{badges}</td>'
             f'<td>{_e(_timestamp(row["last_seen"] or row.get("last_checked")))}</td>'
-            '<td><form class="inline-form" method="post" action="/actions/favorite">'
+            f'<td><form class="inline-form" method="post" action="/actions/favorite">{csrf_input}'
             f'<input type="hidden" name="asset_key" value="{_e(row["favorite_key"])}">'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             f'<button class="{favorite_class}" title="Toggle favourite" aria-label="Toggle favourite">'
@@ -219,7 +223,7 @@ def render_table(
         output.append('<td class="actions-cell">')
         if not row["authorized"] and row["mac"]:
             output.append(
-                '<form class="inline-form" method="post" action="/actions/authorize">'
+                f'<form class="inline-form" method="post" action="/actions/authorize">{csrf_input}'
                 f'<input type="hidden" name="mac" value="{_e(row["mac"])}">'
                 f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
                 "<button type=\"submit\">Review</button></form> "
@@ -227,7 +231,7 @@ def render_table(
         else:
             output.append('<span class="muted">—</span> ')
         output.append(
-            '<form class="inline-form" method="post" action="/actions/archive">'
+            f'<form class="inline-form" method="post" action="/actions/archive">{csrf_input}'
             f'<input type="hidden" name="asset_key" value="{_e(row["asset_key"])}">'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             f'<button type="submit">{"Restore" if row["archived"] else "Archive"}</button></form>'
@@ -242,7 +246,9 @@ def render_page(
     path: str,
     message: str = "",
     filter_by: str = "all",
+    csrf_token: str = "",
 ) -> str:
+    csrf_input = f'<input type="hidden" name="csrfmiddlewaretoken" value="{_e(csrf_token)}">' if csrf_token else ""
     snapshot = monitor_instance.snapshot()
     rows = dashboard_rows(snapshot)
     active_rows = [row for row in rows if not row["archived"]]
@@ -417,16 +423,16 @@ def render_page(
             '<section class="panel" id="lan-assets"><div class="panel-head"><div>'
             "<h2>LAN asset inventory (List View)</h2>"
             f'<div class="footnote">{scan_summary}</div>'
-            '</div><div class="actions"><form method="post" action="/actions/discover">'
+            f'</div><div class="actions"><form method="post" action="/actions/discover">{csrf_input}'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             '<button class="primary" type="submit">Scan local LAN now</button></form>'
             '<a class="button" href="/api/network/inventory/export">Export CSV</a></div></div>'
             f'<div class="cards-lan">{lan_asset_cards}</div>'
             f'<div class="filter-pills">{pills_html}</div>'
-            f"{render_table(rows, filter_by, return_to)}</section>"
+            f"{render_table(rows, filter_by, return_to, csrf_token)}</section>"
             '<section class="panel"><div class="panel-head"><div><h2>Add a monitored device</h2>'
             '<div class="footnote">Reachability checks use TCP, ICMP and local ARP observations.</div></div></div>'
-            '<form method="post" action="/actions/add-device" class="form-grid">'
+            f'<form method="post" action="/actions/add-device" class="form-grid">{csrf_input}'
             '<div class="field"><label for="name">Name</label><input id="name" name="name" required maxlength="120"></div>'
             '<div class="field"><label for="ip">IP address</label><input id="ip" name="ip" required inputmode="decimal"></div>'
             '<div class="field"><label for="port">TCP port</label><input id="port" name="port" type="number" min="1" max="65535" value="80" required></div>'
@@ -482,18 +488,18 @@ def render_page(
             '<section class="panel"><div class="panel-head"><div><h2>Down monitored devices</h2>'
             '<div class="footnote">Devices appear here after an offline probe result.</div></div>'
             '<a class="button" href="/devices?filter=down">View down devices</a></div>'
-            f'{render_table(rows, "down", return_to)}</section>'
+            f'{render_table(rows, "down", return_to, csrf_token)}</section>'
         )
         content.append(
             '<section class="panel" id="lan-assets"><div class="panel-head"><div><h2>LAN asset discovery (List View)</h2>'
             f'<div class="footnote">{scan_summary}</div></div>'
-            '<div class="actions"><form method="post" action="/actions/discover">'
+            f'<div class="actions"><form method="post" action="/actions/discover">{csrf_input}'
             f'<input type="hidden" name="return_to" value="{_e(return_to)}">'
             '<button class="primary" type="submit">Scan local LAN now</button></form>'
             '<a class="button" href="/devices">Open full device page</a></div></div>'
             f'<div class="cards-lan">{lan_asset_cards}</div>'
             f'<div class="filter-pills">{pills_html}</div>'
-            f"{render_table(rows, filter_by, return_to)}"
+            f"{render_table(rows, filter_by, return_to, csrf_token)}"
             '<div class="footnote">Discovered devices awaiting review appear in the New devices filter.</div>'
             "</section>"
         )

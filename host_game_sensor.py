@@ -8,6 +8,7 @@ game detections to http://127.0.0.1:3000/api/gaming/detect.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import getpass
 import ipaddress
 import json
@@ -22,6 +23,7 @@ import urllib.parse
 import urllib.request
 
 from pulse_monitor.config import DATA_DIR, utc_now
+from pulse_monitor.sensor_auth import sensor_token
 from pulse_monitor.game_detector import (
     GameDetectorMixin,
     MONITOR_ONLY_IDS,
@@ -30,6 +32,73 @@ from pulse_monitor.game_detector import (
     list_windows_processes,
 )
 from pulse_monitor.wireshark_capture import WiresharkCaptureEngine
+
+
+_TRANSIENT_WIN_SOCK_ERRORS = frozenset({10035, 10040, 10052, 10053, 10054})
+
+
+def _disable_windows_udp_connreset(sock: socket.socket) -> None:
+    """Prevent Windows ICMP Port Unreachable (WSAECONNRESET / WinError 10054) from killing UDP listeners."""
+    if sys.platform == "win32" and hasattr(socket, "SIO_UDP_CONNRESET"):
+        try:
+            sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+        except (OSError, ValueError):
+            pass
+
+
+def _is_transient_sock_error(exc: OSError) -> bool:
+    if isinstance(exc, (socket.timeout, TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    return getattr(exc, "winerror", None) in _TRANSIENT_WIN_SOCK_ERRORS
+
+
+def _cap_dns_response_ttl(raw_resp: bytes, max_ttl: int = 12) -> bytes:
+    """Safely cap DNS Answer TTLs on matched game domains so active games emit real-time heartbeats."""
+    if len(raw_resp) < 12 or (raw_resp[3] & 0x0F) != 0:
+        return raw_resp
+    qdcount = int.from_bytes(raw_resp[4:6], "big")
+    ancount = int.from_bytes(raw_resp[6:8], "big")
+    if ancount <= 0 or qdcount <= 0 or ancount > 32 or qdcount > 8:
+        return raw_resp
+
+    def _skip_name(buf: bytes, offset: int) -> int:
+        steps = 0
+        while offset < len(buf) and steps < 64:
+            steps += 1
+            b = buf[offset]
+            if b == 0:
+                return offset + 1
+            if (b & 0xC0) == 0xC0:
+                return offset + 2 if offset + 1 < len(buf) else -1
+            if b > 63 or offset + 1 + b > len(buf):
+                return -1
+            offset += 1 + b
+        return -1
+
+    pos = 12
+    for _ in range(qdcount):
+        pos = _skip_name(raw_resp, pos)
+        if pos < 0 or pos + 4 > len(raw_resp):
+            return raw_resp
+        pos += 4
+
+    out = bytearray(raw_resp)
+    changed = False
+    cap_bytes = int(max_ttl).to_bytes(4, "big")
+    for _ in range(ancount):
+        pos = _skip_name(raw_resp, pos)
+        if pos < 0 or pos + 10 > len(raw_resp):
+            return raw_resp
+        rtype = int.from_bytes(raw_resp[pos : pos + 2], "big")
+        ttl = int.from_bytes(raw_resp[pos + 4 : pos + 8], "big")
+        rdlen = int.from_bytes(raw_resp[pos + 8 : pos + 10], "big")
+        if pos + 10 + rdlen > len(raw_resp):
+            return raw_resp
+        if rtype in (1, 5, 28, 65) and ttl > max_ttl:
+            out[pos + 4 : pos + 8] = cap_bytes
+            changed = True
+        pos += 10 + rdlen
+    return bytes(out) if changed else raw_resp
 
 
 def _detect_local_lan_ip(
@@ -92,7 +161,7 @@ class HostGameSensor:
         self.dismiss_url = base_api + "/dismiss"
         self.heartbeat_url = base_api + "/sensor-heartbeat"
         self._lock = threading.Lock()
-        self._dns_worker_slots = threading.BoundedSemaphore(32)
+        self._dns_worker_slots = threading.BoundedSemaphore(128)
         self._report_slots = threading.BoundedSemaphore(16)
         self._recent_hits: dict[tuple[str, str], float] = {}
         self._active_blocks: list[dict] = []
@@ -113,7 +182,11 @@ class HostGameSensor:
         self._last_dns_client_ip: str = ""
         self._last_dns_domain: str = ""
         self._last_dns_at: str | None = None
+        self._recent_dns_queries: deque[dict] = deque(maxlen=250)
+        self._dns_client_domains: dict[str, list[str]] = {}
         self._bound_dns_ips: set[str] = set()
+        self._bound_dns_udp_ips: set[str] = set()
+        self._bound_dns_tcp_ips: set[str] = set()
         self._forwarded_dns_domains: dict[str, float] = {}
         self._wireshark_engine: WiresharkCaptureEngine | None = None
         self._stop = threading.Event()
@@ -221,6 +294,8 @@ class HostGameSensor:
                 "lastDnsClientIp": self._last_dns_client_ip,
                 "lastDnsDomain": self._last_dns_domain,
                 "lastDnsAt": self._last_dns_at,
+                "recentDnsQueries": list(self._recent_dns_queries),
+                "dnsClientDomains": {k: list(v) for k, v in self._dns_client_domains.items()},
                 "wireshark": ws_status,
             }
         body = json.dumps(hb_payload).encode("utf-8")
@@ -231,6 +306,7 @@ class HostGameSensor:
             method="POST",
         )
         try:
+            self._authorize_local_request(req)
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 self._apply_policy_and_blocks(json.loads(resp.read().decode("utf-8")))
         except Exception:
@@ -243,10 +319,10 @@ class HostGameSensor:
             if (now - last_heartbeat) >= 1.8:
                 if getattr(self, "_auto_dns_host", False):
                     latest_ip = _detect_local_lan_ip(self.upstream_dns)
-                    if latest_ip != self.dns_host:
+                    if latest_ip and latest_ip != self.dns_host:
                         self.dns_host = latest_ip
-                        if "0.0.0.0" not in self._bound_dns_ips:
-                            self._ensure_dns_listeners(self.dns_host)
+                if self.dns_host and "0.0.0.0" not in self._bound_dns_ips:
+                    self._ensure_dns_listeners(self.dns_host)
                 self.hotspot_ip = _detect_hotspot_ip()
                 if self._auto_dns_host and self.hotspot_ip and "0.0.0.0" not in self._bound_dns_ips:
                     self._ensure_dns_listeners(self.hotspot_ip)
@@ -254,7 +330,9 @@ class HostGameSensor:
                 last_heartbeat = now
             elif self._network_changes_enabled:
                 try:
-                    with urllib.request.urlopen(self.blocks_url, timeout=1.2) as resp:
+                    req = urllib.request.Request(self.blocks_url)
+                    self._authorize_local_request(req)
+                    with urllib.request.urlopen(req, timeout=1.2) as resp:
                         self._apply_policy_and_blocks(json.loads(resp.read().decode("utf-8")))
                 except Exception:
                     pass
@@ -281,6 +359,8 @@ class HostGameSensor:
         )
         if self._endpoint_token:
             req.add_unredirected_header("Authorization", f"Bearer {self._endpoint_token}")
+        else:
+            self._authorize_local_request(req)
         try:
             with urllib.request.urlopen(req, timeout=3.0):
                 return True
@@ -294,6 +374,13 @@ class HostGameSensor:
         else:
             payload = {**payload, "includeActivity": False}
         return self._post_json(self.api_url, payload)
+
+    def _authorize_local_request(self, req):
+        host = urllib.parse.urlsplit(req.full_url).hostname
+        if host in {"127.0.0.1", "localhost", "::1"} or os.environ.get("PULSE_LOCAL_SENSOR_TOKEN"):
+            token = sensor_token()
+            if token:
+                req.add_unredirected_header("Authorization", f"Bearer {token}")
 
     def _post_dismiss(self, client_ip: str, game_id: str) -> bool:
         if self._endpoint_player:
@@ -334,7 +421,9 @@ class HostGameSensor:
 
     def _sweep_lan_game_ports(self) -> None:
         try:
-            with urllib.request.urlopen(self.activity_url, timeout=2.0) as resp:
+            req = urllib.request.Request(self.activity_url)
+            self._authorize_local_request(req)
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except Exception:
             return
@@ -525,11 +614,31 @@ class HostGameSensor:
             blocks = list(self._active_blocks)
             prev_mode = self._prevention_mode
 
+        sig = None
         if qname:
             if self._network_changes_enabled and GameDetectorMixin._is_doh_canary_domain(qname):
                 return GameDetectorMixin._build_dns_nxdomain_reply(raw)
 
             sig = GameDetectorMixin._match_game_signature(domain=qname)
+            if client_ip not in {self.dns_host, self.hotspot_ip, "127.0.0.1", "::1"}:
+                with self._lock:
+                    prev_q = self._recent_dns_queries[-1] if self._recent_dns_queries else None
+                    if not prev_q or prev_q.get("ip") != client_ip or prev_q.get("domain") != qname:
+                        self._recent_dns_queries.append({
+                            "timestamp": now_iso,
+                            "ip": client_ip,
+                            "domain": qname,
+                            "gameId": sig["id"] if sig else "",
+                        })
+                    cdoms = self._dns_client_domains.setdefault(client_ip, [])
+                    if qname not in cdoms:
+                        cdoms.append(qname)
+                        if len(cdoms) > 20:
+                            del cdoms[0]
+                    if len(self._dns_client_domains) > 128:
+                        oldest_cip = next(iter(self._dns_client_domains))
+                        if oldest_cip != client_ip:
+                            self._dns_client_domains.pop(oldest_cip, None)
             action_rule = GameDetectorMixin._should_sinkhole_query(
                 client_ip, qname, sig, blocks
             )
@@ -559,7 +668,7 @@ class HostGameSensor:
                 return sink
 
             if sig:
-                if self._should_report(client_ip, sig["id"], cooldown=4.0):
+                if self._should_report(client_ip, sig["id"], cooldown=2.5):
                     print(
                         f"[host-sensor] DNS {client_ip} -> {qname} [{sig['name']}]",
                         flush=True,
@@ -588,12 +697,14 @@ class HostGameSensor:
             seen_up.add(upstream)
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as fwd:
-                    fwd.settimeout(1.2)
+                    fwd.settimeout(0.65)
                     fwd.connect((upstream, 53))
                     fwd.send(raw)
                     resp = fwd.recv(4096)
                 if len(resp) < 12 or resp[:2] != raw[:2] or not (resp[2] & 0x80):
                     continue
+                if sig is not None and sig["id"] not in MONITOR_ONLY_IDS:
+                    resp = _cap_dns_response_ttl(resp, max_ttl=12)
                 with self._lock:
                     self._dns_forwarded_total += 1
                 return resp
@@ -658,6 +769,7 @@ class HostGameSensor:
 
     def _run_dns_udp_listener(self, bind_host: str) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _disable_windows_udp_connreset(sock)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((bind_host, self.dns_port))
@@ -665,6 +777,9 @@ class HostGameSensor:
             print(f"[host-sensor] Live DNS forwarder listening on {bind_host}:{self.dns_port}/udp -> {self.upstream_dns}:53", flush=True)
         except OSError as exc:
             print(f"[host-sensor] DNS UDP listener bind {bind_host}:{self.dns_port} skipped: {exc}", flush=True)
+            with self._lock:
+                self._bound_dns_udp_ips.discard(bind_host)
+                self._bound_dns_ips.discard(bind_host)
             sock.close()
             return
 
@@ -675,9 +790,14 @@ class HostGameSensor:
                     self._start_dns_worker(self._handle_dns_udp_packet, sock, data, addr)
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if _is_transient_sock_error(exc):
+                        continue
                     break
         finally:
+            with self._lock:
+                self._bound_dns_udp_ips.discard(bind_host)
+                self._bound_dns_ips.discard(bind_host)
             sock.close()
 
     def _run_dns_tcp_listener(self, bind_host: str) -> None:
@@ -690,6 +810,8 @@ class HostGameSensor:
             print(f"[host-sensor] Live DNS TCP listener active on {bind_host}:{self.dns_port}/tcp", flush=True)
         except OSError as exc:
             print(f"[host-sensor] DNS TCP listener bind {bind_host}:{self.dns_port} skipped: {exc}", flush=True)
+            with self._lock:
+                self._bound_dns_tcp_ips.discard(bind_host)
             sock.close()
             return
 
@@ -701,14 +823,19 @@ class HostGameSensor:
                         conn.close()
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if _is_transient_sock_error(exc):
+                        continue
                     break
         finally:
+            with self._lock:
+                self._bound_dns_tcp_ips.discard(bind_host)
             sock.close()
 
     def _run_broadcast_game_listener(self, port: int, game_id: str, label: str) -> None:
         """Listen for real-time LAN broadcast game discovery packets (Minecraft Bedrock 19132 / Steam 27036)."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _disable_windows_udp_connreset(sock)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", port))
@@ -724,7 +851,9 @@ class HostGameSensor:
                     data, addr = sock.recvfrom(2048)
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if _is_transient_sock_error(exc):
+                        continue
                     break
                 client_ip = addr[0]
                 if not client_ip or client_ip.startswith("127."):
@@ -750,6 +879,7 @@ class HostGameSensor:
 
     def _run_syslog_listener(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _disable_windows_udp_connreset(sock)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", self.syslog_port))
@@ -766,7 +896,9 @@ class HostGameSensor:
                     data, addr = sock.recvfrom(4096)
                 except socket.timeout:
                     continue
-                except OSError:
+                except OSError as exc:
+                    if _is_transient_sock_error(exc):
+                        continue
                     break
                 text = data.decode("utf-8", "ignore")
                 sender_ip = addr[0]
@@ -812,12 +944,20 @@ class HostGameSensor:
         clean_ip = str(bind_ip or "").strip()
         if not clean_ip:
             return
+        start_udp = False
+        start_tcp = False
         with self._lock:
-            if clean_ip in self._bound_dns_ips:
-                return
+            if clean_ip not in self._bound_dns_udp_ips:
+                self._bound_dns_udp_ips.add(clean_ip)
+                start_udp = True
+            if clean_ip not in self._bound_dns_tcp_ips:
+                self._bound_dns_tcp_ips.add(clean_ip)
+                start_tcp = True
             self._bound_dns_ips.add(clean_ip)
-        threading.Thread(target=self._run_dns_udp_listener, args=(clean_ip,), daemon=True).start()
-        threading.Thread(target=self._run_dns_tcp_listener, args=(clean_ip,), daemon=True).start()
+        if start_udp:
+            threading.Thread(target=self._run_dns_udp_listener, args=(clean_ip,), daemon=True).start()
+        if start_tcp:
+            threading.Thread(target=self._run_dns_tcp_listener, args=(clean_ip,), daemon=True).start()
 
     def serve_forever(self) -> None:
         ws_engine = self._ensure_wireshark_engine()

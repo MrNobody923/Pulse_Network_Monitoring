@@ -46,6 +46,10 @@ class OperationsMixin:
                 CREATE TABLE IF NOT EXISTS switch_port_samples (
                     device_id TEXT PRIMARY KEY, ip TEXT NOT NULL, sample TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS incident_channel_receipts (
+                    incident_id TEXT NOT NULL, kind TEXT NOT NULL, channel TEXT NOT NULL,
+                    PRIMARY KEY (incident_id, kind, channel)
+                );
             """)
 
     def get_incident(self, key: str) -> dict:
@@ -163,7 +167,7 @@ class OperationsMixin:
             confirm = 1
         return {
             "enabled": cfg["enabled"],
-            "webhookUrl": cfg["webhookUrl"],
+            "hasWebhookUrl": bool(cfg["webhookUrl"]),
             "telegramChatId": cfg["telegramChatId"],
             "hasTelegramToken": bool(cfg["telegramBotToken"]),
             "offlineConfirmCount": confirm,
@@ -179,24 +183,28 @@ class OperationsMixin:
             raise ValueError("Webhook URL must start with http:// or https://")
         tg_chat = str(body.get("telegramChatId") or "").strip()[:64]
         tg_token = str(body.get("telegramBotToken") or "").strip()[:160]
+        confirm = None
+        if "offlineConfirmCount" in body:
+            try:
+                confirm = max(1, min(5, int(body["offlineConfirmCount"])))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("Offline confirmation count must be between 1 and 5") from exc
         with self.lock:
             existing = dict(self.config.get("notifications") or {})
             if "enabled" in body:
                 existing["enabled"] = bool(body["enabled"])
             elif webhook_url or tg_chat:
                 existing["enabled"] = True
-            existing["webhookUrl"] = webhook_url[:500]
-            existing["telegramChatId"] = tg_chat
+            if "webhookUrl" in body:
+                existing["webhookUrl"] = webhook_url[:500]
+            if "telegramChatId" in body:
+                existing["telegramChatId"] = tg_chat
             if tg_token:
                 existing["telegramBotToken"] = tg_token
             elif body.get("clearTelegramToken"):
                 existing["telegramBotToken"] = ""
             self.config["notifications"] = existing
-            if "offlineConfirmCount" in body:
-                try:
-                    confirm = max(1, min(5, int(body["offlineConfirmCount"])))
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("Offline confirmation count must be between 1 and 5") from exc
+            if confirm is not None:
                 self.config.setdefault("thresholds", {})["offlineConfirmCount"] = confirm
             self.save_config()
         return {"success": True, "notificationSettings": self.get_notification_settings()}
@@ -245,6 +253,7 @@ class OperationsMixin:
                 raise OSError(f"Telegram HTTP {resp.status}")
 
     def test_notification_channels(self) -> dict:
+        self = cast("Monitor", self)
         notice = {
             "incident_id": f"test-{uuid.uuid4().hex[:8]}",
             "kind": "test",
@@ -259,13 +268,13 @@ class OperationsMixin:
                 self._send_incident_webhook(notice)
                 results["webhook"] = "sent"
             except Exception as exc:
-                results["webhook"] = f"error: {exc}"
+                results["webhook"] = f"Delivery failed ({type(exc).__name__})"
         if self._alert_telegram_enabled():
             try:
                 self._send_incident_telegram(notice)
                 results["telegram"] = "sent"
             except Exception as exc:
-                results["telegram"] = f"error: {exc}"
+                results["telegram"] = f"Delivery failed ({type(exc).__name__})"
         if self._alert_email_enabled():
             try:
                 self._send_incident_email(notice)
@@ -344,27 +353,28 @@ class OperationsMixin:
             )]
         for notice in pending:
             attempts = notice["attempts"] + 1
-            delivered_any = False
+            key = (notice["incident_id"], notice["kind"])
+            with self._connect() as db:
+                sent = {row[0] for row in db.execute(
+                    "SELECT channel FROM incident_channel_receipts WHERE incident_id=? AND kind=?", key
+                )}
             failed_any = False
-            if self._alert_email_enabled():
+            for channel, enabled, send in (
+                ("email", self._alert_email_enabled, self._send_incident_email),
+                ("webhook", self._alert_webhook_enabled, self._send_incident_webhook),
+                ("telegram", self._alert_telegram_enabled, self._send_incident_telegram),
+            ):
+                if channel in sent or not enabled():
+                    continue
                 try:
-                    self._send_incident_email(notice)
-                    delivered_any = True
+                    send(notice)
                 except (OSError, ValueError, smtplib.SMTPException):
                     failed_any = True
-            if self._alert_webhook_enabled():
-                try:
-                    self._send_incident_webhook(notice)
-                    delivered_any = True
-                except (OSError, ValueError, urllib.error.URLError):
-                    failed_any = True
-            if self._alert_telegram_enabled():
-                try:
-                    self._send_incident_telegram(notice)
-                    delivered_any = True
-                except (OSError, ValueError, urllib.error.URLError):
-                    failed_any = True
-            status = "sent" if (delivered_any and not failed_any) else ("failed" if attempts >= 3 else "pending")
+                    continue
+                with self._connect() as db:
+                    db.execute("INSERT OR IGNORE INTO incident_channel_receipts VALUES (?, ?, ?)", (*key, channel))
+                sent.add(channel)
+            status = "sent" if sent and not failed_any else ("failed" if attempts >= 3 else "pending")
             with self._connect() as db:
                 db.execute(
                     "UPDATE incident_notices SET attempts=?, delivery=? WHERE incident_id=? AND kind=?",

@@ -353,7 +353,7 @@ function renderGatewayHealth() {
     ? `${replies ? 'Reachable' : 'No replies'} · ${replies}/${external.length} internet probes` : null);
   set('gatewayWanTraffic', wanFresh ? `↓ ${fmtMbps(wan.rxMbps)} · ↑ ${fmtMbps(wan.txMbps)}` : null);
   set('gatewayWanQuality', external.length ? measures([
-    [isp.tier1LatencyMs, ' ms latency'], [isp.packetLossPct, '% loss'], [isp.jitterMs, ' ms jitter'],
+    [isp.tier1LatencyMs, ' ms latency'], [isp.probeFailurePct, '% unanswered targets'], [isp.jitterMs, ' ms jitter'],
   ]) : null);
   set('gatewayWanLink', wanPort?.linkStatus === 'connected'
     ? (wanPort.speed ? `Up · ${wanPort.speed} Mbps` : 'Up')

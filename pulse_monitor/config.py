@@ -14,7 +14,7 @@ from typing import TypeVar
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("PULSE_DATA_DIR") or ROOT / "data").resolve()
 CONFIG_FILE = DATA_DIR / "config.json"
 DATABASE_FILE = DATA_DIR / "network.db"
 API_VERSION = "2.1.0"
@@ -50,80 +50,19 @@ DEFAULT_CONFIG = {
     },
     "gaming": {
         "preventionMode": "alert_only",
-        "staleSessionSeconds": 75,
+        "staleSessionSeconds": 150,
     },
     "devicePollIntervalSec": 15,
-    "devices": [
-        {
-            "id": "dev-gateway",
-            "name": "Main Gateway Router (TP-Link BE3600)",
-            "ip": "192.168.0.1",
-            "type": "gateway",
-            "checkMethod": "tcp",
-            "port": 80,
-            "location": "Server Rack 01",
-            "critical": True,
-        },
-        {
-            "id": "dev-ap-1",
-            "name": "Office AP - Floor 1 (Reception & Lobby)",
-            "ip": "192.168.0.10",
-            "type": "ap",
-            "checkMethod": "tcp",
-            "port": 80,
-            "location": "Floor 1 Ceiling",
-            "critical": True,
-        },
-        {
-            "id": "dev-ap-2",
-            "name": "Office AP - Floor 2 (Engineering & Ops)",
-            "ip": "192.168.0.11",
-            "type": "ap",
-            "checkMethod": "tcp",
-            "port": 80,
-            "location": "Floor 2 Open Space",
-            "critical": True,
-        },
-        {
-            "id": "dev-ap-3",
-            "name": "Office AP - Executive & Boardroom",
-            "ip": "192.168.0.12",
-            "type": "ap",
-            "checkMethod": "tcp",
-            "port": 80,
-            "location": "Conference Wing",
-            "critical": False,
-        },
-        {
-            "id": "dev-switch-core",
-            "name": "Core Distribution Switch (24-Port PoE)",
-            "ip": "192.168.0.2",
-            "type": "switch",
-            "checkMethod": "tcp",
-            "port": 80,
-            "location": "Server Room Rack",
-            "critical": True,
-        },
-        {
-            "id": "dev-srv-local",
-            "name": "Local Application / File Server",
-            "ip": "192.168.0.50",
-            "type": "server",
-            "checkMethod": "tcp",
-            "port": 80,
-            "location": "Server Room",
-            "critical": False,
-        },
-    ],
+    "devices": [],
     "alerts": [],
 }
 
 ROUTER_PORTS = [
-    ("port-wan", "Internet", "WAN (Internet)", True, "ISP Modem / Fiber ONT Uplink"),
-    ("port-lan-1", "LAN 1", "LAN 1 (Core Switch)", False, "PoE Distribution Switch Uplink"),
-    ("port-lan-2", "LAN 2", "LAN 2 (AP Floor 1)", False, "Access Point Floor 1"),
-    ("port-lan-3", "LAN 3", "LAN 3 (AP Floor 2)", False, "Access Point Floor 2"),
-    ("port-lan-4", "LAN 4", "LAN 4 (Local Server / NAS)", False, "Company File Server"),
+    ("port-wan", "Internet", "WAN (Internet)", True, "WAN interface"),
+    ("port-lan-1", "LAN 1", "LAN 1", False, "LAN interface 1"),
+    ("port-lan-2", "LAN 2", "LAN 2", False, "LAN interface 2"),
+    ("port-lan-3", "LAN 3", "LAN 3", False, "LAN interface 3"),
+    ("port-lan-4", "LAN 4", "LAN 4", False, "LAN interface 4"),
 ]
 
 ISP_TARGETS = [
@@ -275,13 +214,59 @@ def load_nmap_mac_vendors() -> dict[str, str]:
             continue
     return vendors
 
-PLACEHOLDER_DEFAULT_IPS = {
-    "192.168.0.2",
-    "192.168.0.10",
-    "192.168.0.11",
-    "192.168.0.12",
-    "192.168.0.50",
-}
+# Exact legacy samples eligible for cleanup during infrastructure sync.
+LEGACY_SAMPLE_DEVICES = [
+    {
+        "id": "dev-ap-1",
+        "name": "Office AP - Floor 1 (Reception & Lobby)",
+        "ip": "192.168.0.10",
+        "type": "ap",
+        "checkMethod": "tcp",
+        "port": 80,
+        "location": "Floor 1 Ceiling",
+        "critical": True,
+    },
+    {
+        "id": "dev-ap-2",
+        "name": "Office AP - Floor 2 (Engineering & Ops)",
+        "ip": "192.168.0.11",
+        "type": "ap",
+        "checkMethod": "tcp",
+        "port": 80,
+        "location": "Floor 2 Open Space",
+        "critical": True,
+    },
+    {
+        "id": "dev-ap-3",
+        "name": "Office AP - Executive & Boardroom",
+        "ip": "192.168.0.12",
+        "type": "ap",
+        "checkMethod": "tcp",
+        "port": 80,
+        "location": "Conference Wing",
+        "critical": False,
+    },
+    {
+        "id": "dev-switch-core",
+        "name": "Core Distribution Switch (24-Port PoE)",
+        "ip": "192.168.0.2",
+        "type": "switch",
+        "checkMethod": "tcp",
+        "port": 80,
+        "location": "Server Room Rack",
+        "critical": True,
+    },
+    {
+        "id": "dev-srv-local",
+        "name": "Local Application / File Server",
+        "ip": "192.168.0.50",
+        "type": "server",
+        "checkMethod": "tcp",
+        "port": 80,
+        "location": "Server Room",
+        "critical": False,
+    },
+]
 
 
 _RuntimeAttribute = TypeVar("_RuntimeAttribute")

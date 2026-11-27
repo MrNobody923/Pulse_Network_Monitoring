@@ -232,7 +232,7 @@ function renderActiveGamesLivePanel(activeLogs) {
               </div>
               ${item.player ? `<div class="game-row-sub">Windows account <strong>${esc(item.player)}</strong></div>` : ''}
               <div class="game-row-indicator">
-                Signal: <span class="mono">${esc(item.matchedIndicator || '—')}</span> · ${esc(item.detectionMethod || 'Network Detection')}
+                Signal: <span class="mono">${esc(item.matchedIndicator || '—')}</span> · ${esc(item.detectionMethod || 'Network Detection')} · Last active: <strong>${esc(formatGameTerminalTime(item.timestamp))}</strong>
               </div>
             </div>
             <div class="game-row-actions">
@@ -1185,11 +1185,34 @@ function applyLiveGameDetection(detection, updated = false) {
   const logs = activity.logs || [];
   const previous = logs.find(item => item.id === detection.id);
   if (previous && Date.parse(previous.timestamp) > Date.parse(detection.timestamp)) return;
+  const nextLogs = [detection, ...logs.filter(item => item.id !== detection.id)];
+  const nextActiveCount = nextLogs.filter(item => item && item.isActive && !item.isBlocked && !item.isDismissed && !item.hintType && !item.portHint).length;
+  const nextOnlineDevices = Array.isArray(activity.onlineDevices)
+    ? activity.onlineDevices.map(dev => {
+        if (dev.ip !== detection.ip) return dev;
+        const others = (dev.activeGames || []).filter(g => g.id !== detection.id && g.gameId !== detection.gameId);
+        const entry = detection.isActive && !detection.isBlocked && !detection.isDismissed
+          ? [{
+              id: detection.id,
+              gameId: detection.gameId,
+              gameName: detection.gameName,
+              player: detection.player || '',
+              gameIcon: detection.gameIcon || '🎮',
+              matchedIndicator: detection.matchedIndicator || '',
+              detectionMethod: detection.detectionMethod || '',
+              timestamp: detection.timestamp
+            }, ...others]
+          : others;
+        return { ...dev, activeGames: entry };
+      })
+    : [];
   appState.gameActivity = {
     ...activity,
-    logs: [detection, ...logs.filter(item => item.id !== detection.id)],
+    logs: nextLogs,
+    onlineDevices: nextOnlineDevices,
     summary: {
       ...activity.summary,
+      activeCount: nextActiveCount,
       totalCount: (activity.summary?.totalCount ?? logs.filter(item => !item.hintType && !item.portHint).length)
         + (!previous || previous.hintType || previous.portHint ? 1 : 0)
     }
@@ -1202,9 +1225,22 @@ function applyEndedGameSessions(sessionIds) {
   const activity = getGameActivityData();
   const ended = new Set(sessionIds);
   gameActivityRevision += 1;
+  const nextLogs = (activity.logs || []).map(item => ended.has(item.id) ? {...item, isActive: false} : item);
+  const nextActiveCount = nextLogs.filter(item => item && item.isActive && !item.isBlocked && !item.isDismissed && !item.hintType && !item.portHint).length;
+  const nextOnlineDevices = Array.isArray(activity.onlineDevices)
+    ? activity.onlineDevices.map(dev => ({
+        ...dev,
+        activeGames: (dev.activeGames || []).filter(g => !ended.has(g.id))
+      }))
+    : [];
   appState.gameActivity = {
     ...activity,
-    logs: (activity.logs || []).map(item => ended.has(item.id) ? {...item, isActive: false} : item)
+    logs: nextLogs,
+    onlineDevices: nextOnlineDevices,
+    summary: {
+      ...activity.summary,
+      activeCount: nextActiveCount
+    }
   };
 }
 
@@ -1228,4 +1264,4 @@ async function refreshGameActivityAuto(force = false) {
   }
 }
 
-setInterval(refreshGameActivityAuto, 3000);
+setInterval(refreshGameActivityAuto, 2000);

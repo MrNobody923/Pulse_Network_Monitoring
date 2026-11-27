@@ -1,9 +1,14 @@
-from http.client import HTTPMessage
+from django.http.request import HttpHeaders
 from unittest.mock import Mock, patch
 from tests.support import MonitorTestCase
 
 
 class GameMonitoringTests(MonitorTestCase):
+    def assert_signature_id(self, signature: dict | None, expected: str) -> None:
+        if signature is None:
+            self.fail(f"Expected game signature {expected!r}, got no match")
+        self.assertEqual(signature["id"], expected)
+
     def test_lan_discovery_does_not_identify_an_app_or_the_ip_inventory_owner(self):
         ip = "192.168.1.45"
         self.monitor._upsert_inventory(self.discovered_device(ip))
@@ -336,7 +341,7 @@ class GameMonitoringTests(MonitorTestCase):
         ip = self.monitor.HOST_DNS_IP
         self.assertFalse(host_game_processes(ip, ["steamwebhelper.exe", "SteamService.exe"]))
         payload = host_game_processes(ip, ["Steam.exe", "steam.exe"])[(ip, STEAM_CLIENT_ID)]
-        self.assertEqual(self.monitor._match_game_signature(port=27036)["id"], "steam")
+        self.assert_signature_id(self.monitor._match_game_signature(port=27036), "steam")
         traffic = self.monitor.record_game_detection({"ip": ip, "domain": "api.steampowered.com"})["detection"]
         self.assertEqual(traffic["gameId"], "steam")
         with self.assertRaisesRegex(ValueError, "steam.exe process report"):
@@ -376,16 +381,29 @@ class GameMonitoringTests(MonitorTestCase):
         )
         for domain, game_id in (
             ("wildrift.leagueoflegends.com", "wildrift_website"),
+            ("teamfighttactics.leagueoflegends.com", "tft_website"),
+            ("wildrift.secure.dyn.riotcdn.net", "wildrift"),
+            ("wr.pvp.net", "wildrift"),
+            ("tft.secure.dyn.riotcdn.net", "tft"),
+            ("lol.secure.dyn.riotcdn.net", "lol"),
+            ("valorant.secure.dyn.riotcdn.net", "valorant"),
+            ("bacon.secure.dyn.riotcdn.net", "runeterra"),
+            ("auth.riotgames.com", "riot_games"),
+            ("clientconfig.rpg.riotgames.com", "riot_games"),
+            ("riot-geo.pas.si.riotgames.com", "riot_games"),
+            ("feapp.sgp.pvp.net", "riot_games"),
+            ("sieve.services.riotcdn.net", "riot_games"),
             ("game.clashofclans.com", "clashofclans"),
+            ("clashofclans.inbox.supercell.com", "clashofclans"),
             ("game.clashroyaleapp.com", "clashroyale"),
             ("game.brawlstarsgame.com", "brawlstars"),
+            ("brawlstars-api.inbox.supercell.com", "brawlstars"),
             ("haydaygame.com", "hayday"),
         ):
             with self.subTest(domain=domain):
-                self.assertEqual(self.monitor._match_game_signature(domain=domain)["id"], game_id)
+                self.assert_signature_id(self.monitor._match_game_signature(domain=domain), game_id)
         for domain in (
-            "auth.riotgames.com", "riotcdn.net", "teamfighttactics.leagueoflegends.com",
-            "accounts.supercell.com", "supercellid.com", "haydaygame.com.example.org",
+            "support.riotgames.com", "accounts.supercell.com", "supercellid.com", "haydaygame.com.example.org",
         ):
             with self.subTest(domain=domain):
                 self.assertIsNone(self.monitor._match_game_signature(domain=domain))
@@ -407,9 +425,10 @@ class GameMonitoringTests(MonitorTestCase):
 
         self.monitor._skip_live_probe_in_test = True
         match = self.monitor._match_game_signature
-        self.assertEqual(match(domain="WWW.RIOTGAMES.COM.")["id"], RIOT_WEBSITE_ID)
-        self.assertEqual(match(domain="riotgames.com")["id"], RIOT_WEBSITE_ID)
-        for domain in ("auth.riotgames.com", "support.riotgames.com", "riotgames.com.example.org"):
+        self.assert_signature_id(match(domain="WWW.RIOTGAMES.COM."), RIOT_WEBSITE_ID)
+        self.assert_signature_id(match(domain="riotgames.com"), RIOT_WEBSITE_ID)
+        self.assert_signature_id(match(domain="auth.riotgames.com"), "riot_games")
+        for domain in ("support.riotgames.com", "riotgames.com.example.org"):
             with self.subTest(domain=domain):
                 self.assertIsNone(match(domain=domain))
         display_filter = build_wireshark_display_filter()
@@ -446,10 +465,10 @@ class GameMonitoringTests(MonitorTestCase):
         match = self.monitor._match_game_signature
         for domain in ("mobilelegends.com", "WWW.MOBILELEGENDS.COM.", "play.mobilelegends.com"):
             with self.subTest(domain=domain):
-                self.assertEqual(match(domain=domain)["id"], MLBB_WEBSITE_ID)
+                self.assert_signature_id(match(domain=domain), MLBB_WEBSITE_ID)
         self.assertIsNone(match(domain="www.mobilelegends.com.example.org"))
-        self.assertEqual(match(domain="api.mobilelegends.com")["id"], "mlbb")
-        self.assertEqual(match(domain="sea-api-02.youngjoygame.com")["id"], "mlbb")
+        self.assert_signature_id(match(domain="api.mobilelegends.com"), "mlbb")
+        self.assert_signature_id(match(domain="sea-api-02.youngjoygame.com"), "mlbb")
 
         ip = self.monitor.HOST_DNS_IP
         payload = {"ip": ip, "detectionMethod": "Wireshark DNS Wire"}
@@ -476,7 +495,7 @@ class GameMonitoringTests(MonitorTestCase):
             ("squadbusters.supercell.com", "squadbusters_website"),
         ):
             with self.subTest(domain=domain):
-                self.assertEqual(match(domain=domain)["id"], signature)
+                self.assert_signature_id(match(domain=domain), signature)
         for domain in ("accounts.supercell.com", "supercellid.com", "brawlstars.com.example.org"):
             with self.subTest(domain=domain):
                 self.assertIsNone(match(domain=domain))
@@ -522,15 +541,15 @@ class GameMonitoringTests(MonitorTestCase):
         self.monitor._skip_live_probe_in_test = True
         ip = "192.168.0.28"
         handler = RequestHandler.__new__(RequestHandler)
-        handler.headers = {"Host": "127.0.0.1:3000"}
-        handler.client_address = (ip, 51234)
+        handler.headers = HttpHeaders({"HTTP_HOST": "127.0.0.1:3000"})
+        handler.client_address = (ip,)
         handler._send_error_json = Mock()
         handler._send_json = Mock()
         report = {"ip": ip, "package": "com.mobile.legends"}
         handler._handle_gaming_post(self.monitor, "/api/gaming/android", report)
         handler._send_error_json.assert_called_once_with("Android game reports require a local sensor", 403)
         handler._send_json.assert_not_called()
-        handler.client_address = ("127.0.0.1", 51234)
+        handler.client_address = ("127.0.0.1",)
         with self.assertRaisesRegex(ValueError, "local Android sensor"):
             handler._handle_gaming_post(self.monitor, "/api/gaming/detect", {
                 "ip": ip, "gameId": "mlbb", "detectionMethod": ANDROID_APP_DETECTION,
@@ -616,8 +635,8 @@ class GameMonitoringTests(MonitorTestCase):
 
         self.monitor._skip_live_probe_in_test = True
         handler = RequestHandler.__new__(RequestHandler)
-        handler.headers = HTTPMessage()
-        handler.client_address = ("10.20.40.12", 49152)
+        handler.headers = HttpHeaders({})
+        handler.client_address = ("10.20.40.12",)
         handler._send_json = Mock()
         handler._send_error_json = Mock()
         body = {"player": "COMPANY\\Alice", "process": "RobloxPlayerBeta.exe"}
@@ -627,7 +646,7 @@ class GameMonitoringTests(MonitorTestCase):
         }):
             handler._handle_game_endpoint(self.monitor, body)
             handler._send_error_json.assert_called_once_with("Endpoint enrollment token is required", 403)
-            handler.headers["Authorization"] = "Bearer test-enrollment"
+            handler.headers = HttpHeaders({"HTTP_AUTHORIZATION": "Bearer test-enrollment"})
             with patch("pulse_monitor.game_detector.time.monotonic", return_value=200.0):
                 handler._handle_game_endpoint(self.monitor, {"heartbeat": True, "ip": "10.20.40.99"})
                 idle = self.monitor.get_game_activity()
@@ -638,14 +657,14 @@ class GameMonitoringTests(MonitorTestCase):
                 self.assertFalse(self.monitor.get_game_activity()["coverage"]["endpointIps"])
             handler._handle_game_endpoint(self.monitor, body)
             handler._handle_game_endpoint(self.monitor, {**body, "player": "COMPANY\\Eve"})
-            handler.client_address = ("172.27.18.40", 49153)
+            handler.client_address = ("172.27.18.40",)
             handler._handle_game_endpoint(self.monitor, {**body, "player": "COMPANY\\Bob"})
             activity = self.monitor.get_game_activity(limit=1)
             self.assertEqual(activity["summary"]["activeCount"], 3)
             self.assertEqual({row["player"] for row in activity["logs"]}, {"company\\alice", "company\\bob", "company\\eve"})
             self.assertIn("172.27.18.40", {device["ip"] for device in activity["onlineDevices"]})
 
-            handler.client_address = ("10.20.40.12", 49152)
+            handler.client_address = ("10.20.40.12",)
             handler._handle_game_endpoint(self.monitor, {
                 "player": body["player"], "gameId": "roblox", "ended": True,
             })
@@ -661,7 +680,7 @@ class GameMonitoringTests(MonitorTestCase):
                 "player": body["player"], "gameId": "steam_client", "ended": True,
             })
             self.assertEqual(self.monitor.get_game_activity()["summary"]["activeCount"], 2)
-            handler.client_address = ("10.20.55.12", 49152)
+            handler.client_address = ("10.20.55.12",)
             with self.assertRaisesRegex(ValueError, "monitored LAN subnet"):
                 handler._handle_game_endpoint(self.monitor, body)
             self.assertEqual(

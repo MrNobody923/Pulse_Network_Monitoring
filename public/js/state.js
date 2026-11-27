@@ -100,8 +100,30 @@ function fmtTime(iso) {
   });
 }
 
+function readCsrfToken() {
+  const inputVal = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
+  if (inputVal) return inputVal;
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function dashboardFetch(url, options = {}) {
+  const headers = new Headers(options.headers);
+  if (!['GET', 'HEAD', 'OPTIONS'].includes((options.method || 'GET').toUpperCase()) &&
+      new URL(url, location.href).origin === location.origin) {
+    const token = readCsrfToken();
+    if (token) headers.set('X-CSRFToken', token);
+  }
+  return fetch(url, {...options, headers}).then(res => {
+    if (res.status === 401 && location.pathname !== '/login/') {
+      location.assign('/login/?next=' + encodeURIComponent(location.pathname + location.search + location.hash));
+    }
+    return res;
+  });
+}
+
 async function apiJson(url, options = {}) {
-  const res = await fetch(url, {
+  const res = await dashboardFetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options
   });

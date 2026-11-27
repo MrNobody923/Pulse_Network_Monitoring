@@ -19,7 +19,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY server.py monitor.py ./
+COPY server.py monitor.py manage.py ./
 COPY pulse_monitor ./pulse_monitor
 COPY public ./public
 
@@ -29,6 +29,6 @@ EXPOSE 3000
 VOLUME ["/app/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health', timeout=3)" || exit 1
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=3)" || exit 1
 
 CMD ["python3", "server.py"]

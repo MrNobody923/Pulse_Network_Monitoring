@@ -454,8 +454,8 @@ function initEventStream() {
       // Capture details of ending sessions before applyEndedGameSessions removes them
       const endedLookup = [];
       if (Array.isArray(d.endedSessionIds) && d.endedSessionIds.length) {
-        const activeList = (appState.gameActivity && Array.isArray(appState.gameActivity.activeSessions))
-          ? appState.gameActivity.activeSessions
+        const activeList = (appState.gameActivity && Array.isArray(appState.gameActivity.logs))
+          ? appState.gameActivity.logs.filter(s => s && s.isActive)
           : [];
         const activeById = new Map(activeList.map(s => [s.id, s]));
         for (const sid of d.endedSessionIds) {
@@ -566,9 +566,7 @@ function initEventStream() {
         jitterMs: st.jitterMs,
         rating: st.rating,
         progressPct: 100,
-        message: `Speed Test Complete — ${st.downloadMbps} Mbps Down / ${
-          st.uploadMbps ?? '--'
-        } Mbps Up`
+        message: st.rating || 'Speed test complete'
       });
       renderIspSection();
     } catch (_) {}
@@ -610,7 +608,7 @@ async function promoteLanDeviceAsInfra(ip, mac, encodedName) {
     return;
   }
   try {
-    const res = await fetch('/api/devices', {
+    const res = await dashboardFetch('/api/devices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -629,7 +627,7 @@ async function promoteLanDeviceAsInfra(ip, mac, encodedName) {
       return;
     }
     if (data && data.id) {
-      await fetch(`/api/devices/${encodeURIComponent(data.id)}/probe`, {
+      await dashboardFetch(`/api/devices/${encodeURIComponent(data.id)}/probe`, {
         method: 'POST',
       }).catch(() => {});
     }
@@ -654,7 +652,7 @@ async function deleteMonitoredDevice(deviceId, encodedName, ip) {
     return;
   }
   try {
-    const res = await fetch(
+    const res = await dashboardFetch(
       `/api/devices/${encodeURIComponent(deviceId)}`,
       { method: 'DELETE' }
     );

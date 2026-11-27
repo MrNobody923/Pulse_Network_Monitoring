@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views import View
+from django.shortcuts import render
 
 from .config import API_VERSION, ROOT, utc_now
 from .game_detector import ANDROID_APP_DETECTION, MANAGED_PROCESS_DETECTION
@@ -75,7 +76,7 @@ class RequestHandler(View):
     def http_method_not_allowed(self, request, *args, **kwargs):
         return JsonResponse(
             {"error": "Method not allowed"}, status=405,
-            headers={"Allow": ", ".join(self._allowed_methods())},
+            headers={"Allow": super().options(request, *args, **kwargs).headers["Allow"]},
         )
 
     def _json_body(self, max_bytes: int = MAX_BODY_BYTES) -> dict:
@@ -142,13 +143,13 @@ class RequestHandler(View):
     def _send_page(
         self, path: str, message: str = "", filter_by: str = "all"
     ) -> None:
-        if path in {"/", "/index.html"} and self._send_static_file(
-            "index.html", "text/html; charset=utf-8"
-        ):
+        if path in {"/", "/index.html"}:
+            self.response = render(self.request, "index.html")
             return
         mon = _active_monitor()
+        from django.middleware.csrf import get_token
         self.response = HttpResponse(
-            render_page(mon, path, message, filter_by), content_type="text/html; charset=utf-8",
+            render_page(mon, path, message, filter_by, csrf_token=get_token(self.request)), content_type="text/html; charset=utf-8",
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
@@ -159,9 +160,10 @@ class RequestHandler(View):
             raise ValueError("Invalid Content-Length header") from exc
         if length < 0 or length > MAX_BODY_BYTES:
             raise ValueError("Form body must be smaller than 1 MB")
-        raw = self.request.read(length).decode("utf-8")
-        parsed = urllib.parse.parse_qs(raw, keep_blank_values=True, max_num_fields=30)
-        return {key: values[-1] for key, values in parsed.items()}
+        form = self.request.POST
+        if len(form) > 30:
+            raise ValueError("Too many form fields")
+        return form.dict()
 
     def _redirect(self, message: str = "", path: str = "/") -> None:
         parsed = urllib.parse.urlsplit("/")
@@ -407,7 +409,9 @@ class RequestHandler(View):
                 yield b""
                 snapshot = json.dumps(mon.snapshot(), separators=(",", ":"))
                 yield f"event: snapshot\ndata: {snapshot}\n\n"
-                while True:
+                # Reconnect periodically so expiry, logout and role changes take effect.
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
                     try:
                         event = subscriber.get(timeout=15)
                     except queue.Empty:

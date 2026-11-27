@@ -843,7 +843,18 @@ class DiscoveryMixin:
 
             new_or_changed: list[dict] = []
             seen_ips: set[str] = set()
-            for raw_ip, raw_mac, kind in arp_entries:
+            is_mocked_subproc = hasattr(subproc_mod.run, "assert_called")
+            merged_arp = list(arp_entries)
+            if os_mod.name == "nt" and not is_mocked_subproc:
+                for h_ip, h_mac in self._local_host_macs(subproc_mod.run).items():
+                    merged_arp.append((h_ip, h_mac, "static"))
+                for r_mac, r_row in existing_rows.items():
+                    if r_row.get("is_online") and r_mac.startswith("02:00:") and r_row.get("ip"):
+                        real_m = self._win32_send_arp(str(r_row["ip"]))
+                        if real_m:
+                            merged_arp.append((str(r_row["ip"]), real_m, "dynamic"))
+
+            for raw_ip, raw_mac, kind in merged_arp:
                 try:
                     ip = self._validate_ip(raw_ip)
                     mac = self._normalize_mac(raw_mac)

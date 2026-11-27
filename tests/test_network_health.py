@@ -23,26 +23,27 @@ class NetworkHealthTests(MonitorTestCase):
             self.monitor.latest_devices[device["ip"]] = result
             self.monitor._evaluate_device(result)
 
-        def root_of(device):
-            return next(item for item in self.monitor.get_active_alerts() if item["ip"] == device["ip"]).get("upstreamIncident")
+        def upstream_ip(device):
+            incident = next(item for item in self.monitor.get_active_alerts() if item["ip"] == device["ip"]).get("upstreamIncident")
+            return incident["ip"] if incident is not None else None
 
         for device in (router, switch, client):
             set_probe(device, "DEVICE_DOWN")
-        self.assertEqual(root_of(client)["ip"], router["ip"])
-        self.assertEqual(root_of(switch)["ip"], router["ip"])
+        self.assertEqual(upstream_ip(client), router["ip"])
+        self.assertEqual(upstream_ip(switch), router["ip"])
         incident = self.monitor.get_incident(f"dev-{router['ip']}")
         self.assertEqual(incident["deviceId"], router["id"])
         self.assertEqual({alert["ip"] for alert in incident["affected"]}, {switch["ip"], client["ip"]})
         set_probe(router, "ONLINE_WITH_INTERNET")
-        self.assertEqual(root_of(client)["ip"], switch["ip"])
-        self.assertIsNone(root_of(switch))
+        self.assertEqual(upstream_ip(client), switch["ip"])
+        self.assertIsNone(upstream_ip(switch))
         outage = self.monitor.active_alerts[f"dev-{client['ip']}"]
         first_seen = outage["firstSeen"]
         outage["firstSeen"] = "2000-01-01T12:00:00Z"
-        self.assertIsNone(root_of(client))
+        self.assertIsNone(upstream_ip(client))
         outage["firstSeen"] = first_seen
         set_probe(switch, "ARP_OBSERVED")
-        self.assertIsNone(root_of(client))
+        self.assertIsNone(upstream_ip(client))
         self.assertEqual(len(self.monitor.get_active_alerts()), 2)
 
     def test_maintenance_keeps_incident_data_and_deduplicates_notifications(self):

@@ -105,12 +105,12 @@ function updateKumaLiveSpeed() {
   const period = document.getElementById('kumaStatSpeedPeriod');
   const test = appState.isp?.lastSpeedTest || lastCompletedSpeedTest;
   if (period) period.textContent = test?.timestamp ? new Date(test.timestamp).toLocaleString() : '';
-  if (!test || !Number.isFinite(test.downloadMbps) || !Number.isFinite(test.uploadMbps)) {
+  if (!test) {
     el.textContent = 'Awaiting speed test';
     return;
   }
-  el.innerHTML = `<div class="kuma-speed-readout"><span class="kuma-speed-item">↓ ${test.downloadMbps.toFixed(1)} Mbps</span>
-    <span class="kuma-speed-item">↑ ${test.uploadMbps.toFixed(1)} Mbps</span></div>`;
+  el.innerHTML = `<div class="kuma-speed-readout"><span class="kuma-speed-item">↓ ${fmtMbps(test.downloadMbps)}</span>
+    <span class="kuma-speed-item">↑ ${fmtMbps(test.uploadMbps)}</span></div>`;
 }
 
 async function pingInternetNow() {

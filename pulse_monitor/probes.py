@@ -72,7 +72,7 @@ class ProbesMixin:
         self = cast("Monitor", self)
         ip = self.config["router"].get("ip", "192.168.0.1")
         return {
-            "model": "TP-Link BE3600 (Archer BE230)",
+            "model": self.config["router"].get("model") or "",
             "reachable": False,
             "authenticated": False,
             "ip": ip,
@@ -1074,10 +1074,10 @@ class ProbesMixin:
         use_https = bool(cfg.get("useHttps", False))
         scheme = "https" if use_https or port in (443, 8443) else "http"
 
-        _, tcp_alive, tcp_ms = self._probe_tcp_socket(host, port, 0.85)
+        tcp_open, tcp_alive, tcp_ms = self._probe_tcp_socket(host, port, 0.85)
         alt_port = 443 if port != 443 else 80
         prev_open = (previous_state or {}).get("openPorts") or []
-        if not tcp_alive or alt_port in prev_open:
+        if not tcp_open or alt_port in prev_open:
             alt_open, alt_alive, alt_ms = self._probe_tcp_socket(host, alt_port, 0.65)
         else:
             alt_open, alt_alive, alt_ms = False, False, None
@@ -1090,16 +1090,16 @@ class ProbesMixin:
         )
 
         open_ports: list[int] = []
-        if tcp_alive:
+        if tcp_open:
             open_ports.append(port)
-        if alt_alive and alt_port not in open_ports:
+        if alt_open and alt_port not in open_ports:
             open_ports.append(alt_port)
 
         state = self._initial_router_state()
         state["id"] = str(cfg.get("id") or f"router-{host}")
         state["isPrimary"] = is_primary
         state["role"] = str(cfg.get("role") or ("Main Gateway" if is_primary else "Secondary Router"))
-        state["vendor"] = str(cfg.get("vendor") or "TP-Link")
+        state["vendor"] = str(cfg.get("vendor") or "")
         state["protocol"] = scheme
         state["port"] = port
         state["openPorts"] = open_ports
@@ -1125,7 +1125,7 @@ class ProbesMixin:
             state["model"] = str(cfg.get("name") or f"Router ({host})")
 
         # Ghost Mode: reuse cached hardware identity & SNMP unless stale (>30m) or unprobed
-        admin_port = port if tcp_alive else (alt_port if alt_open else port)
+        admin_port = alt_port if alt_open and not tcp_open else port
         admin_scheme = "https" if use_https or admin_port in (443, 8443) else "http"
         hw_ts_map: dict[str, float] = getattr(self, "_router_hw_ts", {})
         if not hasattr(self, "_router_hw_ts"):
@@ -1189,11 +1189,11 @@ class ProbesMixin:
             if snmp_data:
                 state["snmp"] = snmp_data
                 state["telemetryAvailable"] = True
-                if snmp_data.get("sysDescr") and (not cfg.get("model") and not is_primary):
+                if snmp_data.get("sysDescr") and not cfg.get("model") and (not is_primary or not state["model"]):
                     state["model"] = snmp_data["sysDescr"][:90]
 
         stok = str(cfg.get("stok") or "")
-        if alive and stok:
+        if open_ports and stok and (scheme != "https" or admin_scheme == "https"):
             encoded_stok = urllib.parse.quote(stok, safe="")
             ports_payload = self._luci_post(
                 host,
@@ -1369,7 +1369,7 @@ class ProbesMixin:
                 existing.setdefault("name", dev.get("name") or f"Router ({d_ip})")
                 if fp.get("model") and not existing.get("model"):
                     existing["model"] = fp["model"]
-                existing.setdefault("vendor", dev.get("vendor") or fp.get("vendor") or "TP-Link")
+                existing.setdefault("vendor", dev.get("vendor") or fp.get("vendor") or "")
                 existing.setdefault("role", "Main Gateway" if d_ip == primary_ip else "Secondary Router")
                 by_ip[d_ip] = existing
 
@@ -1526,7 +1526,7 @@ class ProbesMixin:
             stats["probeMethod"] = method
 
             hb_msg = (
-                f"200 - OK • {method} reply from {t_host} ({t_ip}) in {latency} ms"
+                f"{method} reply from {t_host} ({t_ip}) in {latency} ms"
                 if alive
                 else f"No response from {t_host} ({t_ip}:{t_port}) over ICMP or TCP"
             )
@@ -1575,7 +1575,7 @@ class ProbesMixin:
                 elif latency is not None and latency > 120:
                     log_msg = f"High ping spike on {t_name} ({t_ip}) — {latency} ms response ({method})"
                 else:
-                    log_msg = f"200 - OK • {t_name} ({t_ip}) online ({latency} ms via {method})"
+                    log_msg = f"{t_name} ({t_ip}) online ({latency} ms via {method})"
                 entry_item = {
                     "status": curr_status,
                     "dateTime": now_full,
@@ -1710,11 +1710,11 @@ class ProbesMixin:
             if not gw_alive:
                 return {
                     "verdict": "CRITICAL",
-                    "headline": f"Cannot Reach Main Router ({gateway_ip}) — Local Network Disconnected",
-                    "bottleneckLayer": f"Office Network / Main Router ({gateway_ip})",
+                    "headline": "Gateway and external targets did not answer",
+                    "bottleneckLayer": "Undetermined",
                     "summary": (
-                        f"This computer cannot reach Main Router ({gateway_ip}). "
-                        "The issue is your local cable or Wi-Fi connection rather than your internet provider."
+                        f"This monitor received no reply from {gateway_ip} or the external targets. "
+                        "Check the local connection and whether the gateway allows these probes."
                     ),
                     "solutions": [
                         f"Check power and network cables on Main Router ({gateway_ip}) and your office switch.",
@@ -1724,16 +1724,15 @@ class ProbesMixin:
                 }
             return {
                 "verdict": "CRITICAL",
-                "headline": "Internet Connection Down — Office Router Is On, No Outside Internet",
-                "bottleneckLayer": "Internet Provider (Modem / Fiber Box)",
+                "headline": "Gateway reachable; external targets did not answer",
+                "bottleneckLayer": "External reachability",
                 "summary": (
-                    f"Main Router ({gateway_ip}) is working inside the office ({gw_latency} ms), "
-                    "but outside servers (1.1.1.1, 8.8.8.8, and google.com) are not responding."
+                    f"The gateway ({gateway_ip}) answered this monitor. None of the external "
+                    "targets answered the configured probes during this check."
                 ),
                 "solutions": [
-                    "Check your internet fiber modem/box — look for a red blinking light.",
-                    f"Unplug and firmly reconnect the internet cable between the modem and Main Router ({gateway_ip}).",
-                    "Restart the internet modem for 30 seconds; if the red light stays on, contact your internet provider.",
+                    "Compare with another client on this network and check the router's WAN status.",
+                    "Repeat the check to see whether external reachability recovers.",
                 ],
             }
 
